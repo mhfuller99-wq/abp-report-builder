@@ -1,0 +1,10 @@
+services:
+  - type: web
+    name: abp-tab-report-builder
+    runtime: docker
+    plan: starter
+    envVars:
+      - key: ABP_ACCESS_PASSWORD
+        sync: false
+      - key: PYTHONUNBUFFERED
+        value: "1"
