@@ -459,11 +459,14 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self):
         path=urlsplit(self.path).path
         # Login uses a same-site double-submit token instead of a proxy-sensitive Origin check.
+        # Browser origin headers can be altered by proxy/browser navigation.
+        # Prevent cross-site logout via Fetch Metadata; session cookie is SameSite=Lax.
+        if path=='/logout':
+            if self.headers.get('Sec-Fetch-Site','').lower()=='cross-site':
+                self.respond(b'{"error":"Cross-site logout not permitted"}',code=403);return
+            self.redirect('/login',[('Set-Cookie',self.session_cookie('',0))]);return
         if path!='/login' and not self.same_origin():
             self.respond(b'{"error":"Request origin not allowed"}',code=403);return
-        if path=='/logout':
-            if not self.authorized():self.redirect('/login');return
-            self.redirect('/login',[('Set-Cookie',self.session_cookie('',0))]);return
         if path=='/login':
             try:
                 n=int(self.headers.get('Content-Length','0'))
