@@ -99,21 +99,21 @@ def read_sources(blobs):
 # These labels only suggest which original ABP workbook to include.
 # They do not verify equipment quantities, schedules, or field measurements.
 SCHEDULE_SIGNALS={
- 'diffusers':re.compile(r'\\b(?:SUPPLY|RETURN|EXHAUST)\\s+(?:AIR\\s+)?(?:DIFFUSER|GRILLE|REGISTER)\\s+SCHEDULE\\b|\\bAIR\\s+DEVICE\\s+SCHEDULE\\b',re.I),
- 'exhaust_grilles':re.compile(r'\\bEXHAUST\\s+(?:AIR\\s+)?GRILLE\\s+SCHEDULE\\b',re.I),
- 'erv':re.compile(r'\\b(?:ENERGY\\s+RECOVERY\\s+VENTILATOR|ERV)\\s+SCHEDULE\\b',re.I),
- 'fan_coil':re.compile(r'\\bFAN\\s+COIL\\s+(?:UNIT\\s+)?SCHEDULE\\b',re.I),
- 'water_coil':re.compile(r'\\b(?:HOT\\s+WATER|CHILLED\\s+WATER|HYDRONIC)\\s+COIL\\s+SCHEDULE\\b',re.I),
- 'cooling_tower':re.compile(r'\\bCOOLING\\s+TOWER\\s+SCHEDULE\\b',re.I),
- 'boiler':re.compile(r'\\bBOILER\\s+SCHEDULE\\b',re.I),
- 'chiller':re.compile(r'\\bCHILLER\\s+SCHEDULE\\b',re.I),
- 'kitchen_hood':re.compile(r'\\bKITCHEN\\s+(?:EXHAUST\\s+)?HOOD\\s+SCHEDULE\\b',re.I),
- 'heat_exchanger':re.compile(r'\\bHEAT\\s+EXCHANGER\\s+SCHEDULE\\b',re.I),
- 'filter_unit':re.compile(r'\\bFAN\\s+FILTER\\s+UNIT\\s+SCHEDULE\\b',re.I),
- 'hydronic':re.compile(r'\\b(?:BALANCING\\s+VALVE|AUTO[- ]FLOW)\\s+SCHEDULE\\b',re.I),
- 'dehumidifier':re.compile(r'\\bDEHUMIDIFIER\\s+SCHEDULE\\b',re.I),
- 'air_moving':re.compile(r'\\b(?:AIR\\s+HANDLING\\s+UNIT|ROOFTOP\\s+UNIT|SUPPLY\\s+FAN|MAKEUP\\s+AIR\\s+UNIT)\\s+SCHEDULE\\b',re.I),
- 'exhaust_fan':re.compile(r'\\bEXHAUST\\s+FAN\\s+SCHEDULE\\b',re.I),
+ 'diffusers':re.compile(r'\b(?:SUPPLY|RETURN|EXHAUST)\s+(?:AIR\s+)?(?:DIFFUSER|GRILLE|REGISTER)\s+SCHEDULE\b|\bAIR\s+DEVICE\s+SCHEDULE\b',re.I),
+ 'exhaust_grilles':re.compile(r'\bEXHAUST\s+(?:AIR\s+)?GRILLE\s+SCHEDULE\b',re.I),
+ 'erv':re.compile(r'\b(?:ENERGY\s+RECOVERY\s+VENTILATOR|ERV)\s+SCHEDULE\b',re.I),
+ 'fan_coil':re.compile(r'\bFAN\s+COIL\s+(?:UNIT\s+)?SCHEDULE\b',re.I),
+ 'water_coil':re.compile(r'\b(?:HOT\s+WATER|CHILLED\s+WATER|HYDRONIC)\s+COIL\s+SCHEDULE\b',re.I),
+ 'cooling_tower':re.compile(r'\bCOOLING\s+TOWER\s+SCHEDULE\b',re.I),
+ 'boiler':re.compile(r'\bBOILER\s+SCHEDULE\b',re.I),
+ 'chiller':re.compile(r'\bCHILLER\s+SCHEDULE\b',re.I),
+ 'kitchen_hood':re.compile(r'\bKITCHEN\s+(?:EXHAUST\s+)?HOOD\s+SCHEDULE\b',re.I),
+ 'heat_exchanger':re.compile(r'\bHEAT\s+EXCHANGER\s+SCHEDULE\b',re.I),
+ 'filter_unit':re.compile(r'\bFAN\s+FILTER\s+UNIT\s+SCHEDULE\b',re.I),
+ 'hydronic':re.compile(r'\b(?:BALANCING\s+VALVE|AUTO[- ]FLOW)\s+SCHEDULE\b',re.I),
+ 'dehumidifier':re.compile(r'\bDEHUMIDIFIER\s+SCHEDULE\b',re.I),
+ 'air_moving':re.compile(r'\b(?:AIR\s+HANDLING\s+UNIT|ROOFTOP\s+UNIT|SUPPLY\s+FAN|MAKEUP\s+AIR\s+UNIT)\s+SCHEDULE\b',re.I),
+ 'exhaust_fan':re.compile(r'\bEXHAUST\s+FAN\s+SCHEDULE\b',re.I),
 }
 def suggested_templates(tags,signals=None):
     """Return explained recommendations; always allow manual override in UI."""
@@ -126,7 +126,7 @@ def suggested_templates(tags,signals=None):
     for name in ('Project Information.xlsx','Notes.xlsx','PRE-TAB Checklist.xlsx'):
         add(name,'Core project documentation')
     def tagged(prefixes):
-        return any(re.match(r'^(?:'+prefixes+r')[- ]?\\d',tag) for tag in tags)
+        return any(re.match(r'^(?:'+prefixes+r')[- ]?\d',tag) for tag in tags)
     if tagged('AHU|RTU|OAU|DOAS|MAU|AC|SF|RF|CRU') or 'air_moving' in signals:
         add('Air Moving Equipment.xlsx','Air-moving equipment tags or schedule heading')
     if tagged('EF') or 'exhaust_fan' in signals:
