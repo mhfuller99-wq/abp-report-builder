@@ -386,8 +386,14 @@ class Handler(BaseHTTPRequestHandler):
         origin=self.headers.get('Origin')
         if not origin:return True
         try:
-            host=self.headers.get('Host','')
-            return urlsplit(origin).netloc.lower()==host.lower() and urlsplit(origin).scheme in ('http','https')
+            parsed=urlsplit(origin)
+            if parsed.username or parsed.password or parsed.path or parsed.query or parsed.fragment:return False
+            # Render terminates HTTPS before forwarding requests to the container.
+            # Trust the known public site URL rather than the proxy's internal Host.
+            public_origin=os.environ.get('ABP_PUBLIC_ORIGIN','https://abp-report-builder-hie0.onrender.com').rstrip('/')
+            if origin.lower()==public_origin.lower():return True
+            # Preserve the previous behavior for the optional private LAN mode.
+            return parsed.scheme in ('http','https') and parsed.netloc.lower()==self.headers.get('Host','').lower()
         except ValueError:return False
     def gate(self):
         if self.authorized():return False
