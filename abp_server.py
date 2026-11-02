@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """ABP local report builder. Uses original workbook templates; no cloud upload."""
-import io,json,re,sys,zipfile,html,datetime,hashlib,math,csv,os,secrets,base64,ipaddress,socket
+import io,json,re,sys,zipfile,html,datetime,hashlib,hmac,time,math,csv,os,secrets,base64,ipaddress,socket,threading
 from pathlib import Path
 from http.server import ThreadingHTTPServer,BaseHTTPRequestHandler
-from urllib.parse import unquote
+from urllib.parse import unquote,parse_qs,urlsplit
 from openpyxl import Workbook,load_workbook
 from openpyxl.workbook.properties import CalcProperties
 from openpyxl.styles import Font,PatternFill
@@ -328,23 +328,73 @@ $('saveproject').onclick=()=>{const data=JSON.stringify({format:'ABP-PREFIELD-RE
 $('loadproject').onchange=async ev=>{try{const f=ev.target.files[0];if(!f)return;if(f.size>2000000)throw Error('Project review file exceeds 2 MB');const data=JSON.parse(await f.text());if(data.format!=='ABP-PREFIELD-REVIEW'||data.version!==1||!Array.isArray(data.records)||data.records.length>500||!Array.isArray(data.templates))throw Error('Invalid ABP project review');$('project').value=String(data.project||'');$('location').value=String(data.location||'');$('standard').value=data.standard==='USACE'?'USACE':'Commercial';records=data.records;tags=records.map(r=>r.tag);document.querySelectorAll('.template input').forEach(x=>x.checked=data.templates.includes(x.value));renderReview();$('status').textContent='Saved review restored. Recheck verification and source revisions before generating.'}catch(e){$('status').textContent=e.message}};
 $('generate').onclick=async()=>{let payload=projectPayload();$('generate').disabled=true;$('status').textContent='Building workbook...';try{let r=await fetch('/api/build',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});if(!r.ok){let e=await r.json();throw Error(e.error)}let blob=await r.blob(),url=URL.createObjectURL(blob),a=document.createElement('a');a.href=url;a.download=(payload.project.replace(/[^a-z0-9_-]+/gi,'_')||'ABP')+'_PreField_TAB.xlsx';a.click();setTimeout(()=>URL.revokeObjectURL(url),10000);$('status').textContent='DRAFT workbook generated. Check all source revisions, flagged records, and formulas before field use.'}catch(e){$('status').textContent=e.message}finally{$('generate').disabled=false}};
 </script></html>'''
-# LAN mode is explicitly opt-in. HTTP Basic credentials protect the entire app, not only API calls.
+# LAN mode is explicitly opt-in. Authenticated session cookies protect the app and API routes.
 LAN_MODE = '--lan' in sys.argv
 ACCESS_PASSWORD = os.environ.get('ABP_ACCESS_PASSWORD', '')
+
+# Stateless HMAC-signed session cookies; changing ABP_ACCESS_PASSWORD revokes existing sessions.
+SESSION_LIFETIME=8*60*60
+FAILED_LOGINS={}
+LOGIN_LOCK=threading.Lock()
+LOGIN_HTML='''<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Sign in · ABP Report Builder</title><style>
+:root{font-family:system-ui,-apple-system,"Segoe UI",Arial,sans-serif;color:#183653;background:#f2f6fb}
+*{box-sizing:border-box}body{margin:0;min-height:100vh;display:grid;place-items:center;padding:20px;background:linear-gradient(135deg,#edf5fc,#f8fafc)}
+.panel{max-width:420px;width:100%;background:white;padding:35px 32px 30px;border:1px solid #dce7f2;border-radius:18px;box-shadow:0 14px 44px #14385d17}
+.logo{width:245px;max-width:100%;height:80px;object-fit:contain;object-position:left center}.tag{font-size:11px;font-weight:750;letter-spacing:1.4px;text-transform:uppercase;color:#2377bd;margin:17px 0 5px}
+h1{margin:0 0 7px;font-size:26px;letter-spacing:-.6px}p{color:#64788d;font-size:14px;line-height:1.55;margin:0 0 24px}
+label{display:block;font-weight:650;font-size:13px;margin:15px 0 6px}input{width:100%;min-height:47px;border:1px solid #c7d5e4;border-radius:9px;font:inherit;padding:11px 13px;background:#fff;color:#132f4d}
+input:focus{outline:3px solid #b9d9fb;border-color:#2772be}button{width:100%;border:0;background:#145ca9;color:white;border-radius:9px;font-size:15px;font-weight:750;min-height:47px;cursor:pointer;margin-top:23px}
+button:hover{background:#0d4789}.error{padding:12px;background:#fff0ed;border:1px solid #f4c8c0;color:#a03427;border-radius:9px;font-size:13px;margin-top:15px}
+.note{color:#6c7f90;font-size:12px;border-top:1px solid #e1e9f2;margin-top:25px;padding-top:18px;line-height:1.5}@media(max-width:480px){.panel{padding:26px 22px}}
+</style></head><body><main class="panel"><img class="logo" src="/logo.png" alt="Air Balance Professionals logo"><div class="tag">Secure reporting workspace</div>
+<h1>Welcome back</h1><p>Sign in to access the Air Balance Professionals TAB Report Builder.</p>
+{{ERROR}}<form action="/login" method="post"><label for="user">Username</label><input id="user" name="username" autocomplete="username" required autofocus placeholder="Enter your username">
+<label for="pass">Password</label><input id="pass" name="password" type="password" autocomplete="current-password" required placeholder="Enter your password">
+<button type="submit">Sign in to Report Builder</button></form><div class="note">Access is limited to authorized ABP team members. Contact your administrator for your credentials.</div></main></body></html>'''
 class Handler(BaseHTTPRequestHandler):
+    def secure_request(self):
+        return self.headers.get('X-Forwarded-Proto','').split(',')[0].strip().lower()=='https'
+    def session_cookie(self,token,max_age=SESSION_LIFETIME):
+        secure='; Secure' if self.secure_request() else ''
+        return 'abp_session='+token+'; HttpOnly; SameSite=Lax; Path=/; Max-Age='+str(max_age)+secure
+    def session_signature(self,stamp):
+        secret=hashlib.sha256(('abp-session-v1:'+ACCESS_PASSWORD).encode()).digest()
+        return hmac.new(secret,stamp.encode(),hashlib.sha256).hexdigest()
     def authorized(self):
         if not LAN_MODE:return True
-        header=self.headers.get('Authorization','')
-        expected='Basic '+base64.b64encode(('abp:'+ACCESS_PASSWORD).encode()).decode()
-        return bool(ACCESS_PASSWORD) and secrets.compare_digest(header,expected)
+        cookie=self.headers.get('Cookie','')
+        match=re.search(r'(?:^|;\s*)abp_session=(\d{1,12})\.([a-f0-9]{64})(?:;|$)',cookie)
+        if not match or not ACCESS_PASSWORD:return False
+        stamp,signature=match.groups()
+        try:
+            age=time.time()-int(stamp)
+            return 0<=age<SESSION_LIFETIME and secrets.compare_digest(signature,self.session_signature(stamp))
+        except (ValueError,OverflowError):return False
+    def redirect(self,url,extra_headers=None):
+        self.send_response(303)
+        self.send_header('Location',url)
+        self.send_header('Cache-Control','no-store')
+        self.send_header('Content-Length','0')
+        if extra_headers:
+            for k,v in extra_headers:self.send_header(k,v)
+        self.end_headers()
+    def login_page(self,error=False):
+        notice='<div class="error" role="alert">Incorrect username or password. Please try again.</div>' if error else ''
+        self.respond(LOGIN_HTML.replace('{{ERROR}}',notice).encode(),'text/html; charset=utf-8')
+    def same_origin(self):
+        origin=self.headers.get('Origin')
+        if not origin:return True
+        try:
+            host=self.headers.get('Host','')
+            return urlsplit(origin).netloc.lower()==host.lower() and urlsplit(origin).scheme in ('http','https')
+        except ValueError:return False
     def gate(self):
         if self.authorized():return False
-        self.send_response(401)
-        self.send_header('WWW-Authenticate','Basic realm="ABP Mobile - Private LAN"')
-        self.send_header('Cache-Control','no-store')
-        self.send_header('X-Content-Type-Options','nosniff')
-        self.send_header('Content-Length','0')
-        self.end_headers()
+        path=urlsplit(self.path).path
+        if path.startswith('/api/'):
+            self.respond(b'{"error":"Your session has expired. Please sign in again."}',code=401)
+        else:self.redirect('/login')
         return True
 
     def respond(self,data,typ='application/json',code=200,filename=None):
@@ -352,24 +402,60 @@ class Handler(BaseHTTPRequestHandler):
         if filename:self.send_header('Content-Disposition','attachment; filename="'+filename+'"')
         self.end_headers();self.wfile.write(data)
     def do_GET(self):
-        if self.gate():return
-        if self.path.split('?',1)[0]=='/':self.respond(PAGE.encode(),'text/html; charset=utf-8')
-        elif self.path.split('?',1)[0]=='/logo.png':
+        path=urlsplit(self.path).path
+        if path=='/logo.png':
             logo=ROOT/'04_Company_Branding/ABP_Company_Logo.png'
             if logo.is_file():self.respond(logo.read_bytes(),'image/png')
             else:self.respond(b'Logo not installed','text/plain',404)
+            return
+        if path=='/login':
+            if self.authorized():self.redirect('/')
+            else:self.login_page()
+            return
+        if self.gate():return
+        if self.path.split('?',1)[0]=='/':self.respond(PAGE.encode(),'text/html; charset=utf-8')
         elif self.path=='/api/templates':self.respond(json.dumps(list(LOOKUP)).encode())
         else:self.respond(b'Not found','text/plain',404)
     def do_POST(self):
+        path=urlsplit(self.path).path
+        if not self.same_origin():
+            self.respond(b'{"error":"Request origin not allowed"}',code=403);return
+        if path=='/logout':
+            self.redirect('/login',[('Set-Cookie',self.session_cookie('',0))]);return
+        if path=='/login':
+            try:
+                n=int(self.headers.get('Content-Length','0'))
+                if n<1 or n>4096:raise ValueError('Invalid login request')
+                data=parse_qs(self.rfile.read(n).decode('utf-8','replace'),keep_blank_values=True)
+                user=data.get('username',[''])[0]
+                password=data.get('password',[''])[0]
+                remote=self.client_address[0]
+                now=time.time()
+                with LOGIN_LOCK:
+                    attempts=[t for t in FAILED_LOGINS.get(remote,[]) if now-t<300]
+                    FAILED_LOGINS[remote]=attempts
+                    limited=len(attempts)>=12
+                valid=not limited and secrets.compare_digest(user,'abp') and bool(ACCESS_PASSWORD) and secrets.compare_digest(password,ACCESS_PASSWORD)
+                if valid:
+                    with LOGIN_LOCK:FAILED_LOGINS.pop(remote,None)
+                    stamp=str(int(now))
+                    token=stamp+'.'+self.session_signature(stamp)
+                    self.redirect('/',[('Set-Cookie',self.session_cookie(token))])
+                else:
+                    with LOGIN_LOCK:FAILED_LOGINS.setdefault(remote,[]).append(now)
+                    self.login_page(error=True)
+                return
+            except (ValueError,IndexError):
+                self.login_page(error=True);return
         if self.gate():return
         try:
             n=int(self.headers.get('Content-Length','0'))
             if n<0 or n>MAX_UPLOAD:raise ValueError('Upload limit is 40 MB')
             data=self.rfile.read(n)
-            if self.path=='/api/suggest':self.respond(json.dumps(suggested_templates(json.loads(data).get('tags',[]),json.loads(data).get('signals',[]))).encode());return
-            if self.path=='/api/build':
+            if path=='/api/suggest':self.respond(json.dumps(suggested_templates(json.loads(data).get('tags',[]),json.loads(data).get('signals',[]))).encode());return
+            if path=='/api/build':
                 payload=json.loads(data);out=build(payload);self.respond(out,'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',filename='ABP_PreField_TAB.xlsx');return
-            if self.path=='/api/scan':
+            if path=='/api/scan':
                 from email.parser import BytesParser
                 from email.policy import default
                 ct=self.headers.get('Content-Type','')
@@ -389,5 +475,5 @@ if __name__=='__main__':
     if LAN_MODE:
         print('Android: use http://YOUR_WINDOWS_WIFI_IP:'+str(port))
         print('Username: abp | Password: the ABP_ACCESS_PASSWORD you set')
-        print('WARNING: HTTP Basic authentication is not encrypted. Use only on a trusted private Wi-Fi network, never on public Wi-Fi or the open Internet. Do not port-forward.')
+        print('WARNING: On local Wi-Fi, HTTP is not encrypted. Use HTTPS for any internet deployment.')
     ThreadingHTTPServer((host,port),Handler).serve_forever()
