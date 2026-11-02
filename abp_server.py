@@ -330,7 +330,9 @@ $('generate').onclick=async()=>{let payload=projectPayload();$('generate').disab
 </script></html>'''
 # LAN mode is explicitly opt-in. Authenticated session cookies protect the app and API routes.
 LAN_MODE = '--lan' in sys.argv
-ACCESS_PASSWORD = os.environ.get('ABP_ACCESS_PASSWORD', '')
+ACCESS_PASSWORD = os.environ.get('ABP_ACCESS_PASSWORD', '').strip()
+# Do not log passwords or password-derived fingerprints.
+print('ABP auth configuration: '+('password loaded' if ACCESS_PASSWORD else 'PASSWORD MISSING'), flush=True)
 
 # Stateless HMAC-signed session cookies; changing ABP_ACCESS_PASSWORD revokes existing sessions.
 SESSION_LIFETIME=8*60*60
@@ -444,8 +446,8 @@ class Handler(BaseHTTPRequestHandler):
                 n=int(self.headers.get('Content-Length','0'))
                 if n<1 or n>4096:raise ValueError('Invalid login request')
                 data=parse_qs(self.rfile.read(n).decode('utf-8','replace'),keep_blank_values=True)
-                user=data.get('username',[''])[0]
-                password=data.get('password',[''])[0]
+                user=data.get('username',[''])[0].strip()
+                password=data.get('password',[''])[0].strip()
                 if not self.valid_login_csrf(data.get('csrf',[''])[0]):
                     self.login_page(error='session');return
                 remote=self.client_address[0]
