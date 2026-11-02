@@ -139,6 +139,10 @@ def reset_measurements(ws):
         if ws['H24'].data_type == 'f':
             ws['H24'] = '=IF(H18=1,IF(COUNT(I17,I20)<2,"",I17*I20*0.8*0.9/746),IF(H18=3,IF(COUNT(H17:J17,H20:J20)<6,"",AVERAGE(H17:J17)*AVERAGE(H20:J20)*0.8*0.9*1.732/746),""))'
     if kind == 'EXHAUST FAN':
+        if ws['U19'].data_type == 'f':
+            ws['U19'] = '=IF(OR(U5="",U6="",U18=""),"",IF(U18=3,IF(COUNT(U17,W17,Y17)<3,"",IF(AVERAGE(U17,W17,Y17)=0,"",U5*U6/AVERAGE(U17,W17,Y17))),IF(U18=1,IF(OR(W17="",W17=0),"",U5*U6/W17),"")))'
+        if ws['U24'].data_type == 'f':
+            ws['U24'] = '=IF(U18=1,IF(COUNT(W17,W20)<2,"",W17*W20*0.8*0.9/746),IF(U18=3,IF(COUNT(U17,W17,Y17,U20,W20,Y20)<6,"",AVERAGE(U17,W17,Y17)*AVERAGE(U20,W20,Y20)*0.8*0.9*1.732/746),""))'
         for target, a, b in [('K20','I29','Q29'), ('K21','B29','X29')]:
             if ws[target].data_type == 'f':
                 ws[target] = f'=IF(OR({a}="",{b}=""),"",IF({a}<0,ABS({a}),-ABS({a}))+{b})'
