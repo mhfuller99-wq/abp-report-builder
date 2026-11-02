@@ -380,7 +380,7 @@ class Handler(BaseHTTPRequestHandler):
             for k,v in extra_headers:self.send_header(k,v)
         self.end_headers()
     def login_page(self,error=False):
-        notice='<div class="error" role="alert">Incorrect username or password. Please try again.</div>' if error else ''
+        notice=('<div class="error" role="alert">Login form expired or blocked by your browser. Open a fresh sign-in tab and try again.</div>' if error=='session' else '<div class="error" role="alert">Too many attempts. Wait five minutes before trying again.</div>' if error=='limited' else '<div class="error" role="alert">Username or password not accepted. Username is abp; check the current password in Render.</div>') if error else ''
         csrf=secrets.token_urlsafe(32)
         html_page=LOGIN_HTML.replace('{{ERROR}}',notice).replace('{{CSRF}}',csrf)
         secure='; Secure' if self.secure_request() else ''
@@ -447,7 +447,7 @@ class Handler(BaseHTTPRequestHandler):
                 user=data.get('username',[''])[0]
                 password=data.get('password',[''])[0]
                 if not self.valid_login_csrf(data.get('csrf',[''])[0]):
-                    self.login_page(error=True);return
+                    self.login_page(error='session');return
                 remote=self.client_address[0]
                 now=time.time()
                 with LOGIN_LOCK:
@@ -462,10 +462,10 @@ class Handler(BaseHTTPRequestHandler):
                     self.redirect('/',[('Set-Cookie',self.session_cookie(token))])
                 else:
                     with LOGIN_LOCK:FAILED_LOGINS.setdefault(remote,[]).append(now)
-                    self.login_page(error=True)
+                    self.login_page(error='limited' if limited else 'credentials')
                 return
             except (ValueError,IndexError):
-                self.login_page(error=True);return
+                self.login_page(error='session');return
         if self.gate():return
         try:
             n=int(self.headers.get('Content-Length','0'))
