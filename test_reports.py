@@ -79,7 +79,8 @@ class ReportTests(unittest.TestCase):
         names=[r['name'] for r in suggested_templates(['BCU-1','CH-1'])['recommended']]
         self.assertIn('Fan Coil Units WTR.xlsx',names)
         self.assertIn('Chiller - Air Cooled.xlsx',names)
-        self.assertNotIn('Fan Coil Units DX.xlsx',names)
+        # Archive examples show that a tag alone does not settle coil type.
+        self.assertIn('Fan Coil Units DX.xlsx',names)
 
     def test_grouped_design_preserved_actuals_reset(self):
         wb=Workbook();ws=wb.active;ws.title='FAN COIL UNITS WTR'

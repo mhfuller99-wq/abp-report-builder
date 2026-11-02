@@ -35,9 +35,42 @@ rather than silently leaving historical field measurements in the output.
 
 Source-document mode remains a reviewed text-extraction workflow, not a complete
 automatic drawing takeoff. BC, BCU, CH and pump tags are now recognized, and BCU/BC
-tags recommend the water-coil template. KH, KEF and TEF tags also recommend
+tags offer water/DX coil templates for review. KH, KEF and TEF tags also recommend
 appropriate hood or exhaust forms. Different tag names across plans and
 submittals are not automatically treated as the same equipment. Schedule tables
 stored as drawing graphics still require review.
 
 Run `python -m unittest -v test_reports.py` for regression checks.
+
+## Rules derived from the project archive
+
+The local archive review identifies recurring equipment designations and report
+layouts. It does not train a language model, make old readings into new design
+values, or upload the archive to the hosted app. Client files, file inventories,
+report fingerprints and extraction audits remain in the local workspace.
+
+Source mode can now read explicitly labeled design cells from CSV/XLSX schedules
+and repeating Design/Actual report panels. Each candidate retains its source
+file and cell address. Actual, measured, initial and final columns are excluded;
+formula cells without independent reviewed values are not guessed. Different
+revision values remain separate candidates. **Use undisputed candidates** fills
+only empty review fields with a single agreed candidate and keeps the record
+Unverified. Verify the current job's design before building.
+
+Equipment prefixes are recommendations, not proof of equipment type. Select a
+unit form in each review row. Supported automatic unit forms are air-moving
+equipment, standard/small exhaust fans, water/DX fan coils, kitchen hoods and
+air-cooled chillers (design GPM). A verified record with no supported selected
+form fails clearly instead of silently disappearing from the report. Pumps,
+VAVs and other unsupported unit layouts need an approved reference or manually
+prepared worksheets. Supporting coil, diffuser and traverse forms can be
+included separately; they are not automatically allocated to every unit.
+
+The source reader remains text based. Graphic/scanned schedules require manual
+takeoff; sparse pages with no readable tags are flagged. The hosted website
+cannot browse the computer's OneDrive folders. Upload the current job's files
+or use an approved same-job reference. Historical jobs never supply default
+equipment quantities, manufacturer/model values, or airflow requirements for
+an unrelated new job.
+
+Run `python -m unittest -v test_reports.py test_design.py` for the complete suite.
