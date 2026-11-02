@@ -383,15 +383,25 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
     def login_page(self,error=False):
         notice=('<div class="error" role="alert">Login form expired or blocked by your browser. Open a fresh sign-in tab and try again.</div>' if error=='session' else '<div class="error" role="alert">Too many attempts. Wait five minutes before trying again.</div>' if error=='limited' else '<div class="error" role="alert">Username or password not accepted. Username is abp; check the current password in Render.</div>') if error else ''
-        csrf=secrets.token_urlsafe(32)
+        # Signed, short-lived form token avoids cookies being overwritten by another tab.
+        stamp=str(int(time.time()))
+        nonce=secrets.token_hex(16)
+        payload=stamp+'.'+nonce
+        key=hashlib.sha256(('abp-login-csrf-v2:'+ACCESS_PASSWORD).encode()).digest()
+        signature=hmac.new(key,payload.encode(),hashlib.sha256).hexdigest()
+        csrf=payload+'.'+signature
         html_page=LOGIN_HTML.replace('{{ERROR}}',notice).replace('{{CSRF}}',csrf)
-        secure='; Secure' if self.secure_request() else ''
-        cookie='abp_login_csrf='+csrf+'; HttpOnly; SameSite=Strict; Path=/login; Max-Age=1200'+secure
-        self.respond(html_page.encode(),'text/html; charset=utf-8',extra_headers=[('Set-Cookie',cookie)])
+        self.respond(html_page.encode(),'text/html; charset=utf-8')
     def valid_login_csrf(self,value):
-        cookie=self.headers.get('Cookie','')
-        match=re.search(r'(?:^|;\s*)abp_login_csrf=([A-Za-z0-9_-]{20,80})(?:;|$)',cookie)
-        return bool(match and value and secrets.compare_digest(match.group(1),value))
+        if not isinstance(value,str):return False
+        match=re.fullmatch(r'(\d{10})\.([a-f0-9]{32})\.([a-f0-9]{64})',value)
+        if not match:return False
+        stamp,nonce,signature=match.groups()
+        age=time.time()-int(stamp)
+        if not 0<=age<3600:return False
+        key=hashlib.sha256(('abp-login-csrf-v2:'+ACCESS_PASSWORD).encode()).digest()
+        expected=hmac.new(key,(stamp+'.'+nonce).encode(),hashlib.sha256).hexdigest()
+        return secrets.compare_digest(signature,expected)
     def same_origin(self):
         origin=self.headers.get('Origin')
         if not origin:return True
