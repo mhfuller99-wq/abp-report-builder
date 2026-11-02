@@ -14,6 +14,63 @@ def packed(wb):
 
 
 class ReportTests(unittest.TestCase):
+    def test_restaurant_repeated_forms_are_pre_field(self):
+        wb=Workbook();ws=wb.active;ws.title='AIR MOVING EQUIPMENT'
+        for off in (0,43):
+            for col,row,value in [('A',3,'UNIT DESIGNATION'),('G',3,f'RTU-{off+1}'),
+                                  ('G',7,'old serial'),('G',17,1800),('J',17,1774),
+                                  ('A',29,-.5),('W',29,.3),('T',17,208),('T',18,3),
+                                  ('T',20,5),('J',37,'DIRTY'),('N',36,'Old observation'),
+                                  ('A',42,'TECHNICIAN:'),('E',42,'Old tech'),
+                                  ('Q',42,'TEST DATE:'),('U',42,'Old date')]:
+                ws[f'{col}{row+off}']=value
+        hood=wb.create_sheet('KITCHEN HOOD')
+        for cell,val in {'A3':'UNIT DESIGNATION','D3':'KH-1','D6':2500,'J3':'16X16',
+                         'D11':118,'D12':2.1,'D13':'=D11*D12','D7':'=SUM(D13:M13)',
+                         'K7':'VELGRID'}.items():hood[cell]=val
+        traverse=wb.create_sheet('DUCT TRAVERSE RECT.')
+        for cell,val in {'L3':1550,'L7':28,'M7':18,'N7':'=M7*L7/144','B10':394,
+                         'N4':'=AVERAGE(B10:O18)','N3':'=N4*N7'}.items():traverse[cell]=val
+        small=wb.create_sheet('EXHAUST FANS SMALL')
+        for cell,val in {'A3':'UNIT DESIGNATION','C3':'TEF-1','C9':'DESIGN','D9':'ACTUAL',
+                         'C10':100,'D10':58,'D11':'--'}.items():small[cell]=val
+        result=load_workbook(io.BytesIO(build_reference(packed(wb),'Example')))
+        for off in (0,43):
+            self.assertEqual(result.worksheets[0][f'G{17+off}'].value,1800)
+            for col,row in [('G',7),('J',17),('A',29),('W',29),('T',17),('T',18),
+                            ('T',20),('J',37),('N',36),('E',42),('U',42)]:
+                self.assertIsNone(result.worksheets[0][f'{col}{row+off}'].value)
+            self.assertEqual(result.worksheets[0][f'Q{42+off}'].value,'TEST DATE:')
+        self.assertEqual(result['KITCHEN HOOD']['D6'].value,2500)
+        self.assertIsNone(result['KITCHEN HOOD']['D12'].value)
+        self.assertIn('COUNT(D11)',result['KITCHEN HOOD']['D13'].value)
+        self.assertIsNone(result['DUCT TRAVERSE RECT.']['B10'].value)
+        self.assertEqual(result['DUCT TRAVERSE RECT.']['N7'].value,'=M7*L7/144')
+        self.assertIsNone(result['EXHAUST FANS SMALL']['D10'].value)
+        self.assertLessEqual(result['EXHAUST FANS SMALL'].max_row,16)
+
+    def test_cover_is_not_certified_and_old_certificates_removed(self):
+        wb=Workbook();ws=wb.active;ws.title='Cover '
+        ws['A7']='CERTIFIED\nANALYSIS REPORT';ws['A5']='Old report date'
+        ws['B30']='These measurements are certified accurate.'
+        ws['B37']='APPROVED BY:';ws['B39']='Old approver'
+        inst=wb.create_sheet('INSTRUMENT');inst['A3']='Instrument';inst['A4']='Manometer'
+        inst['D4']='Old serial';inst['E4']='Old calibration date'
+        unit=wb.create_sheet('EXHAUST FAN');unit['B3']='UNIT DESIGNATION';unit['H3']='KEF-1'
+        result=load_workbook(io.BytesIO(build_reference(packed(wb),'Example')))
+        self.assertIn('PRE-FIELD',result['Cover ']['A7'].value)
+        self.assertIsNone(result['Cover ']['B39'].value)
+        self.assertIn('pending',result['Cover ']['B30'].value)
+        self.assertIsNone(result['INSTRUMENT']['D4'].value)
+        self.assertEqual(result['INSTRUMENT']['A4'].value,'Manometer')
+
+    def test_restaurant_tags(self):
+        self.assertEqual([m.group() for m in TAGS.finditer('KH-1 KEF-1 TEF-2 MAU-1')],
+                         ['KH-1','KEF-1','TEF-2','MAU-1'])
+        names=[r['name'] for r in suggested_templates(['KH-1','KEF-1','TEF-2'])['recommended']]
+        self.assertIn('Kitchen Hood.xlsx',names)
+        self.assertIn('Exhaust Fans _Std._.xlsx',names)
+
     def test_hydronic_tags_and_false_standard(self):
         self.assertEqual([m.group() for m in TAGS.finditer('BC-1 BCU-12 CH-1 P-1 FCU-3 RTU1')],
                          ['BC-1','BCU-12','CH-1','P-1','FCU-3','RTU1'])

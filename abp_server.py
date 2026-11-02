@@ -14,7 +14,7 @@ ROOT=Path(__file__).resolve().parent
 TEMPLATES=ROOT/'03_Workbooks_and_Master_Templates'
 FILES=[p for p in sorted(TEMPLATES.glob('*.xlsx')) if p.name not in {'Blue Mountain - TAB Report.xlsx','CAFB Egress Shop - TAB Report.xlsx','CALEDONIA FEILDHOUSE TAB REPORT.xlsx','Cadence  Bank- Starkville MS .xlsx','New Hope Fieldhouse.xlsx','WEST LOWNDES FIELDHOUSE .xlsx'}]
 LOOKUP={p.name:p for p in FILES}
-TAGS=re.compile(r'\b(?:(?:BCU|BC|CH|CHWP|HWP|CWP|P)[-\s]+|(?:AHU|RTU|OAU|DOAS|CRU|MAU|ERV|HRV|FCU|VAV|IU|AC|DSS|DCU|EF|SF|RF|EUH|EWH|CUH|UH|FFU|LF)[-\s]?)\d+(?:-[A-Z0-9]+)*\b',re.I)
+TAGS=re.compile(r'\b(?:(?:BCU|BC|CH|CHWP|HWP|CWP|P)[-\s]+|(?:AHU|RTU|OAU|DOAS|CRU|MAU|ERV|HRV|FCU|VAV|IU|AC|DSS|DCU|KEF|TEF|KH|EF|SF|RF|EUH|EWH|CUH|UH|FFU|LF)[-\s]?)\d+(?:-[A-Z0-9]+)*\b',re.I)
 MAX_RECORDS=500
 MAX_UPLOAD=40_000_000
 MAX_OUTPUT_ROWS=30000
@@ -131,7 +131,7 @@ def suggested_templates(tags,signals=None):
         return any(re.match(r'^(?:'+prefixes+r')[- ]?\d',tag) for tag in tags)
     if tagged('AHU|RTU|OAU|DOAS|MAU|AC|SF|RF|CRU') or 'air_moving' in signals:
         add('Air Moving Equipment.xlsx','Air-moving equipment tags or schedule heading')
-    if tagged('EF') or 'exhaust_fan' in signals:
+    if tagged('EF|KEF|TEF') or 'exhaust_fan' in signals:
         add('Exhaust Fans _Std._.xlsx','Exhaust fan tags or schedule heading')
     if tagged('FCU|IU|BCU|BC') or 'fan_coil' in signals:
         water=tagged('BCU|BC') or 'water_coil' in signals
@@ -150,7 +150,7 @@ def suggested_templates(tags,signals=None):
     if 'boiler' in signals:add('Boiler.xlsx','Boiler schedule heading')
     if 'chiller' in signals:
         add('Chiller - Air Cooled.xlsx','Chiller schedule; confirm air or water cooling',True)
-    if 'kitchen_hood' in signals:add('Kitchen Hood.xlsx','Kitchen exhaust hood schedule heading')
+    if tagged('KH') or 'kitchen_hood' in signals:add('Kitchen Hood.xlsx','Kitchen exhaust hood tag or schedule heading')
     if 'heat_exchanger' in signals:add('Heat Exchanger.xlsx','Heat exchanger schedule heading')
     if 'hydronic' in signals:add('Hydronic BV - Auto-flow.xlsx','Hydronic balancing valve schedule',True)
     if 'dehumidifier' in signals:add('Dehumidifier.xlsx','Dehumidifier schedule heading')

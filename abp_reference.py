@@ -7,7 +7,9 @@ from openpyxl.cell.cell import MergedCell
 from openpyxl.workbook.properties import CalcProperties
 
 MAX_CELLS = 200_000
-SUPPORTED = ('CHILLER', 'FAN COIL', 'EXHAUST FAN', 'EXHAUST GRILL', 'PUMP',
+SUPPORTED = ('AIR MOVING EQUIPMENT', 'MAU', 'COIL DX GAS', 'SUPPLY DIFFUSERS',
+             'DUCT TRAVERSE RECT', 'KITCHEN HOOD', 'EXHAUST FANS SMALL',
+             'PROJECT SUMMARY', 'INSTRUMENT', 'CHILLER', 'FAN COIL', 'EXHAUST FAN', 'EXHAUST GRILL', 'PUMP',
              'NOTES', 'PROJECT INFO', 'COVER', 'ABBREVIATION', 'PRE-TAB')
 
 
@@ -22,6 +24,11 @@ def open_reference(data):
     wb = load_workbook(io.BytesIO(data), keep_links=False)
     if sum(s.max_row * s.max_column for s in wb) > MAX_CELLS:
         raise ValueError('Reference workbook has too many cells')
+    for ws in wb:
+        for row in ws:
+            for c in row:
+                if isinstance(c.value, str) and c.value.startswith(('\n=', '\r\n=')):
+                    c.value = c.value.lstrip()
     return wb
 
 
@@ -35,10 +42,10 @@ def inventory(wb):
     units = []
     for ws in wb:
         for row in ws:
-            label = next((c for c in row if str(c.value).strip().upper() == 'UNIT DESIGNATION'), None)
+            label = next((c for c in row if str(c.value).strip().upper() in ('UNIT DESIGNATION', 'COIL DESIGNATION')), None)
             if label:
                 for c in row[label.column:]:
-                    if c.value and c.data_type != 'f' and re.fullmatch(r'[A-Z]+[- ]\d+[A-Z]?', str(c.value).strip(), re.I):
+                    if c.value and c.data_type != 'f' and re.fullmatch(r'(?:[A-Z]+[- ]\d+[A-Z]?|MAU)', str(c.value).strip(), re.I):
                         units.append({'tag':str(c.value).strip(), 'sheet':ws.title, 'cell':c.coordinate})
     return units
 
@@ -64,8 +71,135 @@ def clear_value(cell):
         cell.value = None
 
 
+def reset_special_layout(ws):
+    """Reset supported ABP forms with measurement panels outside ACTUAL columns.
+
+    Coordinates are relative to repeated printed form headings, not job names.
+    Design columns, equipment identity, geometry and static diagrams stay intact.
+    """
+    kind = family(ws)
+    special = {'AIR MOVING EQUIPMENT', 'MAU', 'COIL DX GAS', 'SUPPLY DIFFUSERS',
+               'DUCT TRAVERSE RECT', 'KITCHEN HOOD', 'EXHAUST FANS SMALL',
+               'PROJECT SUMMARY', 'INSTRUMENT', 'COVER'}
+    if kind not in special:
+        return False
+
+    def blank(address):
+        for row in ws[address] if ':' in address else ((ws[address],),):
+            for c in row:
+                if isinstance(c, MergedCell):
+                    continue
+                if c.data_type == 'f':
+                    # Count referenced numeric inputs, including ranges. This keeps
+                    # calculated field outputs blank until every input is present.
+                    formula = c.value[1:]
+                    refs = re.findall(r'\$?[A-Z]{1,3}\$?\d+(?::\$?[A-Z]{1,3}\$?\d+)?', formula)
+                    if refs:
+                        from openpyxl.utils.cell import range_boundaries
+                        tests = []
+                        for ref in dict.fromkeys(refs):
+                            a, b, x, y = range_boundaries(ref.replace('$', ''))
+                            count = (x-a+1)*(y-b+1)
+                            # Aggregated readings may occupy only part of a grid.
+                            need = 1 if formula.upper().startswith(('SUM(', 'AVERAGE(')) else count
+                            tests.append(f'COUNT({ref})<{need}')
+                        c.value = '=IF(OR(' + ','.join(tests) + '),"",' + formula + ')'
+                else:
+                    c.value = None
+
+    if kind in ('AIR MOVING EQUIPMENT', 'MAU'):
+        starts = [c.row-3 for row in ws for c in row
+                  if str(c.value or '').strip().upper() == 'UNIT DESIGNATION']
+        for off in starts:
+            for address in (f'G{off+7}', f'J{off+17}:M{off+25}',
+                            f'T{off+17}:Y{off+27}', f'A{off+29}', f'W{off+29}',
+                            f'J{off+37}:M{off+40}', f'N{off+36}:Y{off+40}',
+                            f'T{off+6}', f'T{off+8}:Y{off+13}'):
+                blank(address)
+            from openpyxl.formula.translate import Translator
+            motor_formulas = {
+                19: '=IF(OR(T5="",T6=""),"",IF(T18=3,IF(COUNT(T17,V17,X17)<3,"",IF(AVERAGE(T17,V17,X17)=0,"",T5*T6/AVERAGE(T17,V17,X17))),IF(T18=1,IF(OR(V17="",V17=0),"",T5*T6/V17),"")))',
+                24: '=IF(T18=1,IF(COUNT(V17,V20)<2,"",V17*V20*0.8*0.9/746),IF(T18=3,IF(COUNT(T17,V17,X17,T20,V20,X20)<6,"",AVERAGE(T17,V17,X17)*AVERAGE(T20,V20,X20)*0.8*0.9*1.732/746),""))',
+            }
+            for row, formula in motor_formulas.items():
+                target = f'T{row+off}'
+                if ws[target].data_type == 'f':
+                    ws[target] = Translator(formula, origin=f'T{row}').translate_formula(target)
+    elif kind == 'COIL DX GAS':
+        for row in ws:
+            for c in row:
+                if str(c.value or '').strip().upper() == 'ACTUAL':
+                    from openpyxl.utils import get_column_letter
+                    col = get_column_letter(c.column)
+                    blank(f'{col}{c.row+1}:{col}{c.row+22}')
+        # Some copies retain calculation formulas in unused equipment slots.
+        for row in ws:
+            for c in row:
+                if c.data_type == 'f':
+                    blank(c.coordinate)
+    elif kind == 'SUPPLY DIFFUSERS':
+        starts = [c.row for row in ws for c in row if str(c.value or '').strip().upper() == 'INITIAL']
+        for start in starts:
+            blank(f'F{start+2}:F{start+30}')
+            blank(f'H{start+2}:H{start+30}')
+            for row in ws.iter_rows(min_row=start+2, max_row=start+30, min_col=9, max_col=9):
+                if row[0].data_type == 'f':
+                    blank(row[0].coordinate)
+    elif kind == 'DUCT TRAVERSE RECT':
+        blank('B10:O18'); blank('D7'); blank('N3:N4')
+        blank('D6')  # instrument is selected for the upcoming field visit
+    elif kind == 'KITCHEN HOOD':
+        blank('D11:M13'); blank('D7'); blank('K7')
+        # Row 12 is the selected instrument's conversion factor, not design CFM.
+    elif kind == 'EXHAUST FANS SMALL':
+        for row in ws:
+            for c in row:
+                if str(c.value or '').strip().upper() == 'ACTUAL':
+                    from openpyxl.utils import get_column_letter
+                    col = get_column_letter(c.column)
+                    blank(f'{col}{c.row+1}:{col}{c.row+3}')
+    elif kind == 'PROJECT SUMMARY':
+        blank(f'A5:{ws.cell(ws.max_row, ws.max_column).coordinate}')
+    elif kind == 'INSTRUMENT':
+        blank(f'B4:E{ws.max_row}')
+        ws._images = []  # prior-job calibration certificates are not current evidence
+        ws.print_area = 'A1:E12'
+        from openpyxl.worksheet.pagebreak import RowBreak
+        ws.row_breaks = RowBreak()
+    elif kind == 'COVER':
+        for row in ws:
+            for c in row:
+                text = str(c.value or '')
+                if 'ANALYSIS REPORT' in text.upper() and 'CERTIFIED' in text.upper():
+                    c.value = 'PRE-FIELD DRAFT\nTEST, ADJUST AND BALANCE\nREPORT'
+                elif 'certif' in text.lower() and ('measurements' in text.lower() or 'nebb' in text.lower()):
+                    c.value = 'Pre-field draft. Design information is retained from the approved reference. Field measurements, verification, and certification are pending.'
+                elif text.strip().upper() == 'APPROVED BY:':
+                    blank(f'A{c.row+1}:H{c.row+4}')
+        blank('A5')
+        blank('G52:G70')  # old page numbers include historical certificate pages
+        # Keep header logos; remove approval/signature imagery below the header.
+        ws._images = [im for im in ws._images if hasattr(im.anchor, '_from') and im.anchor._from.row < 18]
+
+    # Signoffs and comments are historical evidence, not pre-field requirements.
+    for row in ws:
+        for c in row:
+            label = str(c.value or '').strip().upper()
+            if label in ('TECHNICIAN:', 'TEST DATE:'):
+                for target in row[c.column:]:
+                    if str(target.value or '').strip().upper() != 'TEST DATE:':
+                        blank(target.coordinate)
+            if label.rstrip(':') == 'COMMENTS' and kind not in ('AIR MOVING EQUIPMENT', 'MAU'):
+                for r in range(c.row+1, min(c.row+6, ws.max_row+1)):
+                    for target in ws[r]:
+                        blank(target.coordinate)
+    return True
+
+
 def reset_measurements(ws):
     """Respect each repeating Design/Actual block; retain calculation formulas."""
+    if reset_special_layout(ws):
+        return
     kind = family(ws)
     headers = sorted({c.row for row in ws for c in row
                       if str(c.value).strip().upper() == 'ACTUAL'})
