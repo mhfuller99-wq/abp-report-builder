@@ -349,7 +349,7 @@ button:hover{background:#0d4789}.error{padding:12px;background:#fff0ed;border:1p
 .note{color:#6c7f90;font-size:12px;border-top:1px solid #e1e9f2;margin-top:25px;padding-top:18px;line-height:1.5}@media(max-width:480px){.panel{padding:26px 22px}}
 </style></head><body><main class="panel"><img class="logo" src="/logo.png" alt="Air Balance Professionals logo"><div class="tag">Secure reporting workspace</div>
 <h1>Welcome back</h1><p>Sign in to access the Air Balance Professionals TAB Report Builder.</p>
-{{ERROR}}<form action="/login" method="post"><label for="user">Username</label><input id="user" name="username" autocomplete="username" required autofocus placeholder="Enter your username">
+{{ERROR}}<form action="/login" method="post"><input type="hidden" name="csrf" value="{{CSRF}}"><label for="user">Username</label><input id="user" name="username" autocomplete="username" required autofocus placeholder="Enter your username">
 <label for="pass">Password</label><input id="pass" name="password" type="password" autocomplete="current-password" required placeholder="Enter your password">
 <button type="submit">Sign in to Report Builder</button></form><div class="note">Access is limited to authorized ABP team members. Contact your administrator for your credentials.</div></main></body></html>'''
 class Handler(BaseHTTPRequestHandler):
@@ -381,7 +381,15 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
     def login_page(self,error=False):
         notice='<div class="error" role="alert">Incorrect username or password. Please try again.</div>' if error else ''
-        self.respond(LOGIN_HTML.replace('{{ERROR}}',notice).encode(),'text/html; charset=utf-8')
+        csrf=secrets.token_urlsafe(32)
+        html_page=LOGIN_HTML.replace('{{ERROR}}',notice).replace('{{CSRF}}',csrf)
+        secure='; Secure' if self.secure_request() else ''
+        cookie='abp_login_csrf='+csrf+'; HttpOnly; SameSite=Strict; Path=/login; Max-Age=1200'+secure
+        self.respond(html_page.encode(),'text/html; charset=utf-8',extra_headers=[('Set-Cookie',cookie)])
+    def valid_login_csrf(self,value):
+        cookie=self.headers.get('Cookie','')
+        match=re.search(r'(?:^|;\s*)abp_login_csrf=([A-Za-z0-9_-]{20,80})(?:;|$)',cookie)
+        return bool(match and value and secrets.compare_digest(match.group(1),value))
     def same_origin(self):
         origin=self.headers.get('Origin')
         if not origin:return True
@@ -403,9 +411,11 @@ class Handler(BaseHTTPRequestHandler):
         else:self.redirect('/login')
         return True
 
-    def respond(self,data,typ='application/json',code=200,filename=None):
+    def respond(self,data,typ='application/json',code=200,filename=None,extra_headers=None):
         self.send_response(code);self.send_header('Content-Type',typ);self.send_header('Content-Length',str(len(data)));self.send_header('X-Content-Type-Options','nosniff');self.send_header('Cache-Control','no-store');self.send_header('Referrer-Policy','no-referrer');self.send_header('X-Frame-Options','DENY');
         if filename:self.send_header('Content-Disposition','attachment; filename="'+filename+'"')
+        if extra_headers:
+            for key,value in extra_headers:self.send_header(key,value)
         self.end_headers();self.wfile.write(data)
     def do_GET(self):
         path=urlsplit(self.path).path
@@ -424,7 +434,8 @@ class Handler(BaseHTTPRequestHandler):
         else:self.respond(b'Not found','text/plain',404)
     def do_POST(self):
         path=urlsplit(self.path).path
-        if not self.same_origin():
+        # Login uses a same-site double-submit token instead of a proxy-sensitive Origin check.
+        if path!='/login' and not self.same_origin():
             self.respond(b'{"error":"Request origin not allowed"}',code=403);return
         if path=='/logout':
             self.redirect('/login',[('Set-Cookie',self.session_cookie('',0))]);return
@@ -435,6 +446,8 @@ class Handler(BaseHTTPRequestHandler):
                 data=parse_qs(self.rfile.read(n).decode('utf-8','replace'),keep_blank_values=True)
                 user=data.get('username',[''])[0]
                 password=data.get('password',[''])[0]
+                if not self.valid_login_csrf(data.get('csrf',[''])[0]):
+                    self.login_page(error=True);return
                 remote=self.client_address[0]
                 now=time.time()
                 with LOGIN_LOCK:
