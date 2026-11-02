@@ -288,8 +288,11 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers();self.wfile.write(data)
     def do_GET(self):
         if self.gate():return
-        if self.path=='/':self.respond(PAGE.encode(),'text/html; charset=utf-8')
-        elif self.path=='/logo.png':self.respond((ROOT/'04_Company_Branding/ABP_Company_Logo.png').read_bytes(),'image/png')
+        if self.path.split('?',1)[0]=='/':self.respond(PAGE.encode(),'text/html; charset=utf-8')
+        elif self.path.split('?',1)[0]=='/logo.png':
+            logo=ROOT/'04_Company_Branding/ABP_Company_Logo.png'
+            if logo.is_file():self.respond(logo.read_bytes(),'image/png')
+            else:self.respond(b'Logo not installed','text/plain',404)
         elif self.path=='/api/templates':self.respond(json.dumps(list(LOOKUP)).encode())
         else:self.respond(b'Not found','text/plain',404)
     def do_POST(self):
