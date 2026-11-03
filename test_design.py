@@ -90,4 +90,15 @@ class DesignTests(unittest.TestCase):
             validate_payload({'project':'Test','templates':['Air Moving Equipment.xlsx'],
                               'records':[{'tag':'AH-1.2','design_cfm':100,'status':'VERIFIED'}]})
 
+    def test_cleared_form_does_not_restore_default(self):
+        with self.assertRaisesRegex(ValueError,'select a unit report form'):
+            validate_payload({'project':'Test','templates':['Air Moving Equipment.xlsx'],
+                              'records':[{'tag':'AHU-1','template':'','design_cfm':100,'status':'VERIFIED'}]})
+
+    def test_malformed_forms_return_validation_errors(self):
+        for templates,form in [([{}],''),(['Air Moving Equipment.xlsx'],[])]:
+            with self.assertRaises(ValueError):
+                validate_payload({'project':'Test','templates':templates,
+                                  'records':[{'tag':'AHU-1','template':form,'status':'VERIFIED','design_cfm':100}]})
+
 if __name__=='__main__':unittest.main()

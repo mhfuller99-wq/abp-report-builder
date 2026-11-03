@@ -79,3 +79,11 @@ The 2026 archive review adds AH, ACU, PAC and KSF tag recognition with reviewed
 form recommendations. Decimal and letter suffixes remain part of the equipment
 ID, so IU-1.01 and IU-1.02 cannot collapse into a single IU-1 record. These aliases
 still require an explicit unit form and verified current-job design values.
+
+Saved project reviews are validated before replacing the active review. Changing
+source files clears previous equipment entries, and an explicitly cleared unit
+form stays unset until the reviewer selects a form. API errors and expired
+sessions produce readable messages. Worksheet display names omit filename
+extensions; the original master filenames and workbook contents are preserved.
+
+Run `node test_ui_helpers.cjs` for saved-review and API-message checks.

@@ -106,7 +106,8 @@ UNIT_FORMS={
 
 
 def unit_form(record):
-    if record.get('template') in UNIT_FORMS:return record['template']
+    if 'template' in record:
+        return record['template'] if record.get('template') in UNIT_FORMS else None
     tag=str(record.get('tag','')).upper()
     if re.match(r'^(AHU|RTU|OAU|DOAS|MAU|AC)[- ]?\d',tag):return 'Air Moving Equipment.xlsx'
     if re.match(r'^(EF|KEF|TEF)[- ]?\d',tag):return 'Exhaust Fans _Std._.xlsx'
