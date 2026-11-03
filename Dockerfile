@@ -10,4 +10,4 @@ COPY 03_Workbooks_and_Master_Templates/ 03_Workbooks_and_Master_Templates/
 COPY 04_Company_Branding/ 04_Company_Branding/
 USER abp
 EXPOSE 10000
-CMD ["sh", "-c", "python abp_server.py ${PORT:-10000} --lan"]
+CMD ["sh", "-c", "exec python abp_server.py ${PORT:-10000} --lan"]

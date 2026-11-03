@@ -3,6 +3,7 @@
 import io,json,re,sys,zipfile,html,datetime,hashlib,hmac,time,math,csv,os,secrets,base64,ipaddress,socket,threading
 from pathlib import Path
 from http.server import ThreadingHTTPServer,BaseHTTPRequestHandler
+from socketserver import TCPServer
 from urllib.parse import unquote,parse_qs,urlsplit
 from openpyxl import Workbook,load_workbook
 from openpyxl.workbook.properties import CalcProperties
@@ -632,6 +633,14 @@ class Handler(BaseHTTPRequestHandler):
                 self.respond(json.dumps(read_sources(blobs)).encode());return
             self.respond(b'Not found','text/plain',404)
         except Exception as e:self.respond(json.dumps({'error':str(e)}).encode(),code=400)
+class ReportHTTPServer(ThreadingHTTPServer):
+    def server_bind(self):
+        # HTTPServer's reverse DNS lookup can block before socket.listen().
+        # The application does not need a resolved hostname to serve requests.
+        TCPServer.server_bind(self)
+        self.server_name,self.server_port=self.server_address[:2]
+
+
 if __name__=='__main__':
     args=[x for x in sys.argv[1:] if x!='--lan']
     port=int(args[0]) if args else 8765
@@ -644,4 +653,6 @@ if __name__=='__main__':
         print('Android: use http://YOUR_WINDOWS_WIFI_IP:'+str(port))
         print('Username: abp | Password: the ABP_ACCESS_PASSWORD you set')
         print('WARNING: On local Wi-Fi, HTTP is not encrypted. Use HTTPS for any internet deployment.')
-    ThreadingHTTPServer((host,port),Handler).serve_forever()
+    with ReportHTTPServer((host,port),Handler) as server:
+        print(f'Listening on {host}:{server.server_port}; health endpoint /healthz',flush=True)
+        server.serve_forever()
