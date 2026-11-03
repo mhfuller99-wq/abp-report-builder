@@ -15,7 +15,7 @@ ROOT=Path(__file__).resolve().parent
 TEMPLATES=ROOT/'03_Workbooks_and_Master_Templates'
 FILES=[p for p in sorted(TEMPLATES.glob('*.xlsx')) if p.name not in {'Blue Mountain - TAB Report.xlsx','CAFB Egress Shop - TAB Report.xlsx','CALEDONIA FEILDHOUSE TAB REPORT.xlsx','Cadence  Bank- Starkville MS .xlsx','New Hope Fieldhouse.xlsx','WEST LOWNDES FIELDHOUSE .xlsx'}]
 LOOKUP={p.name:p for p in FILES}
-TAGS=re.compile(r'\b(?:(?:BCU|BC|CH|CHP|CHWP|HWP|CWP|PCP|SCP|PHP|SHP|P|B|F)[-\s]+|(?:AHU|RTU|OAU|DOAS|CRU|MAU|ERV|HRV|FCU|FC|VAV|FPP|IU|IDU|MSFC|MSE|MS|PTAC|CRAC|IHP|HPBC|HP|AC|ACC|DSS|DCU|KEF|TEF|CEF|SEF|RLF|KH|EF|SF|RF|GF|PU|EUH|EWH|CUH|UH|FFU|LF)[-\s]?)\d+(?:-[A-Z0-9]+)*\b',re.I)
+TAGS=re.compile(r'\b(?:(?:BCU|BC|CH|CHP|CHWP|HWP|CWP|PCP|SCP|PHP|SHP|P|B|F|AH|ACU|PAC|KSF)[-\s]+|(?:AHU|RTU|OAU|DOAS|CRU|MAU|ERV|HRV|FCU|FC|VAV|FPP|IU|IDU|MSFC|MSE|MS|PTAC|CRAC|IHP|HPBC|HP|AC|ACC|DSS|DCU|KEF|TEF|CEF|SEF|RLF|KH|EF|SF|RF|GF|PU|EUH|EWH|CUH|UH|FFU|LF)[-\s]?)\d+[A-Z]?(?:[-.][A-Z0-9]+)*\b',re.I)
 MAX_RECORDS=500
 MAX_UPLOAD=40_000_000
 MAX_OUTPUT_ROWS=30000
@@ -160,6 +160,10 @@ def suggested_templates(tags,signals=None):
     if tagged('IHP|HPBC|HP|CRAC'):
         add('Air Moving Equipment.xlsx','Heat-pump or packaged equipment; confirm equipment form',True)
         add('COIL DX HP ELE.xlsx','Possible heat-pump coil performance form; verify the schedule',True)
+    if tagged('AH|ACU|PAC|KSF'):
+        add('Air Moving Equipment.xlsx','Air-moving form observed for this tag family; confirm the current job equipment type',True)
+        if tagged('AH'):
+            add('Fan Coil Units DX.xlsx','AH also occurs on fan-coil forms; select the applicable unit form',True)
     if tagged('B'):add('Boiler.xlsx','Boiler tag; confirm service and design data',True)
     if tagged('CH|ACC'):
         add('Chiller - Air Cooled.xlsx','Chiller tag; verify condenser type',True)

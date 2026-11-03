@@ -76,4 +76,18 @@ class DesignTests(unittest.TestCase):
         for tag in ('IDU-1','MSFC-2','PTAC-3','CEF-4','SEF-5','IHP-6','HPBC-7','ACC-1','PCP-1','SCP-1','B-1'):
             self.assertIsNotNone(TAGS.fullmatch(tag),tag)
 
+    def test_decimal_and_letter_tags_remain_distinct(self):
+        tags=['IU-1.01','IU-1.02','IU-2.11A','KH-5.1','KH-5.2','AH-1.2','ACU-1','PAC-1.1','KSF-1','RTU-1A']
+        data=('Tag,Design CFM,Actual CFM\n'+'\n'.join(f'{tag},100,9999' for tag in tags)).encode()
+        result=read_sources([('schedule.csv',data)])
+        self.assertEqual(result['tags'],tags)
+        for record in result['records']:
+            self.assertEqual(record['candidates'][0]['values'],{'design_cfm':100})
+            self.assertEqual(record['status'],'UNVERIFIED')
+
+    def test_ambiguous_archive_alias_requires_unit_form(self):
+        with self.assertRaisesRegex(ValueError,'select a unit report form'):
+            validate_payload({'project':'Test','templates':['Air Moving Equipment.xlsx'],
+                              'records':[{'tag':'AH-1.2','design_cfm':100,'status':'VERIFIED'}]})
+
 if __name__=='__main__':unittest.main()

@@ -74,3 +74,8 @@ equipment quantities, manufacturer/model values, or airflow requirements for
 an unrelated new job.
 
 Run `python -m unittest -v test_reports.py test_design.py` for the complete suite.
+
+The 2026 archive review adds AH, ACU, PAC and KSF tag recognition with reviewed
+form recommendations. Decimal and letter suffixes remain part of the equipment
+ID, so IU-1.01 and IU-1.02 cannot collapse into a single IU-1 record. These aliases
+still require an explicit unit form and verified current-job design values.
