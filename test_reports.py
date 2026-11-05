@@ -45,7 +45,8 @@ class ReportTests(unittest.TestCase):
         self.assertIsNone(result['KITCHEN HOOD']['D12'].value)
         self.assertIn('COUNT(D11)',result['KITCHEN HOOD']['D13'].value)
         self.assertIsNone(result['DUCT TRAVERSE RECT.']['B10'].value)
-        self.assertEqual(result['DUCT TRAVERSE RECT.']['N7'].value,'=M7*L7/144')
+        self.assertIn('M7*L7/144',result['DUCT TRAVERSE RECT.']['N7'].value)
+        self.assertTrue(result['DUCT TRAVERSE RECT.']['N7'].value.startswith('=IF('))
         self.assertIsNone(result['EXHAUST FANS SMALL']['D10'].value)
         self.assertLessEqual(result['EXHAUST FANS SMALL'].max_row,16)
 

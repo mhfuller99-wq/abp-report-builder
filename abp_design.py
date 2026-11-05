@@ -5,6 +5,7 @@ as defaults for another job, and extracted candidates still require review.
 """
 import re
 from openpyxl.utils import get_column_letter
+from abp_job import canonical_tag
 
 
 def normalized(value):
@@ -17,7 +18,8 @@ def design_field(label, schedule=False):
         return None
     aliases={
         'design_cfm':{'DESIGN CFM','SUPPLY CFM','SUPPLY AIR CFM','TOTAL CFM','TOTAL AIRFLOW CFM','COOLING CFM','DESIGN AIRFLOW'},
-        'osa_cfm':{'OSA CFM','OA CFM','OUTSIDE AIR CFM','OUTDOOR AIR CFM','OSA AIRFLOW CFM'},
+        'osa_min_cfm':{'OSA AIRFLOW MIN CFM','MINIMUM OUTSIDE AIR CFM','OA MIN CFM'},
+        'osa_cfm':{'OSA AIRFLOW MAX CFM','MAXIMUM OUTSIDE AIR CFM','OA MAX CFM','OSA CFM','OA CFM','OUTSIDE AIR CFM','OUTDOOR AIR CFM','OSA AIRFLOW CFM'},
         'esp':{'ESP','ESP IN W C','EXTERNAL S P','EXTERNAL S P IN W C','EXTERNAL STATIC PRESSURE'},
         'motor_hp':{'MOTOR HP','DESIGN HP','HORSEPOWER'},
         'design_gpm':{'DESIGN GPM','WATER FLOW GPM','FLOW RATE GPM'},
@@ -46,7 +48,7 @@ def extract_design_rows(rows, sheet, tag_pattern):
     """
     results=[]
     def tag_at(value):
-        value=re.sub(r'\s+','-',str(value or '').strip().upper())
+        value=canonical_tag(str(value or ''))
         return value if tag_pattern.fullmatch(value) else None
     def emit(tag,field,value,r,c,label):
         n=number(value)

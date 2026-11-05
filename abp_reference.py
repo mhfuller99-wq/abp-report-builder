@@ -111,11 +111,13 @@ def reset_special_layout(ws):
         starts = [c.row-3 for row in ws for c in row
                   if str(c.value or '').strip().upper() == 'UNIT DESIGNATION']
         for off in starts:
-            for address in (f'G{off+7}', f'J{off+17}:M{off+25}',
+            for address in (f'G{off+7}', f'J{off+17}:M{off+27}',
                             f'T{off+17}:Y{off+27}', f'A{off+29}', f'W{off+29}',
                             f'J{off+37}:M{off+40}', f'N{off+36}:Y{off+40}',
                             f'T{off+6}', f'T{off+8}:Y{off+13}'):
                 blank(address)
+            for cell in ws[off+29]:
+                if isinstance(cell.value,(int,float)) or cell.data_type=='f':blank(cell.coordinate)
             from openpyxl.formula.translate import Translator
             motor_formulas = {
                 19: '=IF(OR(T5="",T6=""),"",IF(T18=3,IF(COUNT(T17,V17,X17)<3,"",IF(AVERAGE(T17,V17,X17)=0,"",T5*T6/AVERAGE(T17,V17,X17))),IF(T18=1,IF(OR(V17="",V17=0),"",T5*T6/V17),"")))',
@@ -146,8 +148,15 @@ def reset_special_layout(ws):
                 if row[0].data_type == 'f':
                     blank(row[0].coordinate)
     elif kind == 'DUCT TRAVERSE RECT':
-        blank('B10:O18'); blank('D7'); blank('N3:N4')
-        blank('D6')  # instrument is selected for the upcoming field visit
+        # Every repeated traverse panel, not just the first one on the sheet.
+        starts = [c.row-3 for row in ws for c in row
+                  if str(c.value or '').strip().upper() == 'UNIT DESIGNATION']
+        for off in starts or [0]:
+            blank(f'B{off+10}:O{off+18}'); blank(f'D{off+7}')
+            blank(f'N{off+3}:N{off+4}'); blank(f'D{off+6}')
+            for col,row in [('L',4),('N',7)]:
+                cell=ws[f'{col}{off+row}']
+                if cell.data_type=='f':blank(cell.coordinate)
     elif kind == 'KITCHEN HOOD':
         blank('D11:M13'); blank('D7'); blank('K7')
         # Row 12 is the selected instrument's conversion factor, not design CFM.
