@@ -102,15 +102,38 @@ UNIT_FORMS={
     'Exhaust Fans _Sm._.xlsx':{'tag':'C3','design_cfm':'C10','esp':'C11'},
     'Fan Coil Units WTR.xlsx':{'tag':'C3','design_cfm':'C11','osa_cfm':'C12','area_served':'C4'},
     'Fan Coil Units DX.xlsx':{'tag':'C3','area_served':'C4','design_cfm':'C11','osa_cfm':'C12','cooling_edb':'C16','cooling_ewb':'C17','cooling_ldb':'C18','cooling_lwb':'C19','heating_edb':'C26','heating_ldb':'C27'},
+    # Printed labels are DX COOLING and GAS HEATING. BTU rows are formulas.
+    'Fan Coil Units DX GAS.xlsx':{'tag':'C3','area_served':'C4','design_cfm':'C11','osa_cfm':'C12','cooling_edb':'C16','cooling_ewb':'C17','cooling_ldb':'C18','cooling_lwb':'C19','heating_edb':'C26','heating_ldb':'C27'},
+    'Fan Coil Units DX ELE.xlsx':{'tag':'C3','area_served':'C4','design_cfm':'C11','osa_cfm':'C12','cooling_edb':'C15','cooling_ewb':'C16','cooling_ldb':'C17','cooling_lwb':'C18','heating_edb':'C24','heating_ldb':'C25'},
     'Kitchen Hood.xlsx':{'tag':'D3','design_cfm':'D6'},
     'Chiller - Air Cooled.xlsx':{'tag':'C3','design_gpm':'C17'},
 }
 TEXT_CELLS={'service','area_served','equipment_location','unit_type'}
 
 
-def inferred_form(tag):
+def doas_fan_coil(record):
+    """DX fan-coil form that matches the source heating type. Gas input selects gas heat."""
+    record=record or {}
+    fields=set()
+    notes=[]
+    for item in record.get('candidates') or []:
+        fields.update(item.get('values') or {})
+        if item.get('evidence'):notes.append(str(item['evidence']))
+    for source in (record, record.get('proposed') or {}):
+        for key,value in source.items():
+            if value not in (None,''):fields.add(key)
+    blob=' '.join(notes).upper()
+    if 'heating_input_btu' in fields or re.search(r'\bGAS\b', blob):
+        return 'Fan Coil Units DX GAS.xlsx'
+    if re.search(r'\bELECTRIC\b', blob):
+        return 'Fan Coil Units DX ELE.xlsx'
+    return 'Fan Coil Units DX.xlsx'
+
+
+def inferred_form(tag, record=None):
     tag=str(tag or '').upper()
-    if re.match(r'^(AHU|RTU|OAU|DOAS|MAU|AC)[- ]?\d',tag):return 'Air Moving Equipment.xlsx'
+    if re.match(r'^DOAS[- ]?\d',tag):return doas_fan_coil(record)
+    if re.match(r'^(AHU|RTU|OAU|MAU|AC)[- ]?\d',tag):return 'Air Moving Equipment.xlsx'
     if re.match(r'^(EF|KEF|TEF|CEF|SEF|RLF)[- ]?\d',tag):return 'Exhaust Fans _Std._.xlsx'
     if re.match(r'^(VRF|SSAU)[- ]?\d',tag):return 'Fan Coil Units DX.xlsx'
     if re.match(r'^KH[- ]?\d',tag):return 'Kitchen Hood.xlsx'
@@ -120,4 +143,4 @@ def inferred_form(tag):
 def unit_form(record):
     if 'template' in record:
         return record['template'] if record.get('template') in UNIT_FORMS else None
-    return inferred_form(record.get('tag'))
+    return inferred_form(record.get('tag'), record)
