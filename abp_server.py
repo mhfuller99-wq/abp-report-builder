@@ -21,7 +21,7 @@ FILES=[p for p in sorted(TEMPLATES.glob('*.xlsx')) if p.name not in {'Blue Mount
 LOOKUP={p.name:p for p in FILES}
 TAGS=re.compile(r'\b(?:(?:BCU|BC|CH|CHP|CHWP|HWP|CWP|PCP|SCP|PHP|SHP|P|B|F|AH|ACU|PAC|KSF)(?:\s*-\s*|\s+)|(?:AHU|RTU|OAU|DOAS|CRU|MAU|ERV|HRV|FCU|FC|VAV|FPP|IU|IDU|MSFC|MSE|MS|PTAC|CRAC|IHP|HPBC|HP|AC|ACC|DSS|DCU|KEF|TEF|CEF|SEF|RLF|KH|EF|SF|RF|GF|PU|EUH|EWH|CUH|UH|FFU|LF)(?:\s*-\s*|\s+)?)\d+[A-Z]?(?:[-.][A-Z0-9]+)*\b',re.I)
 MAX_RECORDS=500
-MAX_UPLOAD=40_000_000
+MAX_UPLOAD=200_000_000
 MAX_OUTPUT_ROWS=30000
 # Only propose values from explicitly labeled nearby text. Never silently verify.
 VALUE_PATTERNS={
@@ -49,7 +49,7 @@ def excel_safe(value):
 def read_sources(blobs):
     """Collect every occurrence and provenance. Do not invent values from surrounding text."""
     warnings=[];records={};sources=[];total_chars=0;preview=[];signals=set()
-    if sum(len(data) for _,data in blobs)>MAX_UPLOAD:raise ValueError('Total source size exceeds 40 MB')
+    if sum(len(data) for _,data in blobs)>MAX_UPLOAD:raise ValueError('Total source size exceeds 200 MB')
     for name,data in blobs:
         name=Path(name).name[:160];ext=Path(name).suffix.lower();chunks=[];structured=[]
         try:
@@ -749,7 +749,7 @@ class Handler(BaseHTTPRequestHandler):
         if self.gate():return
         try:
             n=int(self.headers.get('Content-Length','0'))
-            if n<0 or n>MAX_UPLOAD:raise ValueError('Upload limit is 40 MB')
+            if n<0 or n>MAX_UPLOAD:raise ValueError('Upload limit is 200 MB')
             data=self.rfile.read(n)
             if path=='/api/suggest':
                 if n>2_000_000:raise ValueError('Template suggestion request too large')
