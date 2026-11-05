@@ -571,6 +571,9 @@ def populate_diffusers(wb,diffusers):
         def put(column,value):
             cell=ws.cell(row,column)
             if isinstance(cell,MergedCell) or cell.data_type=='f' or value in (None,''):return
+            # Uploaded text and restored review JSON are not formulas. A leading
+            # "=" would otherwise become a formula in a blank cell.
+            if isinstance(value,str):value=excel_safe(value)
             cell.value=value
         put(1,index)
         put(2,str(item.get('type') or '')[:40])

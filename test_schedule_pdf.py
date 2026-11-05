@@ -121,6 +121,42 @@ def post(server, path, body, content_type):
 
 
 class SchedulePdfTests(unittest.TestCase):
+    def test_diffuser_text_cannot_become_a_formula(self):
+        payload = {
+            'type': '=HYPERLINK("http://evil")',
+            'size': '+1+1',
+            'system': '-DOAS',
+            'location': ' =1+1',
+            'design_cfm': 25,
+            'source': '=NOW()',
+            'reference': 'page 1',
+            'evidence': '@SUM(A1)',
+        }
+        raw = abp_server.build({
+            'project': 'Formula guard',
+            'location': 'Lab',
+            'templates': ['Supply Diffusers.xlsx'],
+            'records': [],
+            'diffusers': [payload],
+        })
+        sheet = load_workbook(io.BytesIO(raw))['SUPPLY DIFFUSERS']
+        written = {
+            'B6': payload['type'],
+            'C6': payload['size'],
+            'D6': payload['system'],
+            'E6': payload['location'],
+            'I6': ' · '.join((payload['source'], payload['reference'], payload['evidence'])),
+        }
+        for address, original in written.items():
+            cell = sheet[address]
+            self.assertNotEqual(cell.data_type, 'f', address)
+            self.assertEqual(cell.value, abp_server.excel_safe(original))
+            self.assertTrue(str(cell.value).startswith("'"), address)
+        self.assertEqual(sheet['G6'].value, 25)
+        self.assertNotEqual(sheet['G6'].data_type, 'f')
+        self.assertIsNone(sheet['F6'].value)
+        self.assertIsNone(sheet['H6'].value)
+
     def test_doas_form_follows_source_heating_type(self):
         from abp_design import doas_fan_coil
         gas = {'candidates': [{'values': {'heating_input_btu': 75000, 'cooling_edb': 81.7}}]}
