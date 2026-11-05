@@ -63,11 +63,29 @@ equipment, standard/small exhaust fans, water/DX fan coils, kitchen hoods and
 air-cooled chillers (design GPM). A verified record with no supported selected
 form fails clearly instead of silently disappearing from the report. Pumps,
 VAVs and other unsupported unit layouts need an approved reference or manually
-prepared worksheets. Supporting coil, diffuser and traverse forms can be
-included separately; they are not automatically allocated to every unit.
+prepared worksheets. Supporting coil worksheets are checked from the scan when they apply. Coil
+and outside-air design values are still filled only for verified air-moving
+units. The initial workbook also carries blank traverse forms so measured
+values are not invented.
+
+After a scan, the worksheet checkboxes are set from the documents. Equipment
+boxes can still be changed before building. The exported workbook order is
+Project Info, Notes, the equipment sheets left checked for this job, then
+30 rectangular duct-traverse forms and 15 round duct-traverse forms. Cover,
+abbreviations, project summary, the pre-tab checklist, instrument sheets, and
+the audit tabs (build info, takeoff review, source evidence, airflow check,
+and extraction candidates) are not exported. Extraction candidates are left
+out of reference reports as well. Project Info shares the equipment color
+scheme, so it stays in the same workbook; a template with a different palette
+keeps its own colors as explicit values. When a scan has little or no readable
+text, the pack still checks Project Info, Notes, Air Moving Equipment, and
+both traverses, plus fan-coil, exhaust, and coil sheets when tags suggest
+them. VAV, supply-diffuser, and unit-heater sheets are checked only when that
+master template is in the workbook folder.
 
 The source reader remains text based. Graphic/scanned schedules require manual
-takeoff; sparse pages with no readable tags are flagged. The hosted website
+takeoff; sparse pages with no readable tags are flagged. Image-only drawings
+still receive the default pre-field worksheet pack above. The hosted website
 cannot browse the computer's OneDrive folders. Upload the current job's files
 or use an approved same-job reference. Historical jobs never supply default
 equipment quantities, manufacturer/model values, or airflow requirements for
