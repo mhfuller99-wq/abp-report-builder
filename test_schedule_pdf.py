@@ -9,6 +9,7 @@ import os
 import http.client
 import threading
 import unittest
+from collections import Counter
 from pathlib import Path
 from openpyxl import load_workbook
 import abp_server
@@ -46,6 +47,33 @@ def synthetic_schedule_pdf():
     # A grille mark and a distant dimension must not become equipment.
     page.insert_text((36, 220), 'B', fontsize=8)
     page.insert_text((700, 220), '6', fontsize=8)
+    # Plan symbols. The submittal on the next page says 900 CFM for the unit.
+    page.insert_text((40, 340), 'ENLARGED MECHANICAL FLOOR PLANS - AREA C', fontsize=8)
+    page.insert_text((80, 360), 'DOAS', fontsize=8)
+    page.insert_text((130, 360), '1', fontsize=8)
+
+    def put(x, y, text):
+        page.insert_text((x, y), text, fontsize=8)
+
+    put(100, 420, 'A:')
+    put(130, 420, '6"Ø')
+    put(100, 436, '25')
+    put(124, 436, 'CFM')
+    put(260, 420, 'A:')
+    put(290, 420, '6"Ø')
+    put(260, 436, '25')
+    put(284, 436, 'CFM')
+    put(420, 420, 'A:')
+    put(450, 420, '8"Ø')
+    put(420, 436, '100')
+    put(448, 436, 'CFM')
+    put(580, 420, 'B:')
+    put(610, 420, '6"Ø')
+    put(580, 436, '80')
+    put(604, 436, 'CFM')
+    put(100, 500, 'A LAY-IN SUPPLY GRILLE')
+    put(100, 530, 'REGISTER, GRILLE, & DIFFUSER SCHEDULE')
+    put(100, 560, 'TYPICAL DIFFUSER NECK')
     sub = doc.new_page(width=800, height=1100)
     submittal = '''
 SYN DOAS (#1)
@@ -93,6 +121,15 @@ def post(server, path, body, content_type):
 
 
 class SchedulePdfTests(unittest.TestCase):
+    def test_doas_form_follows_source_heating_type(self):
+        from abp_design import doas_fan_coil
+        gas = {'candidates': [{'values': {'heating_input_btu': 75000, 'cooling_edb': 81.7}}]}
+        electric = {'candidates': [{'values': {'cooling_edb': 80}, 'evidence': 'ELECTRIC HEAT 5 KW'}]}
+        dx = {'candidates': [{'values': {'cooling_edb': 80, 'heating_edb': 70}}]}
+        self.assertEqual(doas_fan_coil(gas), 'Fan Coil Units DX GAS.xlsx')
+        self.assertEqual(doas_fan_coil(electric), 'Fan Coil Units DX ELE.xlsx')
+        self.assertEqual(doas_fan_coil(dx), 'Fan Coil Units DX.xlsx')
+
     def test_synthetic_schedule_scan_review_and_build(self):
         server = abp_server.ThreadingHTTPServer(('127.0.0.1', 0), abp_server.Handler)
         thread = threading.Thread(target=server.serve_forever, daemon=True)
@@ -110,6 +147,7 @@ class SchedulePdfTests(unittest.TestCase):
             by = {row['tag']: row for row in scanned['records']}
             self.assertIsNone(by['DOAS-1']['design_cfm'])
             self.assertEqual(by['DOAS-1']['status'], 'UNVERIFIED')
+            self.assertEqual(by['DOAS-1']['template'], 'Fan Coil Units DX GAS.xlsx')
             self.assertEqual(by['DOAS-1']['proposed']['design_cfm'], 900)
             self.assertEqual(by['DOAS-1']['proposed']['esp'], 0.4)
             self.assertEqual(by['DOAS-1']['proposed']['motor_fla'], 2.2)
@@ -117,6 +155,12 @@ class SchedulePdfTests(unittest.TestCase):
             self.assertEqual(by['VRF-1']['proposed']['design_cfm'], 550)
             self.assertEqual(by['VRF-1']['template'], 'Fan Coil Units DX.xlsx')
             self.assertEqual(by['EF-1']['proposed']['motor_hp'], 0.25)
+            outlets = scanned['diffusers']
+            self.assertEqual([item['design_cfm'] for item in outlets], [25, 25, 100])
+            self.assertTrue(all(item['type'] == 'A' and item['system'] == 'DOAS-1' for item in outlets))
+            self.assertEqual([item['size'] for item in outlets], ['6"Ø', '6"Ø', '8"Ø'])
+            self.assertNotIn(900, [item['design_cfm'] for item in outlets])
+            self.assertIn('supply_outlets', scanned['signals'])
             status, raw = post(server, '/api/suggest', json.dumps({
                 'tags': scanned['tags'], 'signals': scanned['signals'], 'sparse': scanned['sparse']
             }).encode(), 'application/json')
@@ -125,6 +169,11 @@ class SchedulePdfTests(unittest.TestCase):
             self.assertEqual(chosen[0], 'Project Information.xlsx')
             self.assertEqual(chosen[1], 'Notes.xlsx')
             self.assertLess(chosen.index('Duct Traverse Rect..xlsx'), chosen.index('Duct Traverse RND.xlsx'))
+            self.assertIn('Supply Diffusers.xlsx', chosen)
+            self.assertLess(chosen.index('Supply Diffusers.xlsx'), chosen.index('Duct Traverse Rect..xlsx'))
+            for row in scanned['records']:
+                if row.get('template') and row['template'] not in chosen:
+                    chosen.append(row['template'])
             reviewed = []
             for row in scanned['records']:
                 row = apply_proposed(row)
@@ -132,7 +181,8 @@ class SchedulePdfTests(unittest.TestCase):
                     row['status'] = 'VERIFIED'
                 reviewed.append(row)
             status, raw = post(server, '/api/build', json.dumps({
-                'project': 'Synthetic schedule', 'location': 'Lab', 'templates': chosen, 'records': reviewed
+                'project': 'Synthetic schedule', 'location': 'Lab', 'templates': chosen,
+                'records': reviewed, 'diffusers': outlets
             }).encode(), 'application/json')
             self.assertEqual(status, 200, raw[:400])
             book = load_workbook(io.BytesIO(raw))
@@ -144,15 +194,26 @@ class SchedulePdfTests(unittest.TestCase):
             self.assertEqual(book['DUCT TRAVERSE RECT.'].max_row, 42 * abp_server.BLANK_RECT_FORMS)
             self.assertEqual(book['DUCT TRAVERSE RND'].max_row, 27 * abp_server.BLANK_RND_FORMS)
             self.assertIsNone(book['DUCT TRAVERSE RECT.']['B10'].value)
-            air = book['AIR MOVING EQUIPMENT']
-            self.assertEqual(air['G3'].value, 'DOAS-1')
-            self.assertEqual(air['G17'].value, 900)
-            self.assertAlmostEqual(air['G21'].value, 0.4)
-            self.assertAlmostEqual(air['T6'].value, 2.2)
-            self.assertIsNone(air['T7'].value)
-            self.assertIsNone(air['G5'].value)
-            self.assertIsNone(air['G6'].value)
-            self.assertIsNone(air['J17'].value)
+            self.assertNotIn('AIR MOVING EQUIPMENT', book.sheetnames)
+            gas = book['FAN COIL UNITS GAS DX']
+            self.assertEqual(gas['C10'].value, 'DX COOLING')
+            self.assertEqual(gas['C25'].value, 'GAS HEATING')
+            self.assertEqual(gas['C3'].value, 'DOAS-1')
+            self.assertEqual(gas['C11'].value, 900)
+            self.assertEqual(gas['C12'].value, 900)
+            self.assertEqual(gas['C16'].value, 95)
+            self.assertEqual(gas['C17'].value, 75)
+            self.assertEqual(gas['C18'].value, 55)
+            self.assertEqual(gas['C19'].value, 54)
+            self.assertEqual(gas['C26'].value, 10)
+            self.assertEqual(gas['C27'].value, 50)
+            self.assertTrue(str(gas['C20'].value).startswith('='))
+            self.assertTrue(str(gas['C28'].value).startswith('='))
+            self.assertIsNone(gas['D11'].value)
+            self.assertIsNone(gas['D16'].value)
+            self.assertIsNone(gas['C5'].value)
+            self.assertIsNone(gas['C6'].value)
+            self.assertIsNone(gas['C7'].value)
             fans = book['EXHAUST FAN']
             self.assertEqual(fans['H17'].value, 400)
             self.assertEqual(fans['U4'].value, 0.25)
@@ -163,6 +224,16 @@ class SchedulePdfTests(unittest.TestCase):
             self.assertEqual(coils.cell(spot[0] + 8, spot[1]).value, 550)
             self.assertEqual(coils.cell(spot[0] + 13, spot[1]).value, 80)
             self.assertIsNone(coils.cell(spot[0] + 2, spot[1]).value)
+            self.assertLess(book.sheetnames.index('SUPPLY DIFFUSERS'), book.sheetnames.index('DUCT TRAVERSE RECT.'))
+            diffusers = book['SUPPLY DIFFUSERS']
+            self.assertEqual(diffusers['A1'].value, 'SUPPLY DIFFUSERS')
+            self.assertEqual(diffusers['F4'].value, 'INITIAL')
+            exported = [(diffusers.cell(row, 2).value, diffusers.cell(row, 3).value, diffusers.cell(row, 7).value)
+                        for row in range(6, 12) if diffusers.cell(row, 2).value]
+            self.assertEqual(exported, [('A', '6"Ø', 25), ('A', '6"Ø', 25), ('A', '8"Ø', 100)])
+            self.assertIsNone(diffusers['F6'].value)
+            self.assertIsNone(diffusers['H6'].value)
+            self.assertNotEqual(diffusers['G6'].value, 900)
         finally:
             server.shutdown()
             server.server_close()
@@ -186,6 +257,7 @@ class SchedulePdfTests(unittest.TestCase):
         self.assertEqual(len(scanned['tags']), 54)
         self.assertEqual(by['DOAS-1']['status'], 'UNVERIFIED')
         self.assertIsNone(by['DOAS-1']['design_cfm'])
+        self.assertEqual(by['DOAS-1']['template'], 'Fan Coil Units DX GAS.xlsx')
         self.assertEqual(by['DOAS-1']['proposed']['design_cfm'], 1000)
         self.assertEqual(by['DOAS-1']['proposed']['esp'], 0.75)
         self.assertEqual(by['DOAS-1']['proposed']['motor_fla'], 1.4)
@@ -204,6 +276,9 @@ class SchedulePdfTests(unittest.TestCase):
         self.assertEqual(chosen[0], 'Project Information.xlsx')
         self.assertEqual(chosen[1], 'Notes.xlsx')
         self.assertEqual(chosen[-2:], ['Duct Traverse Rect..xlsx', 'Duct Traverse RND.xlsx'])
+        for row in scanned['records']:
+            if row.get('template') and row['template'] not in chosen:
+                chosen.append(row['template'])
         reviewed = []
         for row in scanned['records']:
             row = apply_proposed(row)
@@ -211,8 +286,21 @@ class SchedulePdfTests(unittest.TestCase):
                 row['status'] = 'VERIFIED'
             reviewed.append(row)
         self.assertEqual(sum(row['status'] == 'VERIFIED' for row in reviewed), 32)
+        outlets = scanned['diffusers']
+        doas_size_6 = [item for item in outlets if item['system'] == 'DOAS-1' and item['neck_in'] == 6]
+        # These callouts are the plan text. A finished report's count of 21 is a
+        # comparison after the build, not a number this test is allowed to require.
+        self.assertEqual(Counter(item['design_cfm'] for item in doas_size_6),
+                         Counter({25: 13, 100: 2, 50: 2, 150: 1, 60: 1, 65: 1}))
+        self.assertTrue(any(item['design_cfm'] == 150 and 'BREAK ROOM 111' in item['location'] for item in doas_size_6))
+        self.assertTrue(all(item['design_cfm'] != 1000 for item in outlets))
+        unlabeled = [item for item in outlets if item['reference'] == 'page 2']
+        self.assertEqual(len(unlabeled), 2)
+        self.assertTrue(all(item['system'] == '' and item['design_cfm'] is None and item['size'] == '10"ø' for item in unlabeled))
+        self.assertIn('Supply Diffusers.xlsx', chosen)
+        self.assertLess(chosen.index('Supply Diffusers.xlsx'), chosen.index('Duct Traverse Rect..xlsx'))
         raw = abp_server.build({'project': 'New McComb Sales Center', 'location': 'McComb, MS',
-                                'templates': chosen, 'records': reviewed})
+                                'templates': chosen, 'records': reviewed, 'diffusers': outlets})
         book = load_workbook(io.BytesIO(raw))
         self.assertEqual(book.sheetnames[0], 'PROJECT INFO')
         self.assertEqual(book.sheetnames[1], 'NOTES')
@@ -221,13 +309,42 @@ class SchedulePdfTests(unittest.TestCase):
         self.assertNotIn('BOILER', book.sheetnames)
         self.assertEqual(book['DUCT TRAVERSE RECT.'].max_row, 42 * 30)
         self.assertEqual(book['DUCT TRAVERSE RND'].max_row, 27 * 15)
-        self.assertEqual(book['AIR MOVING EQUIPMENT']['G3'].value, 'DOAS-1')
-        self.assertEqual(book['AIR MOVING EQUIPMENT']['G17'].value, 1000)
-        self.assertAlmostEqual(book['AIR MOVING EQUIPMENT']['G21'].value, 0.75)
-        self.assertAlmostEqual(book['AIR MOVING EQUIPMENT']['T6'].value, 1.4)
-        self.assertIsNone(book['AIR MOVING EQUIPMENT']['T7'].value)
-        self.assertIsNone(book['AIR MOVING EQUIPMENT']['G5'].value)
-        self.assertIsNone(book['AIR MOVING EQUIPMENT']['G6'].value)
+        self.assertNotIn('AIR MOVING EQUIPMENT', book.sheetnames)
+        gas = book['FAN COIL UNITS GAS DX']
+        self.assertEqual(gas['C10'].value, 'DX COOLING')
+        self.assertEqual(gas['C25'].value, 'GAS HEATING')
+        self.assertEqual(gas['C3'].value, 'DOAS-1')
+        self.assertEqual(gas['C11'].value, 1000)
+        self.assertEqual(gas['C12'].value, 1000)
+        self.assertAlmostEqual(gas['C16'].value, 100.5)
+        self.assertEqual(gas['C17'].value, 84)
+        self.assertAlmostEqual(gas['C18'].value, 51.9)
+        self.assertAlmostEqual(gas['C19'].value, 51.7)
+        self.assertEqual(gas['C26'].value, 17)
+        self.assertEqual(gas['C27'].value, 90)
+        self.assertTrue(str(gas['C20'].value).startswith('='))
+        self.assertTrue(str(gas['C28'].value).startswith('='))
+        self.assertIsNone(gas['D11'].value)
+        self.assertIsNone(gas['D16'].value)
+        self.assertIsNone(gas['C5'].value)
+        self.assertIsNone(gas['C6'].value)
+        self.assertIsNone(gas['C7'].value)
+        self.assertIsNone(find_tag(book['FAN COIL UNITS DX'], 'DOAS-1'))
+        self.assertLess(book.sheetnames.index('SUPPLY DIFFUSERS'), book.sheetnames.index('DUCT TRAVERSE RECT.'))
+        supply = book['SUPPLY DIFFUSERS']
+        exported = []
+        for row in range(6, 40):
+            if supply.cell(row, 2).value:
+                exported.append((supply.cell(row, 2).value, supply.cell(row, 3).value,
+                                 supply.cell(row, 4).value, supply.cell(row, 7).value,
+                                 supply.cell(row, 6).value, supply.cell(row, 8).value))
+        self.assertEqual(len(exported), len(outlets))
+        self.assertTrue(all(item[0] == 'A' and item[4] is None and item[5] is None for item in exported))
+        exported_size_6 = [item[3] for item in exported if item[2] == 'DOAS-1' and str(item[1]).startswith('6')]
+        self.assertEqual(Counter(exported_size_6), Counter({25: 13, 100: 2, 50: 2, 150: 1, 60: 1, 65: 1}))
+        exported_size_8 = [item[3] for item in exported if item[2] == 'DOAS-1' and str(item[1]).startswith('8')]
+        self.assertEqual(Counter(exported_size_8), Counter({225: 2, 100: 1}))
+        self.assertNotIn(1000, [item[3] for item in exported])
         self.assertIsNone(book['EXHAUST FAN']['U7'].value)
         vrf = find_tag(book['FAN COIL UNITS DX'], 'VRF-20C')
         self.assertIsNotNone(vrf)

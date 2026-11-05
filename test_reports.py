@@ -220,11 +220,12 @@ class WorksheetAutoSelectTests(unittest.TestCase):
 
     def test_missing_templates_are_not_invented(self):
         self.assertFalse(any('VAV' in name.upper() for name in self.names(['VAV-1'], ['vav'])))
-        self.assertFalse(any('diffuser' in name.lower() or 'grille' in name.lower() for name in self.names([], ['diffusers'])))
+        self.assertIn('Supply Diffusers.xlsx', self.names([], ['diffusers']))
+        self.assertIn('Supply Diffusers.xlsx', self.names([], ['supply_outlets']))
         self.assertIn('Exhaust Grilles.xlsx.xlsx', self.names([], ['exhaust_grilles']))
         self.assertFalse(any('heater' in name.lower() for name in self.names(['UH-1'], ['unit_heater'])))
+        saved=abp_server.LOOKUP.get('Supply Diffusers.xlsx')
         abp_server.LOOKUP['VAV Boxes.xlsx']=abp_server.LOOKUP['Notes.xlsx']
-        abp_server.LOOKUP['Supply Diffusers.xlsx']=abp_server.LOOKUP['Notes.xlsx']
         abp_server.LOOKUP['Unit Heaters.xlsx']=abp_server.LOOKUP['Notes.xlsx']
         abp_server.LOOKUP['Instrument.xlsx']=abp_server.LOOKUP['Notes.xlsx']
         try:
@@ -234,8 +235,10 @@ class WorksheetAutoSelectTests(unittest.TestCase):
             self.assertIn('Unit Heaters.xlsx', picked)
             self.assertNotIn('Instrument.xlsx', picked)
         finally:
-            for name in ('VAV Boxes.xlsx','Supply Diffusers.xlsx','Unit Heaters.xlsx','Instrument.xlsx'):
+            for name in ('VAV Boxes.xlsx','Unit Heaters.xlsx','Instrument.xlsx'):
                 abp_server.LOOKUP.pop(name, None)
+            if saved is not None:
+                abp_server.LOOKUP['Supply Diffusers.xlsx']=saved
 
     def test_different_palette_keeps_source_colors(self):
         result=suggested_templates(['FFU-1'])

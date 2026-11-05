@@ -1,11 +1,12 @@
-"""Read mechanical schedule rows and submittal nameplates from PDF text.
+"""Read mechanical schedule rows, plan outlets, and submittal nameplates.
 
 Words are grouped into visual rows. A tag is accepted only when it leads a
 schedule row or an explicit mark, so a distant column cannot glue "B" to "6"
 or a model fragment into an equipment tag. Submittal unit totals and motor
-nameplate values outrank the plan schedule. Diffuser quantities are not read
-from submittals. Fan RPM is never stored as motor RPM, and unit MCA is never
-stored as motor FLA.
+nameplate values outrank the plan schedule. Supply-outlet airflow is read
+only from a plan callout (type mark, neck, and CFM). A unit total is never
+copied onto an outlet. Fan RPM is never stored as motor RPM, and unit MCA is
+never stored as motor FLA.
 """
 import re
 
@@ -394,10 +395,195 @@ def parse_fan_submittal(doc, name):
     return found
 
 
+MARK = re.compile(r'^[A-Z]:$')
+NECK = re.compile(r'^(\d+(?:\.\d+)?)"(?:([Øø])|([xX])(\d+(?:\.\d+)?)")$')
+SUPPLY_UNIT = re.compile(r'^(DOAS|AHU|RTU|MAU|OAU|SSAU)$', re.I)
+LEGEND_ROW = re.compile(r'\b(?:SCHEDULE|LAY-IN|MANUFACTURER|ACCESSORIES|MFR)\b', re.I)
+
+
+def _center(word):
+    return ((word[0] + word[2]) / 2, (word[1] + word[3]) / 2)
+
+
+def _distance(a, b):
+    ax, ay = _center(a)
+    bx, by = _center(b)
+    return ((ax - bx) ** 2 + (ay - by) ** 2) ** 0.5
+
+
+def _nearest(word, marks, limit):
+    best = None
+    best_d = limit
+    for mark in marks:
+        dist = _distance(word, mark)
+        if dist < best_d:
+            best, best_d = mark, dist
+    return best
+
+
+def _sheet_area(words):
+    for word in words:
+        if word[4].upper() != 'AREA':
+            continue
+        previous = [other for other in words
+                    if other[2] <= word[0] + 2 and abs(other[1] - word[1]) < 6 and word[0] - other[2] < 40]
+        nxt = [other for other in words
+               if other[0] >= word[2] - 2 and abs(other[1] - word[1]) < 6 and other[0] - word[2] < 16
+               and re.fullmatch(r'[A-Z]', other[4])]
+        if nxt and any('PLAN' in item[4].upper() or item[4] in {'-', '–'} for item in previous):
+            return 'AREA ' + nxt[0][4].upper()
+    return ''
+
+
+ROOM_NOISE = {'VRF', 'EF', 'DOAS', 'SSAU', 'AHU', 'RTU', 'CFM', 'TA', 'VD', 'SA', 'RA', 'OA', 'EA'}
+
+
+def _callout_number(word, words):
+    """True when this integer is an airflow callout or sits under a neck, not a room tag."""
+    for other in words:
+        if other[4].upper() == 'CFM' and _distance(word, other) < 36:
+            return True
+        if NECK.fullmatch(other[4]):
+            dx = _center(word)[0] - _center(other)[0]
+            dy = _center(word)[1] - _center(other)[1]
+            if abs(dx) < 18 and 4 <= dy <= 28:
+                return True
+    return False
+
+
+def _room_labels(words):
+    rooms = []
+    for word in words:
+        if not re.fullmatch(r'\d{3}', word[4]) or _callout_number(word, words):
+            continue
+        above = [other for other in words
+                 if other[4].isalpha() and len(other[4]) >= 3 and other[4].upper() not in ROOM_NOISE
+                 and -32 <= (other[1] - word[1]) <= -6 and abs(other[0] - word[0]) < 70]
+        if not above:
+            continue
+        line = max(other[1] for other in above)
+        name = ' '.join(other[4] for other in sorted(above, key=lambda item: item[0]) if abs(other[1] - line) < 4)
+        if name:
+            rooms.append((word, f'{name} {word[4]}'))
+    return rooms
+
+
+def _page_supply_tags(words):
+    """Unit tags printed on this sheet. One tag can explain the plan's supply outlets."""
+    tags = set()
+    for word in words:
+        token = word[4].upper().replace(' ', '')
+        hyphen = re.fullmatch(r'(DOAS|AHU|RTU|MAU|OAU|SSAU)-(\d+[A-Z]?)', token)
+        if hyphen:
+            tags.add(f'{hyphen.group(1)}-{hyphen.group(2)}')
+            continue
+        if not SUPPLY_UNIT.fullmatch(token):
+            continue
+        for other in words:
+            if not re.fullmatch(r'\d+[A-Z]?', other[4]):
+                continue
+            if abs(other[0] - word[0]) < 40 and abs(other[1] - word[1]) < 18:
+                tags.add(f'{token}-{other[4].upper()}')
+    return tags
+
+
+def parse_supply_outlets(words, page_number, name):
+    """Individual type-A plan symbols. Legends, details, and return marks stay out.
+
+    Design CFM is the integer printed with the word CFM at that symbol. A bare
+    integer under a neck is kept in the evidence and is not treated as airflow.
+    """
+    marks = [word for word in words if MARK.fullmatch(word[4])]
+    if not marks:
+        return []
+    area = _sheet_area(words)
+    rooms = _room_labels(words)
+    tags = _page_supply_tags(words)
+    system = next(iter(tags)) if len(tags) == 1 else ''
+    outlets = []
+    for mark in marks:
+        if mark[4].upper() != 'A:':
+            continue
+        neighbors = ' '.join(word[4] for word in words
+                             if abs(word[1] - mark[1]) < 5 and abs(word[0] - mark[0]) < 280)
+        if LEGEND_ROW.search(neighbors):
+            continue
+        size = None
+        size_dist = 36
+        for word in words:
+            if not NECK.fullmatch(word[4]):
+                continue
+            dist = _distance(mark, word)
+            if dist < size_dist and _nearest(word, marks, 42) is mark:
+                size, size_dist = word, dist
+        if size is None:
+            continue
+        neck = NECK.fullmatch(size[4])
+        cfm_word = None
+        cfm_dist = 42
+        for word in words:
+            if word[4].upper() != 'CFM':
+                continue
+            dist = _distance(mark, word)
+            if dist < cfm_dist and _nearest(word, marks, 48) is mark:
+                cfm_word, cfm_dist = word, dist
+        design = None
+        if cfm_word is not None:
+            number_dist = 30
+            for word in words:
+                if not re.fullmatch(r'\d{1,4}', word[4]):
+                    continue
+                dist = _distance(cfm_word, word)
+                if dist < number_dist and _nearest(word, marks, 40) is mark:
+                    design = int(word[4])
+                    number_dist = dist
+        unlabeled = None
+        if design is None:
+            for word in words:
+                if not re.fullmatch(r'\d{2,4}', word[4]):
+                    continue
+                if _nearest(word, marks, 40) is not mark:
+                    continue
+                dx = _center(word)[0] - _center(size)[0]
+                dy = _center(word)[1] - _center(size)[1]
+                if abs(dx) < 18 and 6 <= dy <= 26:
+                    unlabeled = word[4]
+        location = area
+        if rooms:
+            room_word, room_name = min(rooms, key=lambda item: _distance(mark, item[0]))
+            if _distance(mark, room_word) <= 90:
+                location = room_name if not area else f'{area} · {room_name}'
+        evidence = f'A: {size[4]}'
+        if design is not None:
+            evidence += f' {design} CFM'
+        elif unlabeled:
+            evidence += f'; nearby integer {unlabeled} is not labeled CFM'
+        outlets.append({
+            'type': 'A',
+            'size': size[4],
+            'neck_in': float(neck.group(1)),
+            'shape': 'round' if neck.group(2) else 'rectangular',
+            'system': system,
+            'location': location,
+            'design_cfm': design,
+            'source': name,
+            'reference': f'page {page_number}',
+            'evidence': evidence,
+            '_y': mark[1],
+            '_x': mark[0],
+        })
+    outlets.sort(key=lambda item: (item['_y'], item['_x']))
+    for item in outlets:
+        item.pop('_y', None)
+        item.pop('_x', None)
+    return outlets
+
+
 def parse_pdf(name, data):
     import pymupdf
     warnings = []
     found = []
+    outlets = []
     with pymupdf.open(stream=data, filetype='pdf') as doc:
         if doc.page_count > 300:
             raise ValueError('PDF has more than 300 pages')
@@ -406,11 +592,12 @@ def parse_pdf(name, data):
             if len(text_of(words).strip()) < 40:
                 warnings.append(f'{name}: page {index + 1} has no readable text and may be a scanned sheet; manual takeoff required')
             found.extend(parse_page(words, index + 1, name))
+            outlets.extend(parse_supply_outlets(words, index + 1, name))
         found.extend(parse_doas_submittal(doc, name))
         found.extend(parse_fan_submittal(doc, name))
     for item in found:
         item.setdefault('source', name)
-    return found, warnings
+    return found, warnings, outlets
 
 
 def _unique(items, field):
