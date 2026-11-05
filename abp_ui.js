@@ -1,5 +1,5 @@
-const reviewNumericFields=['design_cfm','osa_cfm','osa_min_cfm','esp','motor_hp','design_gpm','cooling_edb','cooling_ewb','cooling_ldb','cooling_lwb','heating_cfm','heating_edb','heating_ldb','heating_input_btu','heating_output_btu','cooling_total_btu','cooling_sensible_btu'];
-const reviewTextFields=['manufacturer','model','unit_type','service','equipment_location'];
+const reviewNumericFields=['design_cfm','osa_cfm','osa_min_cfm','esp','total_sp','motor_hp','motor_volts','motor_fla','design_gpm','cooling_edb','cooling_ewb','cooling_ldb','cooling_lwb','heating_cfm','heating_edb','heating_ldb','heating_input_btu','heating_output_btu','cooling_total_btu','cooling_sensible_btu'];
+const reviewTextFields=['manufacturer','model','unit_type','service','equipment_location','area_served'];
 function fieldLabel(key){return ({cooling_edb:'Cooling entering dry bulb °F',cooling_ewb:'Cooling entering wet bulb °F',cooling_ldb:'Cooling leaving dry bulb °F',cooling_lwb:'Cooling leaving wet bulb °F',heating_edb:'Heating entering dry bulb °F',heating_ldb:'Heating leaving dry bulb °F',heating_cfm:'Heating CFM',heating_input_btu:'Heating input BTU/h',heating_output_btu:'Heating output BTU/h'})[key]||key.replaceAll('_',' ');}
 // Shared browser helpers. Keep saved reviews validated before replacing UI state.
 function worksheetLabel(name) {

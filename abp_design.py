@@ -97,21 +97,27 @@ def extract_design_rows(rows, sheet, tag_pattern):
 # Actual cell maps from the supplied master workbooks. This is separate from
 # recommendations: the reviewer explicitly chooses the unit's report form.
 UNIT_FORMS={
-    'Air Moving Equipment.xlsx':{'tag':'G3','design_cfm':'G17','osa_cfm':'G18','esp':'G21','motor_hp':'T4'},
-    'Exhaust Fans _Std._.xlsx':{'tag':'H3','design_cfm':'H17','esp':'H21','motor_hp':'U4'},
+    'Air Moving Equipment.xlsx':{'tag':'G3','design_cfm':'G17','osa_cfm':'G18','total_sp':'G20','esp':'G21','motor_hp':'T4','motor_volts':'T5','motor_fla':'T6','service':'G10','area_served':'G11','equipment_location':'G12','unit_type':'G9'},
+    'Exhaust Fans _Std._.xlsx':{'tag':'H3','design_cfm':'H17','esp':'H21','motor_hp':'U4','motor_volts':'U5','motor_fla':'U6','service':'H10','area_served':'H11'},
     'Exhaust Fans _Sm._.xlsx':{'tag':'C3','design_cfm':'C10','esp':'C11'},
-    'Fan Coil Units WTR.xlsx':{'tag':'C3','design_cfm':'C11','osa_cfm':'C12'},
-    'Fan Coil Units DX.xlsx':{'tag':'C3','design_cfm':'C11','osa_cfm':'C12'},
+    'Fan Coil Units WTR.xlsx':{'tag':'C3','design_cfm':'C11','osa_cfm':'C12','area_served':'C4'},
+    'Fan Coil Units DX.xlsx':{'tag':'C3','area_served':'C4','design_cfm':'C11','osa_cfm':'C12','cooling_edb':'C16','cooling_ewb':'C17','cooling_ldb':'C18','cooling_lwb':'C19','heating_edb':'C26','heating_ldb':'C27'},
     'Kitchen Hood.xlsx':{'tag':'D3','design_cfm':'D6'},
     'Chiller - Air Cooled.xlsx':{'tag':'C3','design_gpm':'C17'},
 }
+TEXT_CELLS={'service','area_served','equipment_location','unit_type'}
+
+
+def inferred_form(tag):
+    tag=str(tag or '').upper()
+    if re.match(r'^(AHU|RTU|OAU|DOAS|MAU|AC)[- ]?\d',tag):return 'Air Moving Equipment.xlsx'
+    if re.match(r'^(EF|KEF|TEF|CEF|SEF|RLF)[- ]?\d',tag):return 'Exhaust Fans _Std._.xlsx'
+    if re.match(r'^(VRF|SSAU)[- ]?\d',tag):return 'Fan Coil Units DX.xlsx'
+    if re.match(r'^KH[- ]?\d',tag):return 'Kitchen Hood.xlsx'
+    return None
 
 
 def unit_form(record):
     if 'template' in record:
         return record['template'] if record.get('template') in UNIT_FORMS else None
-    tag=str(record.get('tag','')).upper()
-    if re.match(r'^(AHU|RTU|OAU|DOAS|MAU|AC)[- ]?\d',tag):return 'Air Moving Equipment.xlsx'
-    if re.match(r'^(EF|KEF|TEF)[- ]?\d',tag):return 'Exhaust Fans _Std._.xlsx'
-    if re.match(r'^KH[- ]?\d',tag):return 'Kitchen Hood.xlsx'
-    return None
+    return inferred_form(record.get('tag'))

@@ -1,3 +1,5 @@
 __pycache__/
 *.pyc
 .venv/
+# Local job documents. Do not commit client drawings or submittals.
+tests/private/
