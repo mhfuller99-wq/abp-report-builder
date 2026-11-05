@@ -5,6 +5,7 @@ import zipfile
 from openpyxl import load_workbook
 from openpyxl.cell.cell import MergedCell
 from openpyxl.workbook.properties import CalcProperties
+from abp_fidelity import preserve_template_parts
 
 MAX_CELLS = 200_000
 SUPPORTED = ('AIR MOVING EQUIPMENT', 'MAU', 'COIL DX GAS', 'SUPPLY DIFFUSERS',
@@ -24,11 +25,6 @@ def open_reference(data):
     wb = load_workbook(io.BytesIO(data), keep_links=False)
     if sum(s.max_row * s.max_column for s in wb) > MAX_CELLS:
         raise ValueError('Reference workbook has too many cells')
-    for ws in wb:
-        for row in ws:
-            for c in row:
-                if isinstance(c.value, str) and c.value.startswith(('\n=', '\r\n=')):
-                    c.value = c.value.lstrip()
     return wb
 
 
@@ -89,23 +85,7 @@ def reset_special_layout(ws):
             for c in row:
                 if isinstance(c, MergedCell):
                     continue
-                if c.data_type == 'f':
-                    # Count referenced numeric inputs, including ranges. This keeps
-                    # calculated field outputs blank until every input is present.
-                    formula = c.value[1:]
-                    refs = re.findall(r'\$?[A-Z]{1,3}\$?\d+(?::\$?[A-Z]{1,3}\$?\d+)?', formula)
-                    if refs:
-                        from openpyxl.utils.cell import range_boundaries
-                        tests = []
-                        for ref in dict.fromkeys(refs):
-                            a, b, x, y = range_boundaries(ref.replace('$', ''))
-                            count = (x-a+1)*(y-b+1)
-                            # Aggregated readings may occupy only part of a grid.
-                            need = 1 if formula.upper().startswith(('SUM(', 'AVERAGE(')) else count
-                            tests.append(f'COUNT({ref})<{need}')
-                        c.value = '=IF(OR(' + ','.join(tests) + '),"",' + formula + ')'
-                else:
-                    c.value = None
+                if c.data_type != 'f':c.value = None
 
     if kind in ('AIR MOVING EQUIPMENT', 'MAU'):
         starts = [c.row-3 for row in ws for c in row
@@ -118,15 +98,6 @@ def reset_special_layout(ws):
                 blank(address)
             for cell in ws[off+29]:
                 if isinstance(cell.value,(int,float)) or cell.data_type=='f':blank(cell.coordinate)
-            from openpyxl.formula.translate import Translator
-            motor_formulas = {
-                19: '=IF(OR(T5="",T6=""),"",IF(T18=3,IF(COUNT(T17,V17,X17)<3,"",IF(AVERAGE(T17,V17,X17)=0,"",T5*T6/AVERAGE(T17,V17,X17))),IF(T18=1,IF(OR(V17="",V17=0),"",T5*T6/V17),"")))',
-                24: '=IF(T18=1,IF(COUNT(V17,V20)<2,"",V17*V20*0.8*0.9/746),IF(T18=3,IF(COUNT(T17,V17,X17,T20,V20,X20)<6,"",AVERAGE(T17,V17,X17)*AVERAGE(T20,V20,X20)*0.8*0.9*1.732/746),""))',
-            }
-            for row, formula in motor_formulas.items():
-                target = f'T{row+off}'
-                if ws[target].data_type == 'f':
-                    ws[target] = Translator(formula, origin=f'T{row}').translate_formula(target)
     elif kind == 'COIL DX GAS':
         for row in ws:
             for c in row:
@@ -205,7 +176,7 @@ def reset_special_layout(ws):
     return True
 
 
-def reset_measurements(ws):
+def _reset_measurements_legacy(ws):
     """Respect each repeating Design/Actual block; retain calculation formulas."""
     if reset_special_layout(ws):
         return
@@ -230,9 +201,6 @@ def reset_measurements(ws):
                     continue
                 if str(c.value or '').strip().upper() in ('--', 'TECHNICIAN:', 'TEST DATE:'):
                     continue
-                if c.data_type == 'f' and re.fullmatch(r'=SUM\([A-Z]+\d+:[A-Z]+\d+\)',c.value):
-                    inputs=c.value[5:-1]
-                    c.value=f'=IF(COUNT({inputs})=0,"",SUM({inputs}))'
                 clear_value(c)
     for row in ws:
         for c in row:
@@ -266,29 +234,26 @@ def reset_measurements(ws):
         for row in ws.iter_rows(min_row=3, max_row=min(39, ws.max_row)):
             for c in row:
                 clear_value(c)
-    # Avoid showing a completed zero-flow test before any measurements exist.
-    for row in ws:
-        for c in row:
-            if c.data_type != 'f':
-                continue
-            formula = c.value
-            if re.fullmatch(r'=[A-Z]+\d+/[A-Z]+\d+', formula):
-                numerator, denominator = formula[1:].split('/')
-                c.value = f'=IF(OR({numerator}="",{denominator}="",{denominator}=0),"",{numerator}/{denominator})'
-    if kind == 'PUMP':
-        for target, a, b in [('D20','D18','D19'), ('D27','D25','D26')]:
-            if ws[target].data_type == 'f':
-                ws[target] = f'=IF(OR({a}="",{b}=""),"",{a}-{b})'
-        if ws['H24'].data_type == 'f':
-            ws['H24'] = '=IF(H18=1,IF(COUNT(I17,I20)<2,"",I17*I20*0.8*0.9/746),IF(H18=3,IF(COUNT(H17:J17,H20:J20)<6,"",AVERAGE(H17:J17)*AVERAGE(H20:J20)*0.8*0.9*1.732/746),""))'
-    if kind == 'EXHAUST FAN':
-        if ws['U19'].data_type == 'f':
-            ws['U19'] = '=IF(OR(U5="",U6="",U18=""),"",IF(U18=3,IF(COUNT(U17,W17,Y17)<3,"",IF(AVERAGE(U17,W17,Y17)=0,"",U5*U6/AVERAGE(U17,W17,Y17))),IF(U18=1,IF(OR(W17="",W17=0),"",U5*U6/W17),"")))'
-        if ws['U24'].data_type == 'f':
-            ws['U24'] = '=IF(U18=1,IF(COUNT(W17,W20)<2,"",W17*W20*0.8*0.9/746),IF(U18=3,IF(COUNT(U17,W17,Y17,U20,W20,Y20)<6,"",AVERAGE(U17,W17,Y17)*AVERAGE(U20,W20,Y20)*0.8*0.9*1.732/746),""))'
-        for target, a, b in [('K20','I29','Q29'), ('K21','B29','X29')]:
-            if ws[target].data_type == 'f':
-                ws[target] = f'=IF(OR({a}="",{b}=""),"",IF({a}<0,ABS({a}),-ABS({a}))+{b})'
+def reset_measurements(ws):
+    """Clear literal field inputs, preserving every original formula and format.
+
+    No formula guards, translations, replacements or number-format changes.
+    Calculated zero/error displays are the original template's behavior.
+    """
+    from copy import deepcopy
+    formulas={c.coordinate:c.value for row in ws for c in row if c.data_type=='f'}
+    print_area=ws.print_area
+    row_breaks=deepcopy(ws.row_breaks)
+    images=list(ws._images)
+    kind=family(ws)
+    if kind=='COVER':
+        # Keep template labels/certification text and artwork unchanged.
+        for addr in ('A5','B39'):
+            if ws[addr].data_type!='f':clear_value(ws[addr])
+    else:
+        _reset_measurements_legacy(ws)
+    for address,value in formulas.items():ws[address]=value
+    ws.print_area=print_area;ws.row_breaks=row_breaks;ws._images=images
 
 
 def build_reference(data, project, location=''):
@@ -303,8 +268,6 @@ def build_reference(data, project, location=''):
                 wb.remove(ws)
                 continue
             reset_measurements(ws)
-            ws.oddFooter.left.text = 'PRE-FIELD DRAFT - NOT CERTIFIED'
-            ws.oddFooter.right.text = 'Page &P of &N'
         # The report opens on the same equipment page as the approved reference.
         wb.active = 0
         wb.properties.title = project
@@ -313,6 +276,6 @@ def build_reference(data, project, location=''):
         wb.calculation = CalcProperties(calcMode='auto', fullCalcOnLoad=True)
         out = io.BytesIO()
         wb.save(out)
-        return out.getvalue()
+        return preserve_template_parts(out.getvalue(),{ws.title:(data,ws.title) for ws in wb})
     finally:
         wb.close()

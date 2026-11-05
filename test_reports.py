@@ -43,10 +43,10 @@ class ReportTests(unittest.TestCase):
             self.assertEqual(result.worksheets[0][f'Q{42+off}'].value,'TEST DATE:')
         self.assertEqual(result['KITCHEN HOOD']['D6'].value,2500)
         self.assertIsNone(result['KITCHEN HOOD']['D12'].value)
-        self.assertIn('COUNT(D11)',result['KITCHEN HOOD']['D13'].value)
+        self.assertEqual('=D11*D12',result['KITCHEN HOOD']['D13'].value)
         self.assertIsNone(result['DUCT TRAVERSE RECT.']['B10'].value)
         self.assertIn('M7*L7/144',result['DUCT TRAVERSE RECT.']['N7'].value)
-        self.assertTrue(result['DUCT TRAVERSE RECT.']['N7'].value.startswith('=IF('))
+        self.assertEqual(result['DUCT TRAVERSE RECT.']['N7'].value,'=M7*L7/144')
         self.assertIsNone(result['EXHAUST FANS SMALL']['D10'].value)
         self.assertLessEqual(result['EXHAUST FANS SMALL'].max_row,16)
 
@@ -59,9 +59,9 @@ class ReportTests(unittest.TestCase):
         inst['D4']='Old serial';inst['E4']='Old calibration date'
         unit=wb.create_sheet('EXHAUST FAN');unit['B3']='UNIT DESIGNATION';unit['H3']='KEF-1'
         result=load_workbook(io.BytesIO(build_reference(packed(wb),'Example')))
-        self.assertIn('PRE-FIELD',result['Cover ']['A7'].value)
+        self.assertEqual(ws['A7'].value,result['Cover ']['A7'].value)
         self.assertIsNone(result['Cover ']['B39'].value)
-        self.assertIn('pending',result['Cover ']['B30'].value)
+        self.assertEqual(ws['B30'].value,result['Cover ']['B30'].value)
         self.assertIsNone(result['INSTRUMENT']['D4'].value)
         self.assertEqual(result['INSTRUMENT']['A4'].value,'Manometer')
 
@@ -118,7 +118,7 @@ class ReportTests(unittest.TestCase):
         self.assertEqual(ws['G7'].value,70)
         self.assertIsNone(ws['H7'].value);self.assertIsNone(ws['F7'].value)
         self.assertEqual(ws['H4'].value,'CFM')
-        self.assertIn('H7=""',ws['I7'].value)
+        self.assertEqual('=H7/G7',ws['I7'].value)
         self.assertIsNone(result['EXHAUST FAN']['I29'].value)
 
     def test_reject_unknown_layout(self):

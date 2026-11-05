@@ -32,23 +32,22 @@ Gas Heating Values(btuh) - Input: 400,000 Output: 324,000'''
         payload={'project':'Regression','templates':['Air Moving Equipment.xlsx','Coil DX GAS HT.xlsx','Duct Traverse Rect..xlsx'],
                  'records':records,'layout':'grouped'}
         wb=load_workbook(io.BytesIO(build(payload)))
-        s=wb['AIR MOVING EQUIPMENT']
-        for off in (0,43,86,129):
-            self.assertEqual(s[f'G{19+off}'].value,750)
-            self.assertEqual(s[f'G{22+off}'].value,1)
-            self.assertIn(f'G{17+off}-G{19+off}',s[f'G{20+off}'].value)
-            self.assertEqual(s[f'G{6+off}'].value,'EXAMPLE')
-            self.assertIsNone(s[f'J{26+off}'].value)
-        c=wb['COIL DX GAS HT']
-        self.assertEqual(c['D4'].value,'RTU-1');self.assertEqual(c['D48'].value,'RTU-4')
-        self.assertEqual(c['D19'].value,300900);self.assertEqual(c['D28'].value,324000)
-        self.assertIsNone(c['E14'].value)
-        t=wb['DUCT TRAVERSE RECT.']
-        for off in (0,43,86,129):
-            self.assertEqual(t[f'L{3+off}'].value,2500)
-            self.assertEqual(t[f'L{25+off}'].value,750)
-            self.assertIsNone(t[f'B{32+off}'].value)
-        self.assertEqual(len(s.row_breaks.brk),3)
+        for i in range(1,5):
+            s=wb[f'RTU-{i}']
+            self.assertEqual(s['G18'].value,750)
+            self.assertEqual(s['G19'].value,'=G17-G18')
+            self.assertEqual(s['G21'].value,1)
+            self.assertEqual(s['G6'].value,'EXAMPLE')
+            self.assertIsNone(s['J17'].value)
+            t=wb[f'RTU-{i} OSA TRAVERSE']
+            self.assertEqual(t['L3'].value,2500)
+            self.assertEqual(t['L25'].value,750)
+            self.assertIsNone(t['B32'].value)
+        c=wb['COIL DX GAS 1']
+        self.assertEqual(c['D4'].value,'RTU-1')
+        self.assertEqual(c['D19'].data_type,'f')
+        self.assertEqual(c['D28'].data_type,'f')
+        self.assertEqual(wb['COIL DX GAS 2']['D4'].value,'RTU-4')
 
     def test_every_reference_traverse_panel_is_cleared(self):
         wb=Workbook();s=wb.active;s.title='DUCT TRAVERSE RECT.'

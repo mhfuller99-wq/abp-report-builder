@@ -62,7 +62,7 @@ class DesignTests(unittest.TestCase):
         for tag,form,field,value,cell,actual in forms:
             self.assertIn(tag,out.sheetnames);self.assertEqual(out[tag][cell].value,value)
             self.assertTrue(out[tag][actual].value is None or out[tag][actual].data_type=='f')
-        self.assertTrue(out['KH-1']['D7'].value.startswith('=IF('))
+        self.assertEqual(out['KH-1']['D7'].data_type,'f')
 
     def test_unsupported_verified_unit_cannot_disappear(self):
         with self.assertRaisesRegex(ValueError,'select a unit report form'):
