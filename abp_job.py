@@ -62,11 +62,18 @@ def performance_candidates(text, tag_pattern):
 def configure_air_form(ws, record):
     """Retain the standard form; use the ABP min/max panel when specified."""
     if record.get('osa_min_cfm') in (None,''):return False
+    from copy import copy
     labels={18:'OSA AIRFLOW MAX (CFM)',19:'OSA AIRFLOW MIN (CFM)',20:'RETURN AIRFLOW (CFM)',
             21:'TOTAL S.P. (in w.c.)',22:'EXTERNAL S.P. (in w.c.)',23:'OSA DAMPER POS. MAX',
             24:'OSA DAMPER POS. MIN',25:'RETURN DAMPER POS. MAX',26:'RETURN DAMPER POS. MIN'}
     for row,label in labels.items():
         ws[f'A{row}']=label;ws[f'G{row}']=None;ws[f'J{row}']=None
+        ws[f'A{row}'].alignment=copy(ws['A18'].alignment)
+        ws[f'A{row}'].font=copy(ws['A18'].font)
+    for row in (17,18,19,20):
+        for col in ('G','J'):ws[f'{col}{row}'].number_format='#,##0'
+    for row in (21,22):
+        for col in ('G','J'):ws[f'{col}{row}'].number_format='0.00'
     ws['G20']='=IF(OR(G17="",G19=""),"",G17-G19)'
     ws['J20']='=IF(OR(J17="",J19=""),"",J17-J19)'
     ws['J21']='=IF(OR(W29="",Q29=""),"",W29-Q29)'
