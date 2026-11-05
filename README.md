@@ -42,7 +42,9 @@ motor RPM and unit MCA is not motor FLA. Extracted values stay unverified
 until the reviewer accepts them. Manufacturer and model are not written into
 the pre-field workbook. The workbook is project information, notes, the
 applicable equipment forms, then rectangular and round traverse sheets.
-EXTRACTION CANDIDATES and other audit tabs are not exported.
+EXTRACTION CANDIDATES and other audit tabs are not exported. Client drawings
+and submittals are not stored in this repository. Point `ABP_PRIVATE_SOURCES`
+at a local folder to opt in to a private scan of those PDFs.
 
 Run `python -m unittest -v test_reports.py` for regression checks.
 
