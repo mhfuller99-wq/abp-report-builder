@@ -42,11 +42,11 @@ class FidelityTests(unittest.TestCase):
         payload={'project':'Test','layout':'grouped','templates':['Air Moving Equipment.xlsx','Coil DX GAS HT.xlsx'],
                  'records':[{'tag':'RTU-1','status':'VERIFIED','template':'Air Moving Equipment.xlsx','design_cfm':9500,'osa_cfm':2500,'osa_min_cfm':750,'cooling_total_btu':300900}]}
         data=build(payload);w=load_workbook(io.BytesIO(data))
-        for name,sheet in [('Air Moving Equipment.xlsx','RTU-1'),('Coil DX GAS HT.xlsx','COIL DX GAS 1')]:
+        for name,sheet in [('Air Moving Equipment.xlsx','AIR MOVING EQUIPMENT'),('Coil DX GAS HT.xlsx','COIL DX GAS HT')]:
             source=LOOKUP[name].read_bytes();s=load_workbook(io.BytesIO(source)).worksheets[0]
             self.assertEqual(formulas(source,s.title),formulas(data,sheet))
-        self.assertEqual(w['RTU-1']['G18'].value,750)
-        self.assertEqual(w['RTU-1']['G19'].value,'=G17-G18')
-        self.assertEqual(w['COIL DX GAS 1']['D19'].data_type,'f')
+        self.assertEqual(w['AIR MOVING EQUIPMENT']['G18'].value,750)
+        self.assertEqual(w['AIR MOVING EQUIPMENT']['G19'].value,'=G17-G18')
+        self.assertEqual(w['COIL DX GAS HT']['D19'].data_type,'f')
 
 if __name__=='__main__':unittest.main()

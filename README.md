@@ -87,3 +87,11 @@ sessions produce readable messages. Worksheet display names omit filename
 extensions; the original master filenames and workbook contents are preserved.
 
 Run `node test_ui_helpers.cjs` for saved-review and API-message checks.
+
+Source-built reports use one tab per master equipment form. Existing multi-unit
+Design/Actual slots are filled first (eight small exhaust fans, four fan coils).
+Additional master pages continue vertically on the same applicable tab, with
+page breaks and repeated artwork. Original master files are never edited.
+Repeated formulas use Excel-style relative reference translation only; their
+operators, constants, absolute references and calculation logic are retained.
+Approved-reference reports retain their existing sheet arrangement.

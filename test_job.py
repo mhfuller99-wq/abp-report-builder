@@ -33,21 +33,23 @@ Gas Heating Values(btuh) - Input: 400,000 Output: 324,000'''
                  'records':records,'layout':'grouped'}
         wb=load_workbook(io.BytesIO(build(payload)))
         for i in range(1,5):
-            s=wb[f'RTU-{i}']
-            self.assertEqual(s['G18'].value,750)
-            self.assertEqual(s['G19'].value,'=G17-G18')
-            self.assertEqual(s['G21'].value,1)
-            self.assertEqual(s['G6'].value,'EXAMPLE')
-            self.assertIsNone(s['J17'].value)
-            t=wb[f'RTU-{i} OSA TRAVERSE']
-            self.assertEqual(t['L3'].value,2500)
-            self.assertEqual(t['L25'].value,750)
-            self.assertIsNone(t['B32'].value)
-        c=wb['COIL DX GAS 1']
+            s=wb['AIR MOVING EQUIPMENT'];off=(i-1)*42
+            self.assertEqual(s[f'G{3+off}'].value,f'RTU-{i}')
+            self.assertEqual(s[f'G{18+off}'].value,750)
+            self.assertEqual(s[f'G{19+off}'].value,f'=G{17+off}-G{18+off}')
+            self.assertEqual(s[f'G{21+off}'].value,1)
+            self.assertEqual(s[f'G{6+off}'].value,'EXAMPLE')
+            self.assertIsNone(s[f'J{17+off}'].value)
+            t=wb['DUCT TRAVERSE RECT.']
+            self.assertEqual(t[f'L{3+off}'].value,2500)
+            self.assertEqual(t[f'L{25+off}'].value,750)
+            self.assertIsNone(t[f'B{32+off}'].value)
+        self.assertFalse(any(name.startswith('RTU-') for name in wb.sheetnames))
+        c=wb['COIL DX GAS HT']
         self.assertEqual(c['D4'].value,'RTU-1')
         self.assertEqual(c['D19'].data_type,'f')
         self.assertEqual(c['D28'].data_type,'f')
-        self.assertEqual(wb['COIL DX GAS 2']['D4'].value,'RTU-4')
+        self.assertEqual(c['D46'].value,'RTU-4')
 
     def test_every_reference_traverse_panel_is_cleared(self):
         wb=Workbook();s=wb.active;s.title='DUCT TRAVERSE RECT.'

@@ -60,9 +60,11 @@ class DesignTests(unittest.TestCase):
                  'records':[{'tag':tag,'template':form,field:value,'status':'VERIFIED'} for tag,form,field,value,_,_ in forms]}
         out=load_workbook(io.BytesIO(build(payload)))
         for tag,form,field,value,cell,actual in forms:
-            self.assertIn(tag,out.sheetnames);self.assertEqual(out[tag][cell].value,value)
-            self.assertTrue(out[tag][actual].value is None or out[tag][actual].data_type=='f')
-        self.assertEqual(out['KH-1']['D7'].data_type,'f')
+            from abp_server import LOOKUP
+            title=load_workbook(LOOKUP[form]).active.title
+            self.assertIn(title,out.sheetnames);self.assertEqual(out[title][cell].value,value)
+            self.assertTrue(out[title][actual].value is None or out[title][actual].data_type=='f')
+        self.assertEqual(out['KITCHEN HOOD']['D7'].data_type,'f')
 
     def test_unsupported_verified_unit_cannot_disappear(self):
         with self.assertRaisesRegex(ValueError,'select a unit report form'):
