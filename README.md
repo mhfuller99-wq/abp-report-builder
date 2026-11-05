@@ -33,12 +33,16 @@ before testing. Old cover page references are cleared because certificate pages
 have changed. Unknown sheet families are rejected
 rather than silently leaving historical field measurements in the output.
 
-Source-document mode remains a reviewed text-extraction workflow, not a complete
-automatic drawing takeoff. BC, BCU, CH and pump tags are now recognized, and BCU/BC
-tags offer water/DX coil templates for review. KH, KEF and TEF tags also recommend
-appropriate hood or exhaust forms. Different tag names across plans and
-submittals are not automatically treated as the same equipment. Schedule tables
-stored as drawing graphics still require review.
+Source-document mode reads text schedules from PDF drawings and submittals.
+Rows are taken from visual lines, so a grille mark cannot combine with a
+distant dimension. VRF indoor units, dedicated outside-air units and exhaust
+fans map to the DX fan-coil, air-moving and standard exhaust forms. Submittal
+unit totals and motor nameplate values outrank the plan; fan speed is not
+motor RPM and unit MCA is not motor FLA. Extracted values stay unverified
+until the reviewer accepts them. Manufacturer and model are not written into
+the pre-field workbook. The workbook is project information, notes, the
+applicable equipment forms, then rectangular and round traverse sheets.
+EXTRACTION CANDIDATES and other audit tabs are not exported.
 
 Run `python -m unittest -v test_reports.py` for regression checks.
 

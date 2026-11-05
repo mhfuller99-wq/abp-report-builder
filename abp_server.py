@@ -7,19 +7,18 @@ from socketserver import TCPServer
 from urllib.parse import unquote,parse_qs,urlsplit
 from openpyxl import Workbook,load_workbook
 from openpyxl.workbook.properties import CalcProperties
-from openpyxl.styles import Font,PatternFill
-from openpyxl.utils import get_column_letter
 from abp_reference import inspect_reference, build_reference, reset_measurements
 from abp_fidelity import preserve_template_parts
 from abp_grouped import group_template_sheets
-from abp_design import extract_design_rows, UNIT_FORMS, unit_form
+from abp_design import extract_design_rows, UNIT_FORMS, TEXT_CELLS, unit_form, inferred_form
 from abp_job import NUMERIC_FIELDS, TEXT_FIELDS, canonical_tag, postal_match, performance_candidates, populate_identity, populate_support, prepare_documentation
+from abp_schedule import parse_pdf, annotate
 
 ROOT=Path(__file__).resolve().parent
 TEMPLATES=ROOT/'03_Workbooks_and_Master_Templates'
 FILES=[p for p in sorted(TEMPLATES.glob('*.xlsx')) if p.name not in {'Blue Mountain - TAB Report.xlsx','CAFB Egress Shop - TAB Report.xlsx','CALEDONIA FEILDHOUSE TAB REPORT.xlsx','Cadence  Bank- Starkville MS .xlsx','New Hope Fieldhouse.xlsx','WEST LOWNDES FIELDHOUSE .xlsx'}]
 LOOKUP={p.name:p for p in FILES}
-TAGS=re.compile(r'\b(?:(?:BCU|BC|CH|CHP|CHWP|HWP|CWP|PCP|SCP|PHP|SHP|P|B|F|AH|ACU|PAC|KSF)(?:\s*-\s*|\s+)|(?:AHU|RTU|OAU|DOAS|CRU|MAU|ERV|HRV|FCU|FC|VAV|FPP|IU|IDU|MSFC|MSE|MS|PTAC|CRAC|IHP|HPBC|HP|AC|ACC|DSS|DCU|KEF|TEF|CEF|SEF|RLF|KH|EF|SF|RF|GF|PU|EUH|EWH|CUH|UH|FFU|LF)(?:\s*-\s*|\s+)?)\d+[A-Z]?(?:[-.][A-Z0-9]+)*\b',re.I)
+TAGS=re.compile(r'\b(?:(?:BCU|BC|CH|CHP|CHWP|HWP|CWP|PCP|SCP|PHP|SHP|P|B|F|AH|ACU|PAC|KSF)(?:\s*-\s*|\s+)|(?:AHU|RTU|OAU|DOAS|CRU|MAU|ERV|HRV|FCU|FC|VAV|FPP|IU|IDU|MSFC|MSE|MS|PTAC|CRAC|IHP|HPBC|HP|AC|ACC|DSS|DCU|KEF|TEF|CEF|SEF|RLF|KH|EF|SF|RF|GF|PU|EUH|EWH|CUH|UH|FFU|LF|VRF|SSAU|SSCU|GUH|HVLS|PF|FS|EH)(?:\s*-\s*|\s+)?)\d+[A-Z]?(?:[-.][A-Z0-9]+)*\b',re.I)
 MAX_RECORDS=500
 MAX_UPLOAD=200_000_000
 MAX_OUTPUT_ROWS=30000
@@ -54,17 +53,20 @@ def read_sources(blobs):
         name=Path(name).name[:160];ext=Path(name).suffix.lower();chunks=[];structured=[]
         try:
             if ext=='.pdf':
-                import fitz
-                with fitz.open(stream=data,filetype='pdf') as doc:
+                import pymupdf
+                parsed,pdf_warnings=parse_pdf(name,data)
+                warnings.extend(pdf_warnings)
+                with pymupdf.open(stream=data,filetype='pdf') as doc:
                     if doc.page_count>300:raise ValueError('PDF has more than 300 pages')
                     for i,page in enumerate(doc):
-                        txt=page.get_text(sort=True)
+                        words=page.get_text('words') or []
+                        txt=' '.join(word[4] for word in sorted(words,key=lambda item:(item[1],item[0])))
                         chunks.append((f'page {i+1}',txt))
                         for candidate in performance_candidates(txt,TAGS):
-                            structured.append({**candidate,'reference':f'page {i+1}'})
-                        if not TAGS.search(txt) and (len(txt.strip())<200 or page.get_images()):
-                            warnings.append(f'{name}: page {i+1} has no readable equipment tags and may contain a scanned schedule; manual takeoff required')
-                    if not any(t.strip() for _,t in chunks):warnings.append(name+': image-only PDF; manual takeoff required')
+                            structured.append({**candidate,'reference':f'page {i+1}','basis':'TAGGED_PERFORMANCE'})
+                for item in parsed:
+                    structured.append(item)
+                if not any(t.strip() for _,t in chunks):warnings.append(name+': image-only PDF; manual takeoff required')
             elif ext=='.csv':
                 decoded=data.decode('utf-8-sig')
                 source_rows=list(csv.reader(io.StringIO(decoded)))
@@ -97,6 +99,10 @@ def read_sources(blobs):
                 for signal,pattern in SCHEDULE_SIGNALS.items():
                     if pattern.search(chunk[:6000]):signals.add(signal)
                 if len(preview)<12:preview.append(chunk[:200])
+                # PDF equipment comes from schedule rows. Searching the flattened
+                # page would join a grille mark to a distant dimension.
+                if ext=='.pdf':
+                    continue
                 for line in chunk.splitlines():
                     for m in TAGS.finditer(line):
                         if re.search(r'\b(?:IAS|ICC|ANSI|ASTM)\s*$',line[:m.start()],re.I):continue
@@ -121,6 +127,20 @@ def read_sources(blobs):
                 if len(records[tag]['candidates'])<30:records[tag]['candidates'].append({**candidate,'source':name})
             if len(records)>MAX_RECORDS:warnings.append('More than 500 unique tags found; only first 500 will be shown')
         except Exception as e:warnings.append(name+': could not parse ('+str(e)[:120]+')')
+    for record in records.values():
+        annotate(record)
+        for item in record.get('candidates') or []:
+            for key in ('fan_rpm','motor_watts','unit_mca','unit_mop','brake_hp'):
+                (item.get('values') or {}).pop(key, None)
+        form=inferred_form(record['tag'])
+        if form:
+            record['template']=form
+        elif any(str(item.get('reference','')).startswith('page') or item.get('unmapped') for item in record.get('candidates') or []):
+            record['template']=''
+            record['proposed']={}
+            record['text_proposed']={}
+            if 'No supported report form; excluded from the workbook until a form is selected' not in record['flags']:
+                record['flags'].append('No supported report form; excluded from the workbook until a form is selected')
     return {'tags':list(records)[:MAX_RECORDS],'records':list(records.values())[:MAX_RECORDS],'warnings':warnings,'characters':total_chars,'sources':sources,'preview':'\n'.join(preview)[:1800],'signals':sorted(signals)}
 
 # These labels only suggest which original ABP workbook to include.
@@ -151,18 +171,24 @@ def suggested_templates(tags,signals=None):
     def add(filename,reason,review=False):
         if filename in LOOKUP and not any(x['name']==filename for x in result):
             result.append({'name':filename,'reason':reason,'review':review})
-    for name in ('Cover - Drew.xlsx','Abbreviations.xlsx','Project Summary.xlsx','Project Information.xlsx','Notes.xlsx','PRE-TAB Checklist.xlsx'):
-        add(name,'Core project documentation')
+    for name in ('Project Information.xlsx','Notes.xlsx'):
+        add(name,'Project information and notes')
     def tagged(prefixes):
         return any(re.match(r'^(?:'+prefixes+r')[- ]?\d',tag) for tag in tags)
+    def add_traverses():
+        add('Duct Traverse Rect..xlsx','Blank rectangular traverse sheets for field readings')
+        add('Duct Traverse RND.xlsx','Blank round traverse sheets for field readings')
     if tagged('AHU|RTU|OAU|DOAS|MAU|AC|SF|RF|CRU|GF|PU') or 'air_moving' in signals:
         add('Air Moving Equipment.xlsx','Air-moving equipment tags or schedule heading')
-        add('Duct Traverse Rect..xlsx','Outside-air traverse forms; confirm duct shape and required tests',True)
-    if 'gas_performance' in signals:
-        add('Coil DX GAS HT.xlsx','Tagged DX cooling and gas-heating performance summary',True)
+        add_traverses()
+    if tagged('DOAS') or 'gas_performance' in signals:
+        add('Coil DX GAS HT.xlsx','DX cooling and gas-heat performance for the outside-air unit')
     if tagged('EF|KEF|TEF|CEF|SEF|RLF') or 'exhaust_fan' in signals:
         add('Exhaust Fans _Std._.xlsx','Exhaust fan tags or schedule heading')
-        add('Exhaust Fans _Sm._.xlsx','Small and standard fan forms both occur in past reports; choose the applicable form per unit',True)
+        add_traverses()
+    if tagged('VRF|SSAU'):
+        add('Fan Coil Units DX.xlsx','VRF and split indoor units use the DX fan-coil form')
+        add_traverses()
     if tagged('FCU|FC|IU|IDU|MSFC|MSE|MS|DSS|PTAC|BCU|BC') or 'fan_coil' in signals:
         water=tagged('BCU|BC') or 'water_coil' in signals
         add('Fan Coil Units WTR.xlsx' if water else 'Fan Coil Units DX.xlsx','Fan-coil equipment; confirm water or DX type against the schedule',True)
@@ -175,7 +201,7 @@ def suggested_templates(tags,signals=None):
         add('Air Moving Equipment.xlsx','Air-moving form observed for this tag family; confirm the current job equipment type',True)
         if tagged('AH'):
             add('Fan Coil Units DX.xlsx','AH also occurs on fan-coil forms; select the applicable unit form',True)
-    if tagged('B'):add('Boiler.xlsx','Boiler tag; confirm service and design data',True)
+    # A bare B- tag is not a boiler. Boiler sheets follow a boiler schedule heading.
     if tagged('CH|ACC'):
         add('Chiller - Air Cooled.xlsx','Chiller tag; verify condenser type',True)
     if tagged('CH'):
@@ -205,13 +231,25 @@ def sheet_name(wb,name):
         suffix=f' ({i})';s=name[:31-len(suffix)]+suffix;i+=1
     return s
 
+def theme_colors(theme):
+    if not theme:return None
+    text=theme.decode('utf-8','replace') if isinstance(theme,(bytes,bytearray)) else str(theme)
+    start=text.find('<a:clrScheme')
+    end=text.find('</a:clrScheme>')
+    if start<0 or end<=start:return None
+    return re.sub(r'\sname="[^"]*"','',text[start:end])
+
 def add_template(wb,path):
     source=load_workbook(path)
     if wb.loaded_theme is None:wb.loaded_theme=source.loaded_theme
-    elif source.loaded_theme is not None and wb.loaded_theme!=source.loaded_theme:raise ValueError('Templates use incompatible themes; build separately to preserve their formatting')
+    elif source.loaded_theme is not None and wb.loaded_theme!=source.loaded_theme:
+        # Project information uses the same Office palette under a different theme name.
+        if theme_colors(wb.loaded_theme)!=theme_colors(source.loaded_theme):
+            raise ValueError('Templates use incompatible themes; build separately to preserve their formatting')
     for ws in source:
         dst=wb.create_sheet(sheet_name(wb,ws.title))
         dst._template_origin=(path.read_bytes(),ws.title)
+        dst._template_file=path.name
         dst._template_formulas={c.coordinate:c.value for row in ws for c in row if c.data_type=='f'}
         for row in ws:
             for c in row:
@@ -327,8 +365,11 @@ def populate_equipment(wb,records,selected):
                 cells.pop('osa_cfm',None);cells['osa_min_cfm']='G18'
             populate_identity(ws,rec,excel_safe)
         for key,addr in cells.items():
-            if key=='tag':continue
+            if key=='tag' or key in TEXT_CELLS:continue
             if addr and rec.get(key) not in (None,'') and ws[addr].data_type!='f':ws[addr]=float(rec[key])
+        for key,addr in cells.items():
+            if key in TEXT_CELLS and rec.get(key) not in (None,'') and ws[addr].data_type!='f':
+                ws[addr]=excel_safe(str(rec[key]))
         count+=1
     return count
 
@@ -349,76 +390,30 @@ def build(payload):
         before=set(wb.sheetnames);add_template(wb,LOOKUP[name])
         for title in set(wb.sheetnames)-before:reset_measurements(wb[title])
     populate_support(wb,records,selected,LOOKUP,add_template,reset_measurements,sheet_name)
-    populated=populate_equipment(wb,records,selected)
+    populate_equipment(wb,records,selected)
     prepare_documentation(wb,excel_safe(project),excel_safe(str(payload.get('location',''))),selected)
+    if payload.get('prefield_pack'):
+        for filename,copies in (('Duct Traverse Rect..xlsx',30),('Duct Traverse RND.xlsx',15)):
+            if filename not in selected:continue
+            have=sum(1 for ws in wb.worksheets if getattr(ws,'_template_file',None)==filename)
+            for _ in range(max(0,copies-have)):
+                before=set(wb.sheetnames);add_template(wb,LOOKUP[filename])
+                for title in set(wb.sheetnames)-before:reset_measurements(wb[title])
+    order={id(ws):index for index,ws in enumerate(wb.worksheets)}
+    def sheet_rank(title):
+        name=title.upper()
+        if name.startswith('PROJECT INFO'):return 0
+        if name.startswith('NOTES'):return 1
+        if name.startswith('AIR MOVING'):return 2
+        if name.startswith('EXHAUST FAN'):return 3
+        if name.startswith('FAN COIL'):return 4
+        if name.startswith('COIL'):return 5
+        if 'TRAVERSE RECT' in name:return 8
+        if 'TRAVERSE RND' in name:return 9
+        return 6
+    wb._sheets.sort(key=lambda ws:(sheet_rank(ws.title),order.get(id(ws),0)))
     if not wb.sheetnames:
         raise ValueError('No worksheets were generated')
-    meta=wb.create_sheet('ABP BUILD INFO',0)
-    fields=[('PROJECT',project),('LOCATION',str(payload.get('location',''))),('PROJECT STANDARD',str(payload.get('standard','Commercial'))),('AIRFLOW TOLERANCE',0.05 if payload.get('standard')=='USACE' else 0.10),('REPORT STATUS','PRE-FIELD DRAFT / NOT CERTIFIED'),('POPULATED VERIFIED UNIT SHEETS',populated),('UNVERIFIED EQUIPMENT COUNT',sum(r.get('status')=='UNVERIFIED' for r in records)),('EXCLUDED EQUIPMENT COUNT',sum(r.get('status')=='EXCLUDED' for r in records)),('SOURCE DOCUMENTS','Review all takeoffs against latest mechanical revision'),('MOTOR FLA','Leave blank until field nameplate verification'),('MAKE / MODEL','Populate only from reviewed source records'),('USACE DALT','Verify approved DALT before TAB' if payload.get('standard')=='USACE' else 'Not automatically required'),('ABP','Air Balance Professionals LLC • Macon, MS • NEBB #3861'),('APPROVAL','Andrew J. Fultz — approval not implied by this draft'),('VERIFIED RECORDS',sum(r.get('status')=='VERIFIED' for r in records)),('SOURCE REVISION STATUS','NOT AUTOMATICALLY VERIFIED — CHECK LATEST M-SHEETS'),('AUTOMATIC EXTRACTION LIMIT','Only labeled text suggestions; not a complete mechanical takeoff')]
-    for i,(k,v) in enumerate(fields,1):meta.cell(i,1,k).font=Font(bold=True,color='FFFFFF');meta.cell(i,1).fill=PatternFill('solid',fgColor='17345B');meta.cell(i,2,excel_safe(v) if isinstance(v,str) else v)
-    meta.column_dimensions['A'].width=26;meta.column_dimensions['B'].width=86
-    tags=payload.get('tags',[])
-    if records:tags=[str(r.get('tag','')) for r in records]
-    if tags:
-        s=wb.create_sheet('TAKEOFF REVIEW',1)
-        for col,h in enumerate(['EQUIPMENT TAG','DESIGN CFM','OSA CFM','ESP (in.w.c.)','MOTOR HP','SOURCE SHEET / REVISION','REVIEW STATUS','OCCURRENCES'],1):s.cell(1,col,h).font=Font(bold=True,color='FFFFFF');s.cell(1,col).fill=PatternFill('solid',fgColor='17345B')
-        for row,tag in enumerate(tags[:500],2):
-            rec=records[row-2] if row-2<len(records) else {}
-            s.cell(row,1,excel_safe(str(tag)[:80]))
-            for col,key in [(2,'design_cfm'),(3,'osa_cfm'),(4,'esp'),(5,'motor_hp')]:
-                value=rec.get(key)
-                if value not in (None,''):
-                    try:s.cell(row,col,float(value))
-                    except (ValueError,TypeError):pass
-            s.cell(row,6,excel_safe((str(rec.get('source',''))+' · '+str(rec.get('reference','')))[:180]))
-            s.cell(row,7,excel_safe(str(rec.get('status','UNVERIFIED'))[:100]));s.cell(row,8,len(rec.get('occurrences',[])))
-            if rec.get('design_gpm') not in (None,''):s.cell(row,9,float(rec['design_gpm']))
-            s.cell(row,10,unit_form(rec) or 'UNIT FORM REQUIRED')
-        for col,label in [(9,'DESIGN GPM'),(10,'UNIT REPORT FORM')]:
-            s.cell(1,col,label).font=Font(bold=True,color='FFFFFF')
-            s.cell(1,col).fill=PatternFill('solid',fgColor='17345B')
-        s.column_dimensions['I'].width=18;s.column_dimensions['J'].width=38
-        s.cell(1,11,'MINIMUM OSA CFM');s.column_dimensions['K'].width=22
-        for i,rec in enumerate(records[:500],2):
-            if rec.get('osa_min_cfm') not in (None,''):s.cell(i,11,float(rec['osa_min_cfm']))
-        s.auto_filter.ref=f'A1:K{len(tags[:500])+1}'
-        s.freeze_panes='B2'
-        if records:
-            e=wb.create_sheet('SOURCE EVIDENCE',2)
-            for c,h in enumerate(['TAG','SOURCE FILE','LOCATION','EXTRACTED CONTEXT'],1):e.cell(1,c,h).font=Font(bold=True,color='FFFFFF');e.cell(1,c).fill=PatternFill('solid',fgColor='17345B')
-            i=2
-            for rec in records[:500]:
-                for occurrence in rec.get('occurrences',[rec]):
-                    for c,val in enumerate([rec.get('tag',''),occurrence.get('source',''),occurrence.get('reference',''),occurrence.get('evidence','')],1):e.cell(i,c,excel_safe(str(val)[:1000]))
-                    i+=1
-            for col,width in [('A',22),('B',44),('C',26),('D',100)]:e.column_dimensions[col].width=width
-            e.freeze_panes='A2' 
-        for c,w in zip('ABCDEFG',[25,18,18,22,16,34,36]):s.column_dimensions[c].width=w
-    if records:
-        suggestions=wb.create_sheet('EXTRACTION CANDIDATES')
-        headers=['TAG','SUGGESTED FIELD','CANDIDATE VALUE','SOURCE FILE','LOCATION','EXCERPT','STATUS']
-        for j,h in enumerate(headers,1):suggestions.cell(1,j,h).font=Font(bold=True,color='FFFFFF');suggestions.cell(1,j).fill=PatternFill('solid',fgColor='17345B')
-        k=2
-        for rec in records:
-            for item in rec.get('candidates',[]):
-                for field,value in item.get('values',{}).items():
-                    for j,v in enumerate([rec.get('tag',''),field,value,item.get('source',''),item.get('reference',''),item.get('evidence',''),'UNVERIFIED - REVIEW SOURCE'],1):suggestions.cell(k,j,excel_safe(v) if isinstance(v,str) else v)
-                    k+=1
-        for col,width in zip('ABCDEFG',[24,24,20,38,24,85,32]):suggestions.column_dimensions[col].width=width
-        suggestions.freeze_panes='A2'
-        checks=wb.create_sheet('AIRFLOW CHECK',3)
-        for col,label in enumerate(['EQUIPMENT TAG','DESIGN CFM','MEASURED CFM','% DESIGN','TOLERANCE','RESULT'],1):
-            c=checks.cell(1,col,label);c.font=Font(bold=True,color='FFFFFF');c.fill=PatternFill('solid',fgColor='17345B')
-        for i,rec in enumerate(records[:500],2):
-            checks.cell(i,1,excel_safe(str(rec.get('tag',''))))
-            if rec.get('status')=='VERIFIED' and rec.get('design_cfm') not in (None,''):
-                try:checks.cell(i,2,float(rec['design_cfm']))
-                except (TypeError,ValueError):pass
-            checks.cell(i,4,f'=IF(OR(B{i}="",C{i}="",B{i}=0),"",C{i}/B{i})').number_format='0.0%'
-            checks.cell(i,5,0.05 if payload.get('standard')=='USACE' else 0.10).number_format='0.0%'
-            checks.cell(i,6,f'=IF(D{i}="","NOT TESTED",IF(ABS(D{i}-1)<=E{i},"WITHIN TARGET","REVIEW"))')
-        for col,width in zip('ABCDEF',[25,18,18,18,18,22]):checks.column_dimensions[col].width=width
-        checks.freeze_panes='B2'
     wb.calculation=CalcProperties(calcMode='auto',fullCalcOnLoad=True)
     origins={ws.title:ws._template_origin for ws in wb if hasattr(ws,'_template_origin')}
     for ws in wb:
@@ -474,27 +469,27 @@ window.addEventListener('DOMContentLoaded',()=>{
 
 let tags=[],records=[];const $=id=>document.getElementById(id);async function init(){let t=await readApiJson(await fetch('/api/templates'));if(!Array.isArray(t)||t.some(x=>typeof x!=='string'))throw Error('Invalid worksheet list. Refresh the page to try again.');$('templates').innerHTML=t.map(x=>`<label class="template"><input type="checkbox" value="${x.replaceAll('&','&amp;').replaceAll('"','&quot;')}">${worksheetLabel(x).replaceAll('&','&amp;').replaceAll('<','&lt;')}</label>`).join('');for(const box of document.querySelectorAll('.template input')){if(/project information|notes|air moving equipment|supply diffusers/i.test(box.value))box.checked=true}templatesReady=true;updateWorkspace()}init().catch(e=>{templateError=e.message;updateWorkspace()});$('selectall').onclick=()=>document.querySelectorAll('.template input').forEach(x=>x.checked=true);$('clear').onclick=()=>document.querySelectorAll('.template input').forEach(x=>x.checked=false);
 $('files').onchange=()=>{tags=[];records=[];renderReview();$('scanstatus').textContent='Source files changed. Scan these files to review their equipment.';$('status').textContent='';updateWorkspace()};
-$('scan').onclick=async()=>{if(!templatesReady){$('scanstatus').textContent=templateError||'Wait for report worksheets to load.';return}let files=$('files').files;if(!files.length){$('scanstatus').textContent='Choose files first';return}let form=new FormData();for(let f of files)form.append('files',f);$('scan').disabled=true;$('files').disabled=true;$('buildmethod').disabled=true;$('generate').disabled=true;$('loadproject').disabled=true;$('scanstatus').textContent='Reading files...';try{let r=await fetch('/api/scan',{method:'POST',body:form});let data=await readApiJson(r);tags=data.tags||[];records=data.records||[];$('scanstatus').textContent=`Found ${tags.length} equipment entries. Review the suggested design values and verify each unit before you build the report.`+(data.warnings.length?' Warnings: '+data.warnings.join(' | '):'');$('tags').innerHTML='';renderReview();let recommendation=await readApiJson(await fetch('/api/suggest',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({tags,signals:data.signals||[]})}));if(!Array.isArray(recommendation.recommended))throw Error('Template recommendations unavailable');let chosen=new Set(recommendation.recommended.map(x=>x.name));document.querySelectorAll('.template input').forEach(x=>x.checked=chosen.has(x.value));let safe=x=>String(x||'').replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('>','&gt;');$('template-recommendations').innerHTML='<strong>Recommended '+recommendation.recommended.length+' ABP templates</strong><p>Selected automatically based on the uploaded documents. Review and change any checked boxes before building your report.</p>'+recommendation.recommended.map(x=>'<div class="recommend-item"><span>'+safe(worksheetLabel(x.name))+(x.review?' <em>Review type</em>':'')+'</span><small>'+safe(x.reason)+'</small></div>').join('')+'<p class="muted">'+safe(recommendation.review_note)+'</p>'}catch(e){$('scanstatus').textContent=e.message}finally{$('scan').disabled=false;$('files').disabled=false;$('buildmethod').disabled=false;$('generate').disabled=false;$('loadproject').disabled=false;updateWorkspace()}};
+$('scan').onclick=async()=>{if(!templatesReady){$('scanstatus').textContent=templateError||'Wait for report worksheets to load.';return}let files=$('files').files;if(!files.length){$('scanstatus').textContent='Choose files first';return}let form=new FormData();for(let f of files)form.append('files',f);$('scan').disabled=true;$('files').disabled=true;$('buildmethod').disabled=true;$('generate').disabled=true;$('loadproject').disabled=true;$('scanstatus').textContent='Reading files...';try{let r=await fetch('/api/scan',{method:'POST',body:form});let data=await readApiJson(r);tags=data.tags||[];records=(data.records||[]).map(row=>{const copy={...row};applyProposed(copy);return copy});$('scanstatus').textContent=`Found ${tags.length} equipment entries. Review the suggested design values and verify each unit before you build the report.`+(data.warnings.length?' Warnings: '+data.warnings.join(' | '):'');$('tags').innerHTML='';renderReview();let recommendation=await readApiJson(await fetch('/api/suggest',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({tags,signals:data.signals||[]})}));if(!Array.isArray(recommendation.recommended))throw Error('Template recommendations unavailable');let chosen=new Set(recommendation.recommended.filter(x=>!x.review).map(x=>x.name));document.querySelectorAll('.template input').forEach(x=>x.checked=chosen.has(x.value));let safe=x=>String(x||'').replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('>','&gt;');$('template-recommendations').innerHTML='<strong>Recommended '+recommendation.recommended.length+' ABP templates</strong><p>Selected automatically based on the uploaded documents. Review and change any checked boxes before building your report.</p>'+recommendation.recommended.map(x=>'<div class="recommend-item"><span>'+safe(worksheetLabel(x.name))+(x.review?' <em>Review type</em>':'')+'</span><small>'+safe(x.reason)+'</small></div>').join('')+'<p class="muted">'+safe(recommendation.review_note)+'</p>'}catch(e){$('scanstatus').textContent=e.message}finally{$('scan').disabled=false;$('files').disabled=false;$('buildmethod').disabled=false;$('generate').disabled=false;$('loadproject').disabled=false;updateWorkspace()}};
 
 const unitForms=__UNIT_FORMS_JSON__;
-function defaultUnitForm(tag){if(/^(AHU|RTU|OAU|DOAS|MAU|AC)[- ]?[0-9]/.test(tag))return 'Air Moving Equipment.xlsx';if(/^(EF|KEF|TEF)[- ]?[0-9]/.test(tag))return 'Exhaust Fans _Std._.xlsx';if(/^KH[- ]?[0-9]/.test(tag))return 'Kitchen Hood.xlsx';return ''}
+function defaultUnitForm(tag){if(/^(AHU|RTU|OAU|DOAS|MAU|AC)[- ]?[0-9]/.test(tag))return 'Air Moving Equipment.xlsx';if(/^(EF|KEF|TEF|CEF|SEF)[- ]?[0-9]/.test(tag))return 'Exhaust Fans _Std._.xlsx';if(/^(VRF|SSAU)[- ]?[0-9]/.test(tag))return 'Fan Coil Units DX.xlsx';if(/^KH[- ]?[0-9]/.test(tag))return 'Kitchen Hood.xlsx';return ''}
+function applyProposed(record){record.status='UNVERIFIED';for(const [field,value] of Object.entries(record.proposed||{})){if(field==='manufacturer'||field==='model')continue;if(record[field]===undefined||record[field]===null||record[field]==='')record[field]=value}for(const [field,value] of Object.entries(record.text_proposed||{})){if(field==='manufacturer'||field==='model')continue;if(record[field]===undefined||record[field]===null||record[field]==='')record[field]=value}if(record.template===undefined||record.template===null)record.template=defaultUnitForm(record.tag)}
 function renderReview(){
  if(!records.length){$('review').innerHTML='<p class="empty-review">No equipment to review yet. Scan your project documents to get started.</p>';return}
  const safe=x=>String(x??'').replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('"','&quot;');
- $('review').innerHTML='<p>Review design candidates against this job’s sources, choose a unit form, then mark the record Verified. Past field measurements are never new design values. Equipment shares its applicable worksheet tab. Existing multi-unit spaces are filled first; additional forms continue below. Template designs and calculation logic are preserved; copied formulas follow their page. The standard single-OSA form uses minimum OSA when supplied; maximum OSA stays in the review log and traverse targets. Calculated template cells are never overwritten. Supporting coil, diffuser and traverse worksheets are selected below.</p><div class="review-scroll"><table class="review-table"><thead><tr><th>Tag</th><th>Unit form</th><th>Design CFM</th><th>OSA max / single CFM</th><th>OSA min CFM</th><th>ESP</th><th>Motor HP</th><th>Design GPM</th><th>Review</th><th>Design candidates</th><th>Source</th></tr></thead><tbody>'+records.map((r,i)=>`<tr><td>${safe(r.tag)}</td><td><select aria-label="${safe(r.tag)} report form" data-form="${i}"><option value="">Choose a unit form</option>${Object.keys(unitForms).map(name=>`<option value="${safe(name)}">${safe(worksheetLabel(name))}</option>`).join('')}</select></td>${['design_cfm','osa_cfm','osa_min_cfm','esp','motor_hp','design_gpm'].map(k=>`<td><input aria-label="${safe(r.tag+' '+k)}" type="number" min="0" step="any" data-row="${i}" data-field="${k}" value="${safe(r[k])}"></td>`).join('')}<td><select aria-label="${safe(r.tag)} verification" data-status="${i}"><option value="UNVERIFIED">Unverified</option><option value="VERIFIED">Verified</option><option value="EXCLUDED">Excluded</option></select></td><td>${(r.candidates||[]).length?`<button type="button" data-candidates="${i}">Use undisputed candidates</button><details><summary>${r.candidates.length} source entries</summary>${r.candidates.map(c=>`<p>${safe(Object.entries(c.values).map(([k,v])=>k+': '+v).join(', '))}<br><small>${safe(c.source)} · ${safe(c.reference)}</small></p>`).join('')}</details>`:'No labeled design values found'}</td><td>${safe(r.source)} · ${safe(r.reference)}</td></tr>`).join('')+'</tbody></table></div><p id="candidate-notice" role="status"></p>';
+ $('review').innerHTML='<p>Review design candidates against this job’s sources, choose a unit form, then mark the record Verified. Past field measurements are never new design values. Equipment shares its applicable worksheet tab. Existing multi-unit spaces are filled first; additional forms continue below. Template designs and calculation logic are preserved; copied formulas follow their page. The standard single-OSA form uses minimum OSA when supplied; maximum OSA stays in the review log and traverse targets. Calculated template cells are never overwritten. Supporting coil, diffuser and traverse worksheets are selected below.</p><div class="review-scroll"><table class="review-table"><thead><tr><th>Tag</th><th>Unit form</th><th>Design CFM</th><th>OSA max / single CFM</th><th>OSA min CFM</th><th>ESP</th><th>Motor HP</th><th>Design GPM</th><th>Review</th><th>Design candidates</th><th>Source</th></tr></thead><tbody>'+records.map((r,i)=>`<tr><td>${safe(r.tag)}</td><td><select aria-label="${safe(r.tag)} report form" data-form="${i}"><option value="">Choose a unit form</option>${Object.keys(unitForms).map(name=>`<option value="${safe(name)}">${safe(worksheetLabel(name))}</option>`).join('')}</select></td>${['design_cfm','osa_cfm','osa_min_cfm','esp','motor_hp','design_gpm'].map(k=>`<td><input aria-label="${safe(r.tag+' '+k)}" type="number" min="0" step="any" data-row="${i}" data-field="${k}" value="${safe(r[k])}"></td>`).join('')}<td><select aria-label="${safe(r.tag)} verification" data-status="${i}"><option value="UNVERIFIED">Unverified</option><option value="VERIFIED">Verified</option><option value="EXCLUDED">Excluded</option></select></td><td>${(r.candidates||[]).length?`<button type="button" data-candidates="${i}">Use undisputed candidates</button><details><summary>${r.candidates.length} source entries</summary>${r.candidates.map(c=>`<p>${safe(Object.entries(c.values).map(([k,v])=>k+': '+v).join(', '))}<br><small>${safe(c.source)} · ${safe(c.reference)}</small></p>`).join('')}</details>`:'No labeled design values found'}${(r.flags||[]).length?`<p class="warn">${r.flags.map(safe).join('<br>')}</p>`:''}</td><td>${safe(r.source)} · ${safe(r.reference)}</td></tr>`).join('')+'</tbody></table></div><p id="candidate-notice" role="status"></p>';
  $('review').insertAdjacentHTML('beforeend','<details><summary>Reviewed submittal details and coil design</summary>'+records.map((r,i)=>`<fieldset><legend>${safe(r.tag)}</legend><div class="grid">${reviewTextFields.map(k=>`<label>${safe(fieldLabel(k))}<input type="text" maxlength="120" aria-label="${safe(r.tag+' '+k)}" data-text-row="${i}" data-text-field="${k}" value="${safe(r[k])}"></label>`).join('')}${reviewNumericFields.filter(k=>!['design_cfm','osa_cfm','osa_min_cfm','esp','motor_hp','design_gpm'].includes(k)).map(k=>`<label>${safe(fieldLabel(k))}<input type="number" min="0" step="any" aria-label="${safe(r.tag+' '+k)}" data-row="${i}" data-field="${k}" value="${safe(r[k])}"></label>`).join('')}</div></fieldset>`).join('')+'</details>');
  document.querySelectorAll('[data-text-row]').forEach(el=>el.oninput=()=>{records[+el.dataset.textRow][el.dataset.textField]=el.value;records[+el.dataset.textRow].status='UNVERIFIED';document.querySelector('[data-status="'+el.dataset.textRow+'"]').value='UNVERIFIED'});
  document.querySelectorAll('[data-row]').forEach(el=>el.oninput=()=>{records[+el.dataset.row][el.dataset.field]=el.value;records[+el.dataset.row].status='UNVERIFIED';document.querySelector('[data-status="'+el.dataset.row+'"]').value='UNVERIFIED'});
  document.querySelectorAll('[data-status]').forEach(el=>{el.value=records[+el.dataset.status].status||'UNVERIFIED';el.onchange=()=>{records[+el.dataset.status].status=el.value}});
  document.querySelectorAll('[data-form]').forEach(el=>{const r=records[+el.dataset.form];el.value=r.template??defaultUnitForm(r.tag);el.onchange=()=>{r.template=el.value;r.status='UNVERIFIED';document.querySelectorAll('.template input').forEach(box=>{if(box.value===el.value)box.checked=true});renderReview();updateWorkspace()}});
  document.querySelectorAll('[data-candidates]').forEach(el=>el.onclick=()=>{
-  const r=records[+el.dataset.candidates],values={},conflicts=[];let used=0;
-  for(const c of r.candidates||[])for(const [field,value] of Object.entries(c.values||{})){if(!reviewNumericFields.includes(field)&&!reviewTextFields.includes(field))continue;(values[field]??=new Set()).add(reviewTextFields.includes(field)?String(value):Number(value))}
-  for(const [field,options] of Object.entries(values)){if(options.size>1){conflicts.push(field);continue}const value=[...options][0];if((reviewTextFields.includes(field)||Number.isFinite(value)&&value>=0)&&(r[field]===undefined||r[field]===null||r[field]==='')){r[field]=value;used++}}
-  r.status='UNVERIFIED';renderReview();$('candidate-notice').textContent=used+' candidate values added for '+r.tag+'. Review the source and verify before building.'+(conflicts.length?' Conflicting sources: '+conflicts.join(', ')+'. Enter the approved value manually.':'');
+  const r=records[+el.dataset.candidates];
+  applyProposed(r);renderReview();
+  $('candidate-notice').textContent='Suggested values are ready for '+r.tag+'. Manufacturer and model stay blank. Verify before building.'+((r.flags||[]).length?' '+r.flags.join(' '):'');
  });
 }
-function projectPayload(){return {project:$('project').value,location:$('location').value,standard:$('standard').value,layout:'individual',tags,records,templates:[...document.querySelectorAll('.template input:checked')].map(x=>x.value)}}
+function projectPayload(){return {project:$('project').value,location:$('location').value,standard:$('standard').value,layout:'individual',prefield_pack:true,tags,records,templates:[...document.querySelectorAll('.template input:checked')].map(x=>x.value)}}
 $('saveproject').onclick=()=>{const data=JSON.stringify({format:'ABP-PREFIELD-REVIEW',version:1,...projectPayload()},null,2);const url=URL.createObjectURL(new Blob([data],{type:'application/json'}));const a=document.createElement('a');a.href=url;a.download='ABP_Project_Review.json';a.click();setTimeout(()=>URL.revokeObjectURL(url),10000)};
 $('loadproject').onchange=async ev=>{try{const f=ev.target.files[0];if(!f)return;if(f.size>2000000)throw Error('Project review file exceeds 2 MB');if(!templatesReady)throw Error('Wait for report worksheets to load before restoring a review.');const data=validateSavedReview(JSON.parse(await f.text()),[...document.querySelectorAll('.template input')].map(x=>x.value),unitForms,savedTagPattern);$('project').value=String(data.project||'');$('location').value=String(data.location||'');$('standard').value=data.standard==='USACE'?'USACE':'Commercial';records=data.records;tags=records.map(r=>r.tag);document.querySelectorAll('.template input').forEach(x=>x.checked=data.templates.includes(x.value));renderReview();$('status').textContent='Saved review restored. Recheck verification and source revisions before building your report.'}catch(e){$('status').textContent=e.message}};
 $('generate').onclick=async()=>{if($('buildmethod').value==='reference'){await generateReference();return}if(!templatesReady){$('status').textContent=templateError||'Wait for report worksheets to load.';return}let payload=projectPayload();if(!payload.project.trim()){$('status').textContent='Add a project name before building your report.';$('project').focus();return}if(!payload.templates.length){$('status').textContent='Select at least one report worksheet.';$('template-panel').scrollIntoView();return}$('generate').disabled=true;$('generate').textContent='Building report…';$('generate').setAttribute('aria-busy','true');$('status').textContent='Building your report...';try{let r=await fetch('/api/build',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});if(!r.ok)await readApiJson(r);let blob=await r.blob(),url=URL.createObjectURL(blob),a=document.createElement('a');a.href=url;a.download=(payload.project.replace(/[^a-z0-9_-]+/gi,'_')||'ABP')+'_PreField_TAB.xlsx';a.click();setTimeout(()=>URL.revokeObjectURL(url),10000);$('status').textContent='Report built. Your Excel download is ready. Review flagged records and source revisions before field use.'}catch(e){$('status').textContent=e.message}finally{$('generate').disabled=false;$('generate').textContent='Build report';$('generate').removeAttribute('aria-busy')}};

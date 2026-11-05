@@ -1,11 +1,11 @@
 """Source-based equipment review and job-specific ABP form assembly."""
 import re
 
-NUMERIC_FIELDS = ('design_cfm','osa_cfm','osa_min_cfm','esp','motor_hp','design_gpm',
+NUMERIC_FIELDS = ('design_cfm','osa_cfm','osa_min_cfm','esp','total_sp','motor_hp','motor_volts','motor_fla','design_gpm',
                   'cooling_edb','cooling_ewb','cooling_ldb','cooling_lwb',
                   'heating_cfm','heating_edb','heating_ldb','heating_input_btu','heating_output_btu',
                   'cooling_total_btu','cooling_sensible_btu')
-TEXT_FIELDS = ('manufacturer','model','unit_type','service','equipment_location')
+TEXT_FIELDS = ('manufacturer','model','unit_type','service','equipment_location','area_served')
 COIL_FIELDS = {'design_cfm':8,'cooling_edb':14,'cooling_ewb':15,'cooling_ldb':16,
                'cooling_lwb':17,'heating_cfm':23,'heating_edb':25,'heating_ldb':26,
                'cooling_total_btu':19,'cooling_sensible_btu':20,'heating_output_btu':28}
@@ -60,7 +60,9 @@ def performance_candidates(text, tag_pattern):
     return [{'tag':tag,'values':values.copy(),'evidence':'Tagged performance summary; review submittal approval and revision.','basis':'TAGGED_PERFORMANCE'} for tag in dict.fromkeys(tags)]
 
 def populate_identity(ws, record, safe):
-    for field,address in {'manufacturer':'G5','model':'G6','unit_type':'G9','service':'G10','equipment_location':'G12'}.items():
+    # Manufacturer and model stay blank on a pre-field export. Nameplate identity
+    # is reviewed in the app; the workbook is not a catalog cut sheet.
+    for field,address in {'unit_type':'G9','service':'G10','area_served':'G11','equipment_location':'G12'}.items():
         if record.get(field) and ws[address].data_type!='f':ws[address]=safe(record[field])
 
 def populate_support(wb, records, selected, lookup, add, reset, sheet_name):
@@ -78,7 +80,6 @@ def populate_support(wb, records, selected, lookup, add, reset, sheet_name):
     if traverse in selected and verified:
         for rec in verified:
             before=set(wb.sheetnames);add(wb,lookup[traverse]);ws=wb[next(n for n in wb.sheetnames if n not in before)];reset(ws)
-            ws.title=sheet_name(wb,rec['tag']+' OSA TRAVERSE')
             for off,field,label in [(0,'osa_cfm','OSA MAX'),(22,'osa_min_cfm','OSA MIN')]:
                 ws[f'D{3+off}']=rec['tag'];ws[f'D{4+off}']=label
                 if rec.get(field) not in (None,''):ws[f'L{3+off}']=float(rec[field])
