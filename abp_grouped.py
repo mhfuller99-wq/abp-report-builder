@@ -23,7 +23,7 @@ def group_template_sheets(data, origins):
     groups={}
     for title,(source,original) in origins.items():
         groups.setdefault((hashlib.sha256(source).digest(),original),[]).append(title)
-    renamed={};removed=set();extents={}
+    renamed={};removed=set();extents={};keepers=set()
     for (_,original),titles in groups.items():
         first=titles[0];destpath=paths[first];dest=ET.fromstring(files[destpath])
         target=original
@@ -32,7 +32,8 @@ def group_template_sheets(data, origins):
         while target in occupied:
             target=original[:27]+' '+str(suffix);suffix+=1
         for s in sheets:
-            if s.attrib['name']==first:s.set('name',target)
+            if s.attrib['name']==first:
+                s.set('name',target);keepers.add(s)
         renamed[first]=target
         if len(titles)==1:continue
         sd=dest.find(q('sheetData'))
@@ -153,7 +154,8 @@ def group_template_sheets(data, origins):
         dest[:]=sorted(dest,key=lambda e:order.index(e.tag.split('}')[-1]) if e.tag.split('}')[-1] in order else len(order))
         files[destpath]=ET.tostring(dest,encoding='utf-8',xml_declaration=True)
     for s in list(sheets):
-        if s.attrib['name'] in removed:sheets.remove(s)
+        # A renamed keeper can share a title with a page that is about to be stacked.
+        if s.attrib['name'] in removed and s not in keepers:sheets.remove(s)
     new_order=[s.attrib['name'] for s in sheets]
     names=workbook.find(q('definedNames'))
     if names is None:names=ET.SubElement(workbook,q('definedNames'))

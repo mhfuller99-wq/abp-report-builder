@@ -7,6 +7,7 @@ from socketserver import TCPServer
 from urllib.parse import unquote,parse_qs,urlsplit
 from openpyxl import Workbook,load_workbook
 from openpyxl.workbook.properties import CalcProperties
+from openpyxl.utils import get_column_letter
 from abp_reference import inspect_reference, build_reference, reset_measurements
 from abp_fidelity import preserve_template_parts
 from abp_grouped import group_template_sheets
@@ -21,6 +22,16 @@ LOOKUP={p.name:p for p in FILES}
 TAGS=re.compile(r'\b(?:(?:BCU|BC|CH|CHP|CHWP|HWP|CWP|PCP|SCP|PHP|SHP|P|B|F|AH|ACU|PAC|KSF)(?:\s*-\s*|\s+)|(?:AHU|RTU|OAU|DOAS|CRU|MAU|ERV|HRV|FCU|FC|VAV|FPP|IU|IDU|MSFC|MSE|MS|PTAC|CRAC|IHP|HPBC|HP|AC|ACC|DSS|DCU|KEF|TEF|CEF|SEF|RLF|KH|EF|SF|RF|GF|PU|EUH|EWH|CUH|UH|FFU|LF|VRF|SSAU|SSCU|GUH|HVLS|PF|FS|EH)(?:\s*-\s*|\s+)?)\d+[A-Z]?(?:[-.][A-Z0-9]+)*\b',re.I)
 MAX_RECORDS=500
 MAX_UPLOAD=200_000_000
+# Title-block scraps and image-only drawings fall below this. A real schedule does not.
+SPARSE_TEXT_LIMIT=500
+OFFICE_FRONT=('Project Information.xlsx','Notes.xlsx')
+RECT_TEMPLATE='Duct Traverse Rect..xlsx'
+RND_TEMPLATE='Duct Traverse RND.xlsx'
+BLANK_RECT_FORMS=30
+BLANK_RND_FORMS=15
+# Spreadsheet theme index 0 is lt1, 1 is dk1; the theme XML lists dk1 first.
+SHEET_THEME_INDEX=(1,0,3,2,4,5,6,7,8,9,10,11)
+SCHEME_NAMES=('dk1','lt1','dk2','lt2','accent1','accent2','accent3','accent4','accent5','accent6','hlink','folHlink')
 MAX_OUTPUT_ROWS=30000
 # Only propose values from explicitly labeled nearby text. Never silently verify.
 VALUE_PATTERNS={
@@ -53,9 +64,11 @@ def read_sources(blobs):
         name=Path(name).name[:160];ext=Path(name).suffix.lower();chunks=[];structured=[]
         try:
             if ext=='.pdf':
-                import pymupdf
+                # Schedule rows come from visual lines. Flattened page text joins a
+                # grille mark to a distant dimension, so it is not searched for tags.
                 parsed,pdf_warnings=parse_pdf(name,data)
                 warnings.extend(pdf_warnings)
+                import pymupdf
                 with pymupdf.open(stream=data,filetype='pdf') as doc:
                     if doc.page_count>300:raise ValueError('PDF has more than 300 pages')
                     for i,page in enumerate(doc):
@@ -66,7 +79,7 @@ def read_sources(blobs):
                             structured.append({**candidate,'reference':f'page {i+1}','basis':'TAGGED_PERFORMANCE'})
                 for item in parsed:
                     structured.append(item)
-                if not any(t.strip() for _,t in chunks):warnings.append(name+': image-only PDF; manual takeoff required')
+                if not any(text.strip() for _,text in chunks):warnings.append(name+': image-only PDF; manual takeoff required')
             elif ext=='.csv':
                 decoded=data.decode('utf-8-sig')
                 source_rows=list(csv.reader(io.StringIO(decoded)))
@@ -99,8 +112,6 @@ def read_sources(blobs):
                 for signal,pattern in SCHEDULE_SIGNALS.items():
                     if pattern.search(chunk[:6000]):signals.add(signal)
                 if len(preview)<12:preview.append(chunk[:200])
-                # PDF equipment comes from schedule rows. Searching the flattened
-                # page would join a grille mark to a distant dimension.
                 if ext=='.pdf':
                     continue
                 for line in chunk.splitlines():
@@ -129,19 +140,21 @@ def read_sources(blobs):
         except Exception as e:warnings.append(name+': could not parse ('+str(e)[:120]+')')
     for record in records.values():
         annotate(record)
-        for item in record.get('candidates') or []:
-            for key in ('fan_rpm','motor_watts','unit_mca','unit_mop','brake_hp'):
-                (item.get('values') or {}).pop(key, None)
         form=inferred_form(record['tag'])
-        if form:
-            record['template']=form
-        elif any(str(item.get('reference','')).startswith('page') or item.get('unmapped') for item in record.get('candidates') or []):
+        if form:record['template']=form
+        elif any(item.get('unmapped') or str(item.get('reference','')).startswith('page') for item in record.get('candidates') or []):
             record['template']=''
             record['proposed']={}
             record['text_proposed']={}
             if 'No supported report form; excluded from the workbook until a form is selected' not in record['flags']:
                 record['flags'].append('No supported report form; excluded from the workbook until a form is selected')
-    return {'tags':list(records)[:MAX_RECORDS],'records':list(records.values())[:MAX_RECORDS],'warnings':warnings,'characters':total_chars,'sources':sources,'preview':'\n'.join(preview)[:1800],'signals':sorted(signals)}
+        for item in record.get('candidates') or []:
+            for key in ('fan_rpm','motor_watts','unit_mca','unit_mop','brake_hp'):
+                (item.get('values') or {}).pop(key,None)
+    image_only=any('image-only PDF' in warning or 'no readable text' in warning for warning in warnings)
+    # Schedule headings mean the text was usable, even if another drawing was scanned.
+    sparse=total_chars<SPARSE_TEXT_LIMIT or (image_only and not signals)
+    return {'tags':list(records)[:MAX_RECORDS],'records':list(records.values())[:MAX_RECORDS],'warnings':warnings,'characters':total_chars,'sources':sources,'preview':'\n'.join(preview)[:1800],'signals':sorted(signals),'sparse':sparse}
 
 # These labels only suggest which original ABP workbook to include.
 # They do not verify equipment quantities, schedules, or field measurements.
@@ -160,40 +173,61 @@ SCHEDULE_SIGNALS={
  'filter_unit':re.compile(r'\bFAN\s+FILTER\s+UNIT\s+SCHEDULE\b',re.I),
  'hydronic':re.compile(r'\b(?:BALANCING\s+VALVE|AUTO[- ]FLOW)\s+SCHEDULE\b',re.I),
  'dehumidifier':re.compile(r'\bDEHUMIDIFIER\s+SCHEDULE\b',re.I),
- 'air_moving':re.compile(r'\b(?:AIR\s+HANDLING\s+UNIT|ROOFTOP\s+UNIT|SUPPLY\s+FAN|MAKEUP\s+AIR\s+UNIT)\s+SCHEDULE\b',re.I),
+ 'air_moving':re.compile(r'\b(?:AIR\s+HANDLING\s+UNIT|ROOFTOP\s+UNIT|SUPPLY\s+FAN|MAKEUP\s+AIR\s+UNIT|DOAS|DEDICATED\s+OUTDOOR\s+AIR)\s+SCHEDULE\b',re.I),
  'exhaust_fan':re.compile(r'\bEXHAUST\s+FAN\s+SCHEDULE\b',re.I),
+ 'gas_heat':re.compile(r'\b(?:GAS\s+HEAT(?:ING)?|GAS\s+FURNACE|HEATING\s+TYPE\s*[:=]?\s*GAS)\b',re.I),
+ 'dx_cooling':re.compile(r'\b(?:DX\s+COOL(?:ING)?|DIRECT\s+EXPANSION(?:\s+COIL)?)\b',re.I),
+ 'electric_heat':re.compile(r'\b(?:ELECTRIC\s+HEAT(?:ING)?|HEATING\s+TYPE\s*[:=]?\s*ELECTRIC)\b',re.I),
+ 'ductless':re.compile(r'\b(?:DUCTLESS|MINI[-\s]?SPLIT)\b',re.I),
+ 'vav':re.compile(r'\bVAV\s+(?:BOX(?:ES)?|TERMINAL(?:S)?|SCHEDULE|UNIT(?:S)?)\b',re.I),
+ 'unit_heater':re.compile(r'\bUNIT\s+HEATERS?\s+SCHEDULE\b',re.I),
 }
-def suggested_templates(tags,signals=None):
-    """Return explained recommendations; always allow manual override in UI."""
+def lookup_templates(pattern):
+    """Master files whose names match. Instrument sheets are never offered for auto-select."""
+    return [name for name in sorted(LOOKUP) if re.search(pattern,name,re.I) and not re.search(r'instrument',name,re.I)]
+def suggested_templates(tags,signals=None,*,sparse=False):
+    """Pre-field worksheet pack. The UI checks these and still allows manual override."""
     tags=[str(x).upper()[:80] for x in tags[:MAX_RECORDS] if isinstance(x,str)] if isinstance(tags,list) else []
     signals=set(x for x in (signals or []) if isinstance(x,str)) if isinstance(signals,list) else set()
+    sparse=sparse is True
     result=[]
     def add(filename,reason,review=False):
+        # Cover, abbreviations, summaries, checklists and instruments are not part of the initial workbook.
+        if not isinstance(filename,str) or banned_initial_template(filename):return
         if filename in LOOKUP and not any(x['name']==filename for x in result):
-            result.append({'name':filename,'reason':reason,'review':review})
-    for name in ('Project Information.xlsx','Notes.xlsx'):
-        add(name,'Project information and notes')
+            result.append({'name':filename,'reason':reason,'review':bool(review)})
     def tagged(prefixes):
         return any(re.match(r'^(?:'+prefixes+r')[- ]?\d',tag) for tag in tags)
-    def add_traverses():
-        add('Duct Traverse Rect..xlsx','Blank rectangular traverse sheets for field readings')
-        add('Duct Traverse RND.xlsx','Blank round traverse sheets for field readings')
-    if tagged('AHU|RTU|OAU|DOAS|MAU|AC|SF|RF|CRU|GF|PU') or 'air_moving' in signals:
-        add('Air Moving Equipment.xlsx','Air-moving equipment tags or schedule heading')
-        add_traverses()
-    if tagged('DOAS') or 'gas_performance' in signals:
-        add('Coil DX GAS HT.xlsx','DX cooling and gas-heat performance for the outside-air unit')
+    add('Project Information.xlsx','Project information opens the pre-field workbook')
+    add('Notes.xlsx','Pre-field notes')
+    air=tagged('AHU|RTU|OAU|DOAS|MAU|AC|SF|RF|CRU|GF|PU|AH|ACU|PAC|KSF') or 'air_moving' in signals
+    packaged=tagged('RTU|DOAS|OAU|AC|PAC')
+    gas='gas_performance' in signals or 'gas_heat' in signals
+    dx='dx_cooling' in signals
+    electric='electric_heat' in signals
+    if air:
+        add('Air Moving Equipment.xlsx','Air-moving, rooftop, or dedicated outdoor-air equipment')
+    # DX/gas coil sheet for packaged equipment. Water coils stay on their own form.
+    if gas or dx or (packaged and not electric):
+        add('Coil DX GAS HT.xlsx','DX cooling / gas heating coil sheet for packaged or outdoor-air equipment',not (gas or dx))
+    elif electric and (air or packaged):
+        add('COIL DX HP ELE.xlsx','Electric heat noted for air-moving equipment; confirm the coil form',True)
     if tagged('EF|KEF|TEF|CEF|SEF|RLF') or 'exhaust_fan' in signals:
         add('Exhaust Fans _Std._.xlsx','Exhaust fan tags or schedule heading')
-        add_traverses()
-    if tagged('VRF|SSAU'):
-        add('Fan Coil Units DX.xlsx','VRF and split indoor units use the DX fan-coil form')
-        add_traverses()
-    if tagged('FCU|FC|IU|IDU|MSFC|MSE|MS|DSS|PTAC|BCU|BC') or 'fan_coil' in signals:
+        add('Exhaust Fans _Sm._.xlsx','Small and standard fan forms both occur in past reports; choose the applicable form per unit',True)
+    if tagged('FCU|FC|IU|IDU|MSFC|MSE|MS|DSS|PTAC|BCU|BC|VRF|SSAU') or 'fan_coil' in signals or 'ductless' in signals:
         water=tagged('BCU|BC') or 'water_coil' in signals
-        add('Fan Coil Units WTR.xlsx' if water else 'Fan Coil Units DX.xlsx','Fan-coil equipment; confirm water or DX type against the schedule',True)
-        if tagged('FCU|BCU|BC'):
-            add('Fan Coil Units DX.xlsx' if water else 'Fan Coil Units WTR.xlsx','This tag appears on multiple coil types in prior projects; verify the new job design',True)
+        ductless=tagged('IU|IDU|MSFC|DSS|PTAC|VRF|SSAU') or 'ductless' in signals
+        if ductless and not water:
+            add('Fan Coil Units DX.xlsx','Ductless or DX fan-coil equipment')
+        else:
+            add('Fan Coil Units WTR.xlsx' if water else 'Fan Coil Units DX.xlsx','Fan-coil equipment; confirm water or DX type against the schedule',True)
+            if tagged('FCU|BCU|BC'):
+                add('Fan Coil Units DX.xlsx' if water else 'Fan Coil Units WTR.xlsx','This tag appears on multiple coil types in prior projects; verify the new job design',True)
+        if gas and not water:
+            add('Fan Coil Units DX GAS.xlsx','Gas heat noted with fan-coil equipment',True)
+        if electric and not water:
+            add('Fan Coil Units DX ELE.xlsx','Electric heat noted with fan-coil equipment',True)
     if tagged('IHP|HPBC|HP|CRAC'):
         add('Air Moving Equipment.xlsx','Heat-pump or packaged equipment; confirm equipment form',True)
         add('COIL DX HP ELE.xlsx','Possible heat-pump coil performance form; verify the schedule',True)
@@ -201,7 +235,20 @@ def suggested_templates(tags,signals=None):
         add('Air Moving Equipment.xlsx','Air-moving form observed for this tag family; confirm the current job equipment type',True)
         if tagged('AH'):
             add('Fan Coil Units DX.xlsx','AH also occurs on fan-coil forms; select the applicable unit form',True)
-    # A bare B- tag is not a boiler. Boiler sheets follow a boiler schedule heading.
+    if tagged('VAV|FPP') or 'vav' in signals:
+        for name in lookup_templates(r'vav'):
+            add(name,'VAV tag or schedule heading')
+    if 'diffusers' in signals:
+        for name in lookup_templates(r'diffuser'):
+            add(name,'Supply diffuser schedule heading')
+    if 'exhaust_grilles' in signals:
+        add('Exhaust Grilles.xlsx.xlsx','Exhaust grille schedule detected; review device types',True)
+    if tagged('EUH|EWH|CUH|UH') or 'unit_heater' in signals:
+        for name in lookup_templates(r'unit\s*heater'):
+            add(name,'Unit heater tag or schedule heading')
+    if 'water_coil' in signals:
+        add('Coil WTR CLG WTR HT.xlsx','Water-coil schedule heading detected')
+    if tagged('B'):add('Boiler.xlsx','Boiler tag; confirm service and design data',True)
     if tagged('CH|ACC'):
         add('Chiller - Air Cooled.xlsx','Chiller tag; verify condenser type',True)
     if tagged('CH'):
@@ -210,10 +257,6 @@ def suggested_templates(tags,signals=None):
         add('ERV.xlsx','Energy-recovery equipment or schedule; confirm model type',True)
     if tagged('FFU') or 'filter_unit' in signals:
         add('Fan Filter Units.xlsx','Fan-filter unit tags or schedule')
-    if 'exhaust_grilles' in signals or 'diffusers' in signals:
-        add('Exhaust Grilles.xlsx.xlsx','Air-device/grille schedule detected; review device types',True)
-    if 'water_coil' in signals:
-        add('Coil WTR CLG WTR HT.xlsx','Water-coil schedule heading detected',True)
     if 'cooling_tower' in signals:add('Cooling Tower.xlsx','Cooling tower schedule heading')
     if 'boiler' in signals:add('Boiler.xlsx','Boiler schedule heading')
     if 'chiller' in signals:
@@ -222,8 +265,115 @@ def suggested_templates(tags,signals=None):
     if 'heat_exchanger' in signals:add('Heat Exchanger.xlsx','Heat exchanger schedule heading')
     if 'hydronic' in signals:add('Hydronic BV - Auto-flow.xlsx','Hydronic balancing valve schedule',True)
     if 'dehumidifier' in signals:add('Dehumidifier.xlsx','Dehumidifier schedule heading')
-    return {'recommended':result,'review_note':'Recommendations use equipment tags and readable schedule headings only. Verify all sheets against the latest mechanical schedules; scanned/image-only PDFs require manual review.'}
+    # Image-only drawings still get a usable pack. Tag hits above are kept.
+    if sparse:
+        add('Air Moving Equipment.xlsx','Default pre-field air-moving sheet when the scan has little readable text')
+    add(RECT_TEMPLATE,'Rectangular duct traverses follow the equipment tabs')
+    add(RND_TEMPLATE,'Round duct traverses follow the rectangular traverses')
+    note='Checked from this job’s equipment tags and schedule headings. The workbook opens with Project Info, then Notes, those equipment sheets, rectangular duct traverses, and round duct traverses. Cover, abbreviations, project summary, pre-tab, instrument, and audit tabs stay out. Change any equipment checkbox before building.'
+    if sparse:
+        note='Little readable text was found, so the default pack is checked and fan-coil, exhaust, and coil sheets are added when tags suggest them. '+note
+    return {'recommended':result,'review_note':note}
 
+
+def banned_initial_template(name):
+    """Documentation and audit masters that never belong in the initial workbook."""
+    low=name.lower()
+    if 'instrument' in low:return True
+    if low.startswith('cover'):return True
+    if 'abbreviation' in low:return True
+    if 'pre-tab' in low or 'pretab' in low:return True
+    if 'project summary' in low:return True
+    return False
+
+def banned_initial_sheet(title):
+    key=' '.join(title.strip().upper().split())
+    if key in {'ABP BUILD INFO','TAKEOFF REVIEW','SOURCE EVIDENCE','AIRFLOW CHECK','EXTRACTION CANDIDATES','ABBREVIATIONS','PRE-TAB CHECKLIST','PROJECT SUMMARY','INSTRUMENT'}:return True
+    return key=='COVER' or key.startswith('COVER ')
+
+def theme_palette(theme):
+    """Twelve scheme colors in theme-XML order, or None when the part cannot be read."""
+    if not theme:return None
+    text=theme.decode('utf-8','replace') if isinstance(theme,(bytes,bytearray)) else str(theme)
+    scheme=re.search(r'<a:clrScheme[\s\S]*?</a:clrScheme>',text)
+    if not scheme:return None
+    colors=[]
+    for tag in SCHEME_NAMES:
+        block=re.search(fr'<a:{tag}>(.*?)</a:{tag}>',scheme.group(0))
+        if not block:return None
+        found=re.search(r'(?:srgbClr[^>]*val|lastClr)="([0-9A-Fa-f]{6})"',block.group(1))
+        if not found:return None
+        colors.append(found.group(1).upper())
+    return tuple(colors)
+
+def read_theme(path):
+    try:
+        with zipfile.ZipFile(path) as archive:
+            parts=sorted(n for n in archive.namelist() if n.startswith('xl/theme/theme'))
+            return archive.read(parts[0]) if parts else None
+    except (OSError,zipfile.BadZipFile):return None
+
+def _hls(r,g,b):
+    r,g,b=r/255,g/255,b/255
+    hi,lo=max(r,g,b),min(r,g,b)
+    light=(hi+lo)/2
+    if hi==lo:return 0.0,light,0.0
+    span=hi-lo
+    sat=span/(2-hi-lo) if light>0.5 else span/(hi+lo)
+    if hi==r:hue=((g-b)/span)%6
+    elif hi==g:hue=(b-r)/span+2
+    else:hue=(r-g)/span+4
+    return hue/6,light,sat
+
+def _rgb(h,light,sat):
+    def hue(p,q,t):
+        if t<0:t+=1
+        if t>1:t-=1
+        if t<1/6:return p+(q-p)*6*t
+        if t<1/2:return q
+        if t<2/3:return p+(q-p)*(2/3-t)*6
+        return p
+    if sat==0:r=g=b=light
+    else:
+        q=light*(1+sat) if light<0.5 else light+sat-light*sat
+        p=2*light-q
+        r,g,b=hue(p,q,h+1/3),hue(p,q,h),hue(p,q,h-1/3)
+    return tuple(max(0,min(255,int(round(v*255)))) for v in (r,g,b))
+
+def apply_tint(rgb,tint):
+    """Excel theme tint: luminance moves toward white or black. Hue and saturation stay."""
+    if not tint:return rgb
+    hue,light,sat=_hls(*rgb)
+    light=light*(1+tint) if tint<0 else light*(1-tint)+tint
+    return _rgb(hue,max(0.0,min(1.0,light)),sat)
+
+def theme_color_rgb(palette,sheet_index,tint=0):
+    base=palette[SHEET_THEME_INDEX[int(sheet_index)]]
+    rgb=tuple(int(base[i:i+2],16) for i in (0,2,4))
+    red,green,blue=apply_tint(rgb,float(tint or 0))
+    return f'FF{red:02X}{green:02X}{blue:02X}'
+
+def bake_color(color,palette):
+    if color is None or getattr(color,'type',None)!='theme' or color.theme is None:return color
+    if not 0<=int(color.theme)<=11:return color
+    from openpyxl.styles.colors import Color
+    return Color(rgb=theme_color_rgb(palette,color.theme,color.tint))
+
+def bake_painted(obj,palette):
+    """Copy a font, fill, or border and freeze its theme colors to the source palette."""
+    from copy import copy
+    painted=copy(obj)
+    if getattr(painted,'color',None) is not None and getattr(painted.color,'type',None)=='theme':
+        painted.color=bake_color(painted.color,palette)
+    for attr in ('fgColor','bgColor'):
+        color=getattr(painted,attr,None)
+        if color is not None and getattr(color,'type',None)=='theme':
+            setattr(painted,attr,bake_color(color,palette))
+    for side in ('left','right','top','bottom','diagonal'):
+        edge=getattr(painted,side,None)
+        if edge is not None and getattr(edge,'color',None) is not None and getattr(edge.color,'type',None)=='theme':
+            edge.color=bake_color(edge.color,palette)
+    return painted
 
 def sheet_name(wb,name):
     s=name[:31];i=2
@@ -231,21 +381,17 @@ def sheet_name(wb,name):
         suffix=f' ({i})';s=name[:31-len(suffix)]+suffix;i+=1
     return s
 
-def theme_colors(theme):
-    if not theme:return None
-    text=theme.decode('utf-8','replace') if isinstance(theme,(bytes,bytearray)) else str(theme)
-    start=text.find('<a:clrScheme')
-    end=text.find('</a:clrScheme>')
-    if start<0 or end<=start:return None
-    return re.sub(r'\sname="[^"]*"','',text[start:end])
-
 def add_template(wb,path):
     source=load_workbook(path)
+    source_palette=theme_palette(source.loaded_theme)
+    book_palette=theme_palette(wb.loaded_theme)
+    # Same palette and fonts can live on one workbook theme. A different palette is
+    # frozen to explicit RGB from its own scheme so the sheet does not recolor.
+    bake=False
     if wb.loaded_theme is None:wb.loaded_theme=source.loaded_theme
     elif source.loaded_theme is not None and wb.loaded_theme!=source.loaded_theme:
-        # Project information uses the same Office palette under a different theme name.
-        if theme_colors(wb.loaded_theme)!=theme_colors(source.loaded_theme):
-            raise ValueError('Templates use incompatible themes; build separately to preserve their formatting')
+        if source_palette and book_palette and source_palette!=book_palette:bake=True
+        elif not source_palette or not book_palette:raise ValueError('Templates use incompatible themes; build separately to preserve their formatting')
     for ws in source:
         dst=wb.create_sheet(sheet_name(wb,ws.title))
         dst._template_origin=(path.read_bytes(),ws.title)
@@ -257,7 +403,10 @@ def add_template(wb,path):
                 target.value=c.value
                 if c.has_style:
                     from copy import copy
-                    target.font=copy(c.font);target.fill=copy(c.fill);target.border=copy(c.border);target.alignment=copy(c.alignment);target.protection=copy(c.protection);target.number_format=c.number_format
+                    font=bake_painted(c.font,source_palette) if bake else copy(c.font)
+                    fill=bake_painted(c.fill,source_palette) if bake else copy(c.fill)
+                    border=bake_painted(c.border,source_palette) if bake else copy(c.border)
+                    target.font=font;target.fill=fill;target.border=border;target.alignment=copy(c.alignment);target.protection=copy(c.protection);target.number_format=c.number_format
                 if c.hyperlink:target._hyperlink=__import__('copy').copy(c.hyperlink)
                 if c.comment:target.comment=__import__('copy').copy(c.comment)
         for merged in ws.merged_cells.ranges:dst.merge_cells(str(merged))
@@ -292,6 +441,18 @@ def add_template(wb,path):
             from openpyxl.drawing.image import Image
             image=Image(io.BytesIO(picture._data()));image.anchor=deepcopy(picture.anchor)
             dst.add_image(image)
+        if bake:
+            for originals,copies in ((ws.column_dimensions,dst.column_dimensions),(ws.row_dimensions,dst.row_dimensions)):
+                for key in originals:
+                    for attr in ('font','fill','border'):
+                        setattr(copies[key],attr,bake_painted(getattr(originals[key],attr),source_palette))
+            for rules in getattr(dst.conditional_formatting,'_cf_rules',{}).values():
+                for rule in rules:
+                    dxf=getattr(rule,'dxf',None)
+                    if dxf is None:continue
+                    if dxf.font is not None:dxf.font=bake_painted(dxf.font,source_palette)
+                    if dxf.fill is not None:dxf.fill=bake_painted(dxf.fill,source_palette)
+                    if dxf.border is not None:dxf.border=bake_painted(dxf.border,source_palette)
     source.close()
 
 def validate_payload(payload):
@@ -383,35 +544,50 @@ def build(payload):
     wb=Workbook();wb.remove(wb.active)
     records=sorted([{**r,'tag':canonical_tag(r['tag'])} for r in payload.get('records',[])],key=lambda r:[int(t) if t.isdigit() else t for t in re.split(r'(\d+)',r['tag'])])
     if not isinstance(records,list):raise ValueError('Invalid review records')
-    for name in selected:
-        if name in UNIT_FORMS and any(isinstance(r,dict) and r.get('status')=='VERIFIED' and unit_form(r)==name for r in records):
-            continue
-        if name in ('Coil DX GAS HT.xlsx','Duct Traverse Rect..xlsx') and any(r.get('status')=='VERIFIED' and unit_form(r)=='Air Moving Equipment.xlsx' for r in records):continue
+    requested=[name for name in selected if not banned_initial_template(name)]
+    equipment=[]
+    for name in requested:
+        if name in OFFICE_FRONT or name in (RECT_TEMPLATE,RND_TEMPLATE) or name in equipment:continue
+        equipment.append(name)
+    theme_sources=equipment+[RECT_TEMPLATE,RND_TEMPLATE,'Notes.xlsx','Air Moving Equipment.xlsx']
+    for theme_name in theme_sources:
+        if theme_name in LOOKUP:
+            theme=read_theme(LOOKUP[theme_name])
+            if theme:
+                wb.loaded_theme=theme
+                break
+    def add_fresh(name):
         before=set(wb.sheetnames);add_template(wb,LOOKUP[name])
         for title in set(wb.sheetnames)-before:reset_measurements(wb[title])
-    populate_support(wb,records,selected,LOOKUP,add_template,reset_measurements,sheet_name)
-    populate_equipment(wb,records,selected)
-    prepare_documentation(wb,excel_safe(project),excel_safe(str(payload.get('location',''))),selected)
-    if payload.get('prefield_pack'):
-        for filename,copies in (('Duct Traverse Rect..xlsx',30),('Duct Traverse RND.xlsx',15)):
-            if filename not in selected:continue
-            have=sum(1 for ws in wb.worksheets if getattr(ws,'_template_file',None)==filename)
-            for _ in range(max(0,copies-have)):
-                before=set(wb.sheetnames);add_template(wb,LOOKUP[filename])
-                for title in set(wb.sheetnames)-before:reset_measurements(wb[title])
-    order={id(ws):index for index,ws in enumerate(wb.worksheets)}
-    def sheet_rank(title):
-        name=title.upper()
-        if name.startswith('PROJECT INFO'):return 0
-        if name.startswith('NOTES'):return 1
-        if name.startswith('AIR MOVING'):return 2
-        if name.startswith('EXHAUST FAN'):return 3
-        if name.startswith('FAN COIL'):return 4
-        if name.startswith('COIL'):return 5
-        if 'TRAVERSE RECT' in name:return 8
-        if 'TRAVERSE RND' in name:return 9
-        return 6
-    wb._sheets.sort(key=lambda ws:(sheet_rank(ws.title),order.get(id(ws),0)))
+    for name in OFFICE_FRONT:
+        if name in LOOKUP:add_fresh(name)
+    verified_air=any(isinstance(r,dict) and r.get('status')=='VERIFIED' and unit_form(r)=='Air Moving Equipment.xlsx' for r in records)
+    for name in equipment:
+        if name in UNIT_FORMS and any(isinstance(r,dict) and r.get('status')=='VERIFIED' and unit_form(r)==name for r in records):continue
+        if name=='Coil DX GAS HT.xlsx' and verified_air:continue
+        add_fresh(name)
+    support=list(equipment)
+    if RECT_TEMPLATE in LOOKUP and RECT_TEMPLATE not in support:support.append(RECT_TEMPLATE)
+    populate_support(wb,records,support,LOOKUP,add_template,reset_measurements,sheet_name)
+    populate_equipment(wb,records,equipment)
+    prepare_documentation(wb,excel_safe(project),excel_safe(str(payload.get('location',''))),support)
+    def copies(filename):return sum(1 for ws in wb.worksheets if getattr(ws,'_template_file',None)==filename)
+    if RECT_TEMPLATE in LOOKUP:
+        while copies(RECT_TEMPLATE)<BLANK_RECT_FORMS:add_fresh(RECT_TEMPLATE)
+    if RND_TEMPLATE in LOOKUP:
+        while copies(RND_TEMPLATE)<BLANK_RND_FORMS:add_fresh(RND_TEMPLATE)
+    for ws in list(wb.worksheets):
+        if banned_initial_sheet(ws.title):wb.remove(ws)
+    def sheet_rank(ws):
+        filename=getattr(ws,'_template_file',None)
+        title=ws.title.strip().upper()
+        if filename=='Project Information.xlsx' or title=='PROJECT INFO':return 0
+        if filename=='Notes.xlsx' or title=='NOTES':return 1
+        if filename==RECT_TEMPLATE or title.startswith('DUCT TRAVERSE RECT'):return 3
+        if filename==RND_TEMPLATE or title.startswith('DUCT TRAVERSE RND'):return 4
+        return 2
+    wb._sheets.sort(key=sheet_rank)
+    if wb.sheetnames:wb.active=0
     if not wb.sheetnames:
         raise ValueError('No worksheets were generated')
     wb.calculation=CalcProperties(calcMode='auto',fullCalcOnLoad=True)
@@ -453,23 +629,24 @@ PAGE='''<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewpor
 #files:hover,#reference-file:hover,#files:focus-visible,#reference-file:focus-visible{border-color:#67d4c3;background:#12283a;box-shadow:inset 0 0 0 1px #67d4c322}
 #files::file-selector-button,#reference-file::file-selector-button{background:#1d3c56;border-color:#5f87a6;font-weight:650;padding:10px 14px;border-radius:7px}
 #files::file-selector-button:hover,#reference-file::file-selector-button:hover{background:#265072;border-color:#67d4c3;color:#fff}
-</style><body><a class="skip-link" href="#project-card">Skip to report builder</a><header><img src="/logo.png" alt="Air Balance Professionals company logo"><div><div class="brand-name">Air Balance Professionals</div><div class="brand-sub">Technical reporting workspace &nbsp;·&nbsp; NEBB #3861</div></div><form action="/logout" method="post" style="margin-left:auto"><button type="submit" style="background:#eff6ff;color:#16508c;border:1px solid #c8daef;min-height:38px;padding:8px 12px;white-space:nowrap">Sign out</button></form></header><main class="wrap"><section class="hero" aria-label="Report builder introduction"><div class="hero-row"><div><div class="eyebrow">ABP / Field engineering tools</div><h1>Build your TAB report</h1><p>Start with your job documents or an approved report. Review the design, choose your worksheets, and build a pre-field report in Excel.</p></div><span class="draft-pill">PRE-FIELD WORKSPACE</span></div></section><nav class="workspace-nav" aria-label="Report sections"><a href="#project-card">01 Project</a><a href="#basis-card">02 Report basis</a><a href="#template-panel" id="templates-nav">03 Worksheets</a><a href="#build-card">04 Build report</a></nav><div class="workspace-layout"><div><div class="card" id="project-card"><h2><span class="step">01</span> Project details</h2><div class="grid"><label>Project name<input id="project" type="text" placeholder="Project / facility name"></label><label>Location<input id="location" type="text" placeholder="City, State"></label></div><label>Standard<select id="standard"><option value="Commercial">Commercial · ±10% target</option><option value="USACE">USACE · ±5% target (DALT prerequisite)</option></select></label></div><div class="card" id="basis-card"><h2><span class="step">02</span> Choose your report source</h2><label>Build method<select id="buildmethod"><option value="sources">Build from source documents and master templates</option><option value="reference">Use an approved report as the design and layout reference</option></select></label><div id="reference-panel" hidden><p>Use a report for this same project whose design values and equipment list you have approved. This keeps its report pages, grouped Design/Actual columns, formulas and branding. Field measurements, serial numbers and signoffs are cleared. Source scans do not overwrite this report.</p><label>Approved reference workbook<input id="reference-file" type="file" accept=".xlsx"></label><button id="inspect-reference" type="button">Review reference report</button><div id="reference-summary" role="status" aria-live="polite"></div><label><input id="reference-approved" type="checkbox"> Use this reference’s equipment list and design values for this project, including differences from drawings.</label></div></div><div class="card" id="source-panel"><h2>Upload source documents</h2><input id="files" aria-label="Project source documents" type="file" accept=".pdf,.xlsx,.csv" multiple><p class="muted">PDF mechanical sheets, approved submittals, Excel and CSV schedules. Text-based extraction only; always review the M-sheet takeoff and latest revision.</p><button id="scan">Scan uploaded files</button><p id="scanstatus" role="status" aria-live="polite"></p><div id="tags"></div><div id="review"></div></div><div class="card" id="template-panel"><h2><span class="step">03</span> Choose report worksheets</h2><p class="muted">Select the actual ABP worksheets to include. Original layouts, formatting, print settings and formulas are preserved. Each copy stays on its own sheet; only existing input cells are filled.</p><div class="template-toolbar"><input id="template-search" type="search" aria-label="Search report worksheets" placeholder="Find a worksheet…"><button id="selectall" type="button">Select all</button> <button id="clear" type="button">Clear</button></div><div id="template-recommendations" class="recommend-summary" aria-live="polite">Scan source documents to get automatic template recommendations. You can always change the selections below.</div><p id="template-count" aria-live="polite"></p><div class="templates" id="templates"></div></div><div class="card" id="build-card"><h2><span class="step">04</span> Build report</h2><p class="muted" id="build-description">Build an Excel report with one tab per selected equipment form and verified design values. Additional equipment pages continue down the same tab. Equipment still needing review stays in the review log. Unsupported unit forms need an approved reference or manual preparation.</p><details class="restore-review" id="review-tools"><summary>Save or restore project progress</summary><p class="muted">Keep your reviewed tags and worksheet selections for next time.</p><button id="saveproject" type="button">Save project review (.json)</button> <label>Restore saved review<input id="loadproject" type="file" accept=".json,application/json"></label></details><div class="build-action"><button id="generate">Build report</button><div><strong>Excel report · .xlsx</strong><span>Downloads to your device when the build is complete.</span></div></div><p id="status" role="status" aria-live="polite"></p></div></div><aside class="summary" aria-label="Report summary"><h2>Your report</h2><div id="summary-project" class="summary-project">Untitled project</div><div id="summary-location" class="summary-location">Add a location to get started</div><dl><div><dt>Report basis</dt><dd id="summary-basis">Source documents</dd></div><div><dt id="summary-count-label">Worksheets</dt><dd id="summary-count">—</dd></div><div><dt>Equipment entries</dt><dd id="summary-equipment">0</dd></div><div><dt>Design review</dt><dd id="summary-review">No equipment yet</dd></div><div><dt>Report format</dt><dd>Excel · .xlsx</dd></div></dl><div class="summary-note"><strong>Built for pre-field preparation</strong>Design values stay separate from measurements. Add field readings and approvals after testing.</div></aside></div><p class="footer-note"><span aria-hidden="true">ⓘ</span> Pre-field draft only. All extracted values require review; final TAB reports require engineering verification and field signoff.</p></main><script>
+</style><body><a class="skip-link" href="#project-card">Skip to report builder</a><header><img src="/logo.png" alt="Air Balance Professionals company logo"><div><div class="brand-name">Air Balance Professionals</div><div class="brand-sub">Technical reporting workspace &nbsp;·&nbsp; NEBB #3861</div></div><form action="/logout" method="post" style="margin-left:auto"><button type="submit" style="background:#eff6ff;color:#16508c;border:1px solid #c8daef;min-height:38px;padding:8px 12px;white-space:nowrap">Sign out</button></form></header><main class="wrap"><section class="hero" aria-label="Report builder introduction"><div class="hero-row"><div><div class="eyebrow">ABP / Field engineering tools</div><h1>Build your TAB report</h1><p>Start with your job documents or an approved report. Review the design, choose your worksheets, and build a pre-field report in Excel.</p></div><span class="draft-pill">PRE-FIELD WORKSPACE</span></div></section><nav class="workspace-nav" aria-label="Report sections"><a href="#project-card">01 Project</a><a href="#basis-card">02 Report basis</a><a href="#template-panel" id="templates-nav">03 Worksheets</a><a href="#build-card">04 Build report</a></nav><div class="workspace-layout"><div><div class="card" id="project-card"><h2><span class="step">01</span> Project details</h2><div class="grid"><label>Project name<input id="project" type="text" placeholder="Project / facility name"></label><label>Location<input id="location" type="text" placeholder="City, State"></label></div><label>Standard<select id="standard"><option value="Commercial">Commercial · ±10% target</option><option value="USACE">USACE · ±5% target (DALT prerequisite)</option></select></label></div><div class="card" id="basis-card"><h2><span class="step">02</span> Choose your report source</h2><label>Build method<select id="buildmethod"><option value="sources">Build from source documents and master templates</option><option value="reference">Use an approved report as the design and layout reference</option></select></label><div id="reference-panel" hidden><p>Use a report for this same project whose design values and equipment list you have approved. This keeps its report pages, grouped Design/Actual columns, formulas and branding. Field measurements, serial numbers and signoffs are cleared. Source scans do not overwrite this report.</p><label>Approved reference workbook<input id="reference-file" type="file" accept=".xlsx"></label><button id="inspect-reference" type="button">Review reference report</button><div id="reference-summary" role="status" aria-live="polite"></div><label><input id="reference-approved" type="checkbox"> Use this reference’s equipment list and design values for this project, including differences from drawings.</label></div></div><div class="card" id="source-panel"><h2>Upload source documents</h2><input id="files" aria-label="Project source documents" type="file" accept=".pdf,.xlsx,.csv" multiple><p class="muted">PDF mechanical sheets, approved submittals, Excel and CSV schedules. Text-based extraction only; always review the M-sheet takeoff and latest revision.</p><button id="scan">Scan uploaded files</button><p id="scanstatus" role="status" aria-live="polite"></p><div id="tags"></div><div id="review"></div></div><div class="card" id="template-panel"><h2><span class="step">03</span> Choose report worksheets</h2><p class="muted">Select the actual ABP worksheets to include. Original layouts, formatting, print settings and formulas are preserved. Each copy stays on its own sheet; only existing input cells are filled.</p><div class="template-toolbar"><input id="template-search" type="search" aria-label="Search report worksheets" placeholder="Find a worksheet…"><button id="selectall" type="button">Select all</button> <button id="clear" type="button">Clear</button></div><div id="template-recommendations" class="recommend-summary" aria-live="polite">A pre-field worksheet pack is checked to start. Scan source documents to match it to this job. You can change any selection before building.</div><p id="template-count" aria-live="polite"></p><div class="templates" id="templates"></div></div><div class="card" id="build-card"><h2><span class="step">04</span> Build report</h2><p class="muted" id="build-description">Build an Excel report with one tab per selected equipment form and verified design values. Additional equipment pages continue down the same tab. Equipment still needing review stays in the review log. Unsupported unit forms need an approved reference or manual preparation.</p><details class="restore-review" id="review-tools"><summary>Save or restore project progress</summary><p class="muted">Keep your reviewed tags and worksheet selections for next time.</p><button id="saveproject" type="button">Save project review (.json)</button> <label>Restore saved review<input id="loadproject" type="file" accept=".json,application/json"></label></details><div class="build-action"><button id="generate">Build report</button><div><strong>Excel report · .xlsx</strong><span>Downloads to your device when the build is complete.</span></div></div><p id="status" role="status" aria-live="polite"></p></div></div><aside class="summary" aria-label="Report summary"><h2>Your report</h2><div id="summary-project" class="summary-project">Untitled project</div><div id="summary-location" class="summary-location">Add a location to get started</div><dl><div><dt>Report basis</dt><dd id="summary-basis">Source documents</dd></div><div><dt id="summary-count-label">Worksheets</dt><dd id="summary-count">—</dd></div><div><dt>Equipment entries</dt><dd id="summary-equipment">0</dd></div><div><dt>Design review</dt><dd id="summary-review">No equipment yet</dd></div><div><dt>Report format</dt><dd>Excel · .xlsx</dd></div></dl><div class="summary-note"><strong>Built for pre-field preparation</strong>Design values stay separate from measurements. Add field readings and approvals after testing.</div></aside></div><p class="footer-note"><span aria-hidden="true">ⓘ</span> Pre-field draft only. All extracted values require review; final TAB reports require engineering verification and field signoff.</p></main><script>
 __UI_HELPERS__
 const savedTagPattern=new RegExp(__TAG_PATTERN__,'i');
 let templatesReady=false,templateError='';
+const defaultPack=new Set(__DEFAULT_PACK_JSON__);
 let inspectedReference=null;
 function referenceForm(){const f=$('reference-file').files[0];if(!f)throw Error('Choose an approved reference workbook');if(f.size>8000000)throw Error('Reference workbook exceeds 8 MB');const form=new FormData();form.append('reference',f);return form}
 function resetReference(){inspectedReference=null;referenceEntryCount=0;$('status').textContent='';$('reference-approved').checked=false;$('reference-summary').textContent='Review the selected reference before building.'}
 async function generateReference(){try{if(!inspectedReference||inspectedReference!==$('reference-file').files[0])throw Error('Review the selected reference first');if(!$('reference-approved').checked)throw Error('Confirm the reference equipment list and design values');if(!$('project').value.trim())throw Error('Enter the project name');$('generate').disabled=true;$('generate').textContent='Building report…';$('generate').setAttribute('aria-busy','true');$('status').textContent='Building report from approved reference...';const form=referenceForm();form.append('project',$('project').value);form.append('location',$('location').value);form.append('approved','true');const r=await fetch('/api/reference/build',{method:'POST',body:form});if(!r.ok)await readApiJson(r);const url=URL.createObjectURL(await r.blob()),a=document.createElement('a');a.href=url;a.download=($('project').value.replace(/[^a-z0-9_-]+/gi,'_')||'ABP')+'_PreField_TAB.xlsx';a.click();setTimeout(()=>URL.revokeObjectURL(url),10000);$('status').textContent='Report built from your approved reference. Design values and report layout retained; field measurements and signoffs cleared.'}catch(e){$('status').textContent=e.message}finally{$('generate').disabled=false;$('generate').textContent='Build report';$('generate').removeAttribute('aria-busy')}}
 window.addEventListener('DOMContentLoaded',()=>{
- const sourceDescription=$('build-description').textContent; $('buildmethod').onchange=()=>{const ref=$('buildmethod').value==='reference';$('status').textContent='';$('source-panel').hidden=ref;$('template-panel').hidden=ref;$('build-description').textContent=ref?'Build the approved reference report with its design data and page layout. Actual field readings and signoffs will be blank.':sourceDescription;$('reference-panel').hidden=$('buildmethod').value!=='reference';$('scan').disabled=$('buildmethod').value==='reference';$('saveproject').disabled=$('buildmethod').value==='reference';$('loadproject').disabled=$('buildmethod').value==='reference';$('template-recommendations').textContent=$('buildmethod').value==='reference'?'Reference mode uses the approved workbook’s sheets. Template selections below are ignored.':'Scan source documents to get template recommendations.'};
+ const sourceDescription=$('build-description').textContent; $('buildmethod').onchange=()=>{const ref=$('buildmethod').value==='reference';$('status').textContent='';$('source-panel').hidden=ref;$('template-panel').hidden=ref;$('build-description').textContent=ref?'Build the approved reference report with its design data and page layout. Actual field readings and signoffs will be blank.':sourceDescription;$('reference-panel').hidden=$('buildmethod').value!=='reference';$('scan').disabled=$('buildmethod').value==='reference';$('saveproject').disabled=$('buildmethod').value==='reference';$('loadproject').disabled=$('buildmethod').value==='reference';$('template-recommendations').textContent=$('buildmethod').value==='reference'?'Reference mode uses the approved workbook’s sheets. Template selections below are ignored.':'A pre-field worksheet pack is checked to start. Scan source documents to match it to this job. You can change any selection before building.'};
  $('reference-file').onchange=resetReference;
  $('inspect-reference').onclick=async()=>{resetReference();$('inspect-reference').disabled=true;$('reference-summary').textContent='Checking workbook layouts and equipment…';try{const file=$('reference-file').files[0],form=referenceForm();const r=await fetch('/api/reference/inspect',{method:'POST',body:form});const info=await readApiJson(r);if(file!==$('reference-file').files[0])return;inspectedReference=file;referenceEntryCount=info.units.length;$('reference-summary').textContent=info.sheets.length+' report sheets: '+info.sheets.join(', ')+'. '+info.units.length+' equipment entries: '+info.units.map(x=>x.tag).join(', ')+'. '+info.note}catch(e){$('reference-summary').textContent=e.message}finally{$('inspect-reference').disabled=false;updateWorkspace()}};
 });
 
-let tags=[],records=[];const $=id=>document.getElementById(id);async function init(){let t=await readApiJson(await fetch('/api/templates'));if(!Array.isArray(t)||t.some(x=>typeof x!=='string'))throw Error('Invalid worksheet list. Refresh the page to try again.');$('templates').innerHTML=t.map(x=>`<label class="template"><input type="checkbox" value="${x.replaceAll('&','&amp;').replaceAll('"','&quot;')}">${worksheetLabel(x).replaceAll('&','&amp;').replaceAll('<','&lt;')}</label>`).join('');for(const box of document.querySelectorAll('.template input')){if(/project information|notes|air moving equipment|supply diffusers/i.test(box.value))box.checked=true}templatesReady=true;updateWorkspace()}init().catch(e=>{templateError=e.message;updateWorkspace()});$('selectall').onclick=()=>document.querySelectorAll('.template input').forEach(x=>x.checked=true);$('clear').onclick=()=>document.querySelectorAll('.template input').forEach(x=>x.checked=false);
+let tags=[],records=[];const $=id=>document.getElementById(id);async function init(){let t=await readApiJson(await fetch('/api/templates'));if(!Array.isArray(t)||t.some(x=>typeof x!=='string'))throw Error('Invalid worksheet list. Refresh the page to try again.');$('templates').innerHTML=t.map(x=>`<label class="template"><input type="checkbox" value="${x.replaceAll('&','&amp;').replaceAll('"','&quot;')}">${worksheetLabel(x).replaceAll('&','&amp;').replaceAll('<','&lt;')}</label>`).join('');for(const box of document.querySelectorAll('.template input'))box.checked=defaultPack.has(box.value);templatesReady=true;updateWorkspace()}init().catch(e=>{templateError=e.message;updateWorkspace()});$('selectall').onclick=()=>document.querySelectorAll('.template input').forEach(x=>x.checked=true);$('clear').onclick=()=>document.querySelectorAll('.template input').forEach(x=>x.checked=false);
 $('files').onchange=()=>{tags=[];records=[];renderReview();$('scanstatus').textContent='Source files changed. Scan these files to review their equipment.';$('status').textContent='';updateWorkspace()};
-$('scan').onclick=async()=>{if(!templatesReady){$('scanstatus').textContent=templateError||'Wait for report worksheets to load.';return}let files=$('files').files;if(!files.length){$('scanstatus').textContent='Choose files first';return}let form=new FormData();for(let f of files)form.append('files',f);$('scan').disabled=true;$('files').disabled=true;$('buildmethod').disabled=true;$('generate').disabled=true;$('loadproject').disabled=true;$('scanstatus').textContent='Reading files...';try{let r=await fetch('/api/scan',{method:'POST',body:form});let data=await readApiJson(r);tags=data.tags||[];records=(data.records||[]).map(row=>{const copy={...row};applyProposed(copy);return copy});$('scanstatus').textContent=`Found ${tags.length} equipment entries. Review the suggested design values and verify each unit before you build the report.`+(data.warnings.length?' Warnings: '+data.warnings.join(' | '):'');$('tags').innerHTML='';renderReview();let recommendation=await readApiJson(await fetch('/api/suggest',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({tags,signals:data.signals||[]})}));if(!Array.isArray(recommendation.recommended))throw Error('Template recommendations unavailable');let chosen=new Set(recommendation.recommended.filter(x=>!x.review).map(x=>x.name));document.querySelectorAll('.template input').forEach(x=>x.checked=chosen.has(x.value));let safe=x=>String(x||'').replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('>','&gt;');$('template-recommendations').innerHTML='<strong>Recommended '+recommendation.recommended.length+' ABP templates</strong><p>Selected automatically based on the uploaded documents. Review and change any checked boxes before building your report.</p>'+recommendation.recommended.map(x=>'<div class="recommend-item"><span>'+safe(worksheetLabel(x.name))+(x.review?' <em>Review type</em>':'')+'</span><small>'+safe(x.reason)+'</small></div>').join('')+'<p class="muted">'+safe(recommendation.review_note)+'</p>'}catch(e){$('scanstatus').textContent=e.message}finally{$('scan').disabled=false;$('files').disabled=false;$('buildmethod').disabled=false;$('generate').disabled=false;$('loadproject').disabled=false;updateWorkspace()}};
+$('scan').onclick=async()=>{if(!templatesReady){$('scanstatus').textContent=templateError||'Wait for report worksheets to load.';return}let files=$('files').files;if(!files.length){$('scanstatus').textContent='Choose files first';return}let form=new FormData();for(let f of files)form.append('files',f);$('scan').disabled=true;$('files').disabled=true;$('buildmethod').disabled=true;$('generate').disabled=true;$('loadproject').disabled=true;$('scanstatus').textContent='Reading files...';try{let r=await fetch('/api/scan',{method:'POST',body:form});let data=await readApiJson(r);tags=data.tags||[];records=(data.records||[]).map(row=>{const copy={...row};applyProposed(copy);return copy});$('scanstatus').textContent=`Found ${tags.length} equipment entries. Review the suggested design values and verify each unit before you build the report.`+(data.warnings.length?' Warnings: '+data.warnings.join(' | '):'');$('tags').innerHTML='';renderReview();let recommendation=await readApiJson(await fetch('/api/suggest',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({tags,signals:data.signals||[],sparse:data.sparse===true})}));if(!Array.isArray(recommendation.recommended))throw Error('Template recommendations unavailable');let chosen=new Set(recommendation.recommended.map(x=>x.name));document.querySelectorAll('.template input').forEach(x=>x.checked=chosen.has(x.value));let safe=x=>String(x||'').replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('>','&gt;');$('template-recommendations').innerHTML='<strong>Recommended '+recommendation.recommended.length+' ABP templates</strong><p>Selected automatically based on the uploaded documents. Review and change any checked boxes before building your report.</p>'+recommendation.recommended.map(x=>'<div class="recommend-item"><span>'+safe(worksheetLabel(x.name))+(x.review?' <em>Review type</em>':'')+'</span><small>'+safe(x.reason)+'</small></div>').join('')+'<p class="muted">'+safe(recommendation.review_note)+'</p>'}catch(e){$('scanstatus').textContent=e.message}finally{$('scan').disabled=false;$('files').disabled=false;$('buildmethod').disabled=false;$('generate').disabled=false;$('loadproject').disabled=false;updateWorkspace()}};
 
 const unitForms=__UNIT_FORMS_JSON__;
 function defaultUnitForm(tag){if(/^(AHU|RTU|OAU|DOAS|MAU|AC)[- ]?[0-9]/.test(tag))return 'Air Moving Equipment.xlsx';if(/^(EF|KEF|TEF|CEF|SEF)[- ]?[0-9]/.test(tag))return 'Exhaust Fans _Std._.xlsx';if(/^(VRF|SSAU)[- ]?[0-9]/.test(tag))return 'Fan Coil Units DX.xlsx';if(/^KH[- ]?[0-9]/.test(tag))return 'Kitchen Hood.xlsx';return ''}
@@ -489,7 +666,7 @@ function renderReview(){
   $('candidate-notice').textContent='Suggested values are ready for '+r.tag+'. Manufacturer and model stay blank. Verify before building.'+((r.flags||[]).length?' '+r.flags.join(' '):'');
  });
 }
-function projectPayload(){return {project:$('project').value,location:$('location').value,standard:$('standard').value,layout:'individual',prefield_pack:true,tags,records,templates:[...document.querySelectorAll('.template input:checked')].map(x=>x.value)}}
+function projectPayload(){return {project:$('project').value,location:$('location').value,standard:$('standard').value,layout:'individual',tags,records,templates:[...document.querySelectorAll('.template input:checked')].map(x=>x.value)}}
 $('saveproject').onclick=()=>{const data=JSON.stringify({format:'ABP-PREFIELD-REVIEW',version:1,...projectPayload()},null,2);const url=URL.createObjectURL(new Blob([data],{type:'application/json'}));const a=document.createElement('a');a.href=url;a.download='ABP_Project_Review.json';a.click();setTimeout(()=>URL.revokeObjectURL(url),10000)};
 $('loadproject').onchange=async ev=>{try{const f=ev.target.files[0];if(!f)return;if(f.size>2000000)throw Error('Project review file exceeds 2 MB');if(!templatesReady)throw Error('Wait for report worksheets to load before restoring a review.');const data=validateSavedReview(JSON.parse(await f.text()),[...document.querySelectorAll('.template input')].map(x=>x.value),unitForms,savedTagPattern);$('project').value=String(data.project||'');$('location').value=String(data.location||'');$('standard').value=data.standard==='USACE'?'USACE':'Commercial';records=data.records;tags=records.map(r=>r.tag);document.querySelectorAll('.template input').forEach(x=>x.checked=data.templates.includes(x.value));renderReview();$('status').textContent='Saved review restored. Recheck verification and source revisions before building your report.'}catch(e){$('status').textContent=e.message}};
 $('generate').onclick=async()=>{if($('buildmethod').value==='reference'){await generateReference();return}if(!templatesReady){$('status').textContent=templateError||'Wait for report worksheets to load.';return}let payload=projectPayload();if(!payload.project.trim()){$('status').textContent='Add a project name before building your report.';$('project').focus();return}if(!payload.templates.length){$('status').textContent='Select at least one report worksheet.';$('template-panel').scrollIntoView();return}$('generate').disabled=true;$('generate').textContent='Building report…';$('generate').setAttribute('aria-busy','true');$('status').textContent='Building your report...';try{let r=await fetch('/api/build',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});if(!r.ok)await readApiJson(r);let blob=await r.blob(),url=URL.createObjectURL(blob),a=document.createElement('a');a.href=url;a.download=(payload.project.replace(/[^a-z0-9_-]+/gi,'_')||'ABP')+'_PreField_TAB.xlsx';a.click();setTimeout(()=>URL.revokeObjectURL(url),10000);$('status').textContent='Report built. Your Excel download is ready. Review flagged records and source revisions before field use.'}catch(e){$('status').textContent=e.message}finally{$('generate').disabled=false;$('generate').textContent='Build report';$('generate').removeAttribute('aria-busy')}};
@@ -524,7 +701,8 @@ $('template-search').addEventListener('input',ev=>{
 updateWorkspace();
 </script></body></html>'''
 # These resources are immutable during a running deployment; encode once per process.
-PAGE=PAGE.replace('__UNIT_FORMS_JSON__',json.dumps(UNIT_FORMS)).replace('__UI_HELPERS__',(ROOT/'abp_ui.js').read_text(encoding='utf-8')).replace('__TAG_PATTERN__',json.dumps('^(?:'+TAGS.pattern+')$'))
+DEFAULT_PACK=[item['name'] for item in suggested_templates([],sparse=True)['recommended']]
+PAGE=PAGE.replace('__UNIT_FORMS_JSON__',json.dumps(UNIT_FORMS)).replace('__UI_HELPERS__',(ROOT/'abp_ui.js').read_text(encoding='utf-8')).replace('__TAG_PATTERN__',json.dumps('^(?:'+TAGS.pattern+')$')).replace('__DEFAULT_PACK_JSON__',json.dumps(DEFAULT_PACK))
 PAGE_BYTES=PAGE.encode('utf-8')
 TEMPLATE_LIST_BYTES=json.dumps(list(LOOKUP)).encode('utf-8')
 # LAN mode is explicitly opt-in. Authenticated session cookies protect the app and API routes.
@@ -749,7 +927,7 @@ class Handler(BaseHTTPRequestHandler):
             if path=='/api/suggest':
                 if n>2_000_000:raise ValueError('Template suggestion request too large')
                 request=json.loads(data)
-                self.respond(json.dumps(suggested_templates(request.get('tags',[]),request.get('signals',[]))).encode());return
+                self.respond(json.dumps(suggested_templates(request.get('tags',[]),request.get('signals',[]),sparse=request.get('sparse') is True)).encode());return
             if path=='/api/build':
                 if n>8_000_000:raise ValueError('Build request exceeds 8 MB')
                 payload=json.loads(data);out=build(payload);self.respond(out,'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',filename='ABP_PreField_TAB.xlsx');return
