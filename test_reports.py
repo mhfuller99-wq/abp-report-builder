@@ -172,4 +172,144 @@ class ReportTests(unittest.TestCase):
             server.shutdown();server.server_close();thread.join()
 
 
+class WorksheetAutoSelectTests(unittest.TestCase):
+    def names(self, tags, signals=None, sparse=False):
+        return [item['name'] for item in suggested_templates(tags, signals, sparse=sparse)['recommended']]
+
+    def test_default_pack_opens_with_project_info(self):
+        pack=['Project Information.xlsx','Notes.xlsx','Air Moving Equipment.xlsx','Duct Traverse Rect..xlsx','Duct Traverse RND.xlsx']
+        self.assertEqual(abp_server.DEFAULT_PACK, pack)
+        self.assertEqual(self.names([], sparse=True), pack)
+        for banned in ('Cover - Drew.xlsx','Abbreviations.xlsx','PRE-TAB Checklist.xlsx','Project Summary.xlsx'):
+            self.assertNotIn(banned, pack)
+        self.assertNotIn('project information|notes|air moving', abp_server.PAGE)
+        self.assertIn('defaultPack.has(box.value)', abp_server.PAGE)
+        self.assertIn('sparse:data.sparse===true', abp_server.PAGE)
+        self.assertIn('<label class="template"><input type="checkbox" value="', abp_server.PAGE)
+        self.assertNotIn('class="template"><input type="checkbox" disabled', abp_server.PAGE)
+        self.assertEqual(abp_server.MAX_UPLOAD, 200_000_000)
+
+    def test_readable_equipment_selects_only_needed_sheets(self):
+        rtu=self.names(['RTU-1','DOAS-2'])
+        for name in ('Project Information.xlsx','Notes.xlsx','Air Moving Equipment.xlsx','Coil DX GAS HT.xlsx','Duct Traverse Rect..xlsx','Duct Traverse RND.xlsx'):
+            self.assertIn(name, rtu)
+        self.assertLess(rtu.index('Duct Traverse Rect..xlsx'), rtu.index('Duct Traverse RND.xlsx'))
+        for banned in ('Cover - Drew.xlsx','Abbreviations.xlsx','PRE-TAB Checklist.xlsx','Project Summary.xlsx','Boiler.xlsx'):
+            self.assertNotIn(banned, rtu)
+        coil=next(item for item in suggested_templates(['RTU-1'])['recommended'] if item['name']=='Coil DX GAS HT.xlsx')
+        self.assertTrue(coil['review'])
+        confirmed=next(item for item in suggested_templates(['RTU-1'], ['gas_heat'])['recommended'] if item['name']=='Coil DX GAS HT.xlsx')
+        self.assertFalse(confirmed['review'])
+        ahu=self.names(['AHU-1'])
+        self.assertIn('Air Moving Equipment.xlsx', ahu)
+        self.assertNotIn('Coil DX GAS HT.xlsx', ahu)
+        water=self.names(['AHU-1'], ['water_coil'])
+        self.assertIn('Coil WTR CLG WTR HT.xlsx', water)
+        self.assertNotIn('Coil DX GAS HT.xlsx', water)
+        electric=self.names(['RTU-1'], ['electric_heat'])
+        self.assertIn('COIL DX HP ELE.xlsx', electric)
+        self.assertNotIn('Coil DX GAS HT.xlsx', electric)
+        exhaust=self.names(['EF-1'])
+        self.assertIn('Exhaust Fans _Std._.xlsx', exhaust)
+        self.assertNotIn('Air Moving Equipment.xlsx', exhaust)
+        self.assertIn('Duct Traverse RND.xlsx', exhaust)
+        self.assertIn('Duct Traverse Rect..xlsx', exhaust)
+        ductless=self.names(['IDU-1'])
+        self.assertIn('Fan Coil Units DX.xlsx', ductless)
+        self.assertNotIn('Fan Coil Units WTR.xlsx', ductless)
+
+    def test_missing_templates_are_not_invented(self):
+        self.assertFalse(any('VAV' in name.upper() for name in self.names(['VAV-1'], ['vav'])))
+        self.assertFalse(any('diffuser' in name.lower() or 'grille' in name.lower() for name in self.names([], ['diffusers'])))
+        self.assertIn('Exhaust Grilles.xlsx.xlsx', self.names([], ['exhaust_grilles']))
+        self.assertFalse(any('heater' in name.lower() for name in self.names(['UH-1'], ['unit_heater'])))
+        abp_server.LOOKUP['VAV Boxes.xlsx']=abp_server.LOOKUP['Notes.xlsx']
+        abp_server.LOOKUP['Supply Diffusers.xlsx']=abp_server.LOOKUP['Notes.xlsx']
+        abp_server.LOOKUP['Unit Heaters.xlsx']=abp_server.LOOKUP['Notes.xlsx']
+        abp_server.LOOKUP['Instrument.xlsx']=abp_server.LOOKUP['Notes.xlsx']
+        try:
+            picked=self.names(['VAV-1','UH-2'], ['diffusers'])
+            self.assertIn('VAV Boxes.xlsx', picked)
+            self.assertIn('Supply Diffusers.xlsx', picked)
+            self.assertIn('Unit Heaters.xlsx', picked)
+            self.assertNotIn('Instrument.xlsx', picked)
+        finally:
+            for name in ('VAV Boxes.xlsx','Supply Diffusers.xlsx','Unit Heaters.xlsx','Instrument.xlsx'):
+                abp_server.LOOKUP.pop(name, None)
+
+    def test_different_palette_keeps_source_colors(self):
+        result=suggested_templates(['FFU-1'])
+        self.assertIn('Fan Filter Units.xlsx', self.names(['FFU-1']))
+        self.assertIn('Project Information.xlsx', [item['name'] for item in result['recommended']])
+        from abp_server import build, theme_palette, theme_color_rgb, read_theme
+        info=abp_server.LOOKUP['Project Information.xlsx']
+        original=load_workbook(info).active
+        tint=original['A2'].fill.fgColor.tint
+        index=original['A2'].fill.fgColor.theme
+        expected=theme_color_rgb(theme_palette(read_theme(info)), index, tint)
+        # Fan-filter units use a different accent order, so Project Info colors are frozen first.
+        built=load_workbook(io.BytesIO(build({'project':'Palette','templates':['Fan Filter Units.xlsx'],'records':[]})))
+        self.assertEqual(built['PROJECT INFO']['A2'].fill.fgColor.rgb, expected)
+        shifted=theme_color_rgb(theme_palette(read_theme(abp_server.LOOKUP['Fan Filter Units.xlsx'])), index, tint)
+        self.assertNotEqual(expected, shifted)
+        matched=load_workbook(io.BytesIO(build({'project':'Same palette','templates':['Air Moving Equipment.xlsx'],'records':[]})))
+        self.assertEqual(matched['PROJECT INFO']['A2'].fill.fgColor.type, 'theme')
+        self.assertEqual(matched['PROJECT INFO']['A2'].fill.fgColor.theme, index)
+
+    def test_sparse_scan_uses_default_pack_plus_tagged_sheets(self):
+        import fitz
+        blank=fitz.open();blank.new_page();raw=blank.tobytes();blank.close()
+        scanned=read_sources([('drawings.pdf', raw)])
+        self.assertTrue(scanned['sparse'])
+        self.assertEqual(scanned['tags'], [])
+        self.assertEqual(self.names(scanned['tags'], scanned['signals'], sparse=scanned['sparse']), abp_server.DEFAULT_PACK)
+        tiny=read_sources([('marks.csv', b'FCU-1,EF-2,RTU-3\n')])
+        self.assertTrue(tiny['sparse'])
+        self.assertEqual(tiny['tags'], ['FCU-1','EF-2','RTU-3'])
+        picked=self.names(tiny['tags'], tiny['signals'], sparse=tiny['sparse'])
+        for name in ('Project Information.xlsx','Notes.xlsx','Air Moving Equipment.xlsx','Fan Coil Units DX.xlsx','Exhaust Fans _Std._.xlsx','Coil DX GAS HT.xlsx','Duct Traverse Rect..xlsx','Duct Traverse RND.xlsx'):
+            self.assertIn(name, picked)
+        self.assertNotIn('Cover - Drew.xlsx', picked)
+        rich='\n'.join(['Tag,Design CFM,Notes']+[f'EF-{i},{100+i},EXHAUST FAN SCHEDULE area served' for i in range(1,40)]).encode()
+        schedule=read_sources([('exhaust.csv', rich)])
+        self.assertFalse(schedule['sparse'])
+        self.assertIn('exhaust_fan', schedule['signals'])
+        readable=self.names(schedule['tags'], schedule['signals'], sparse=schedule['sparse'])
+        self.assertIn('Exhaust Fans _Std._.xlsx', readable)
+        self.assertNotIn('Air Moving Equipment.xlsx', readable)
+
+    def test_initial_workbook_order_and_absent_tabs(self):
+        from abp_server import build, BLANK_RECT_FORMS, BLANK_RND_FORMS
+        from abp_reference import build_reference, inspect_reference
+        selected=self.names(['RTU-1','EF-2','IDU-3'])+['Cover - Drew.xlsx','Abbreviations.xlsx','PRE-TAB Checklist.xlsx','Project Summary.xlsx','Boiler.xlsx']
+        self.assertNotIn('Boiler.xlsx', self.names(['RTU-1','EF-2','IDU-3']))
+        wb=load_workbook(io.BytesIO(build({'project':'Office order','templates':selected,'records':[
+            {'tag':'RTU-1','status':'UNVERIFIED','candidates':[{'values':{'design_cfm':1},'source':'x','reference':'y','evidence':'z'}]}
+        ]})))
+        self.assertEqual(wb.sheetnames, ['PROJECT INFO','NOTES','AIR MOVING EQUIPMENT','COIL DX GAS HT','EXHAUST FAN','EXHAUST FANS SMALL','FAN COIL UNITS DX','BOILER','DUCT TRAVERSE RECT.','DUCT TRAVERSE RND'])
+        banned=('ABP BUILD INFO','TAKEOFF REVIEW','SOURCE EVIDENCE','AIRFLOW CHECK','EXTRACTION CANDIDATES','ABBREVIATIONS','PRE-TAB CHECKLIST','PROJECT SUMMARY','INSTRUMENT','Cover ')
+        for title in wb.sheetnames:
+            self.assertNotIn(title.strip().upper(), {item.strip().upper() for item in banned})
+            self.assertFalse(title.strip().upper().startswith('COVER'))
+        self.assertEqual(wb['DUCT TRAVERSE RECT.'].max_row, 42*BLANK_RECT_FORMS)
+        self.assertEqual(wb['DUCT TRAVERSE RND'].max_row, 27*BLANK_RND_FORMS)
+        self.assertIsNone(wb['DUCT TRAVERSE RECT.']['B10'].value)
+        self.assertIsNone(wb['DUCT TRAVERSE RND']['B10'].value)
+        # Equipment the reviewer unchecked is omitted. Project Info, Notes, and both traverses stay.
+        override=load_workbook(io.BytesIO(build({'project':'Override','templates':['Exhaust Fans _Std._.xlsx'],'records':[]})))
+        self.assertIn('EXHAUST FAN', override.sheetnames)
+        self.assertNotIn('AIR MOVING EQUIPMENT', override.sheetnames)
+        self.assertNotIn('BOILER', override.sheetnames)
+        self.assertEqual(override.sheetnames[0], 'PROJECT INFO')
+        self.assertEqual(override.sheetnames[1], 'NOTES')
+        self.assertEqual(override.sheetnames[-2:], ['DUCT TRAVERSE RECT.','DUCT TRAVERSE RND'])
+        reference=Workbook();unit=reference.active;unit.title='PUMPS'
+        unit['A3']='UNIT DESIGNATION';unit['C3']='P-1'
+        reference.create_sheet('EXTRACTION CANDIDATES')['A1']='do not export'
+        raw=packed(reference)
+        self.assertNotIn('EXTRACTION CANDIDATES', inspect_reference(raw)['sheets'])
+        built=load_workbook(io.BytesIO(build_reference(raw,'Example')))
+        self.assertNotIn('EXTRACTION CANDIDATES', built.sheetnames)
+
+
 if __name__=='__main__':unittest.main()

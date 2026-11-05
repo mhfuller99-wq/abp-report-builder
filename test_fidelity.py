@@ -1,7 +1,7 @@
 import io,unittest,zipfile
 from copy import copy
 from openpyxl import load_workbook
-from abp_server import build,LOOKUP
+from abp_server import build,LOOKUP,banned_initial_template,RECT_TEMPLATE,RND_TEMPLATE,BLANK_RECT_FORMS,BLANK_RND_FORMS
 from abp_reference import build_reference
 from abp_fidelity import sheet_paths,NS
 import xml.etree.ElementTree as ET
@@ -14,18 +14,30 @@ def formulas(data,title):
 class FidelityTests(unittest.TestCase):
     def test_every_master_preserves_formula_xml_and_formatting(self):
         for name,path in LOOKUP.items():
+            if banned_initial_template(name):
+                continue
             with self.subTest(template=name):
                 original=path.read_bytes();src=load_workbook(io.BytesIO(original))
                 generated=build({'project':'Template fidelity','templates':[name]})
                 dst=load_workbook(io.BytesIO(generated))
                 for s in src:
                     d=dst[s.title]
-                    self.assertEqual(formulas(original,s.title),formulas(generated,d.title))
-                    self.assertEqual(set(map(str,s.merged_cells.ranges)),set(map(str,d.merged_cells.ranges)))
+                    traverse=name in (RECT_TEMPLATE,RND_TEMPLATE)
+                    if traverse:
+                        pages=BLANK_RECT_FORMS if name==RECT_TEMPLATE else BLANK_RND_FORMS
+                        self.assertEqual(d.max_row, s.max_row*pages)
+                        def row_of(address):
+                            return int(''.join(ch for ch in address if ch.isdigit()) or 0)
+                        first={addr:formula for addr,formula in formulas(generated,d.title).items() if row_of(addr)<=s.max_row}
+                        self.assertEqual(formulas(original,s.title),first)
+                    else:
+                        self.assertEqual(formulas(original,s.title),formulas(generated,d.title))
+                        self.assertEqual(set(map(str,s.merged_cells.ranges)),set(map(str,d.merged_cells.ranges)))
                     for row in s:
                         for c in row:
                             for attr in ('font','fill','border','alignment','number_format','protection'):
                                 self.assertEqual(copy(getattr(c,attr)),copy(getattr(d[c.coordinate],attr)),(name,c.coordinate,attr))
+                    if traverse:continue
                     for attr in ('page_setup','page_margins','print_options','HeaderFooter','row_breaks','col_breaks','sheet_format','protection','data_validations'):
                         self.assertEqual(ET.tostring(getattr(s,attr).to_tree()),ET.tostring(getattr(d,attr).to_tree()),(name,attr))
                     self.assertEqual(str(s.print_area),str(d.print_area))

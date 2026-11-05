@@ -46,9 +46,16 @@ def inventory(wb):
     return units
 
 
+def drop_extraction_candidates(wb):
+    """Audit candidate tabs stay in the app. They are never written into a report."""
+    for ws in list(wb.worksheets):
+        if ws.title.strip().upper() == 'EXTRACTION CANDIDATES':
+            wb.remove(ws)
+
 def inspect_reference(data):
     wb = open_reference(data)
     try:
+        drop_extraction_candidates(wb)
         populated = [s for s in wb if any(c.value is not None for row in s for c in row)]
         unsupported = [s.title for s in populated if family(s) is None]
         if unsupported:
@@ -263,6 +270,7 @@ def build_reference(data, project, location=''):
         raise ValueError('Enter a project name and location of at most 180 characters each')
     wb = open_reference(data)
     try:
+        drop_extraction_candidates(wb)
         for ws in list(wb):
             if ws.title not in info['sheets']:
                 wb.remove(ws)
