@@ -124,13 +124,19 @@ Source uploads accumulate across file-picker selections and drops. The visible
 list supports individual removal and a combined 200 MB limit. Exact duplicates
 (name, size, modified time) are not added twice.
 
-The supply diffuser master is the original ABP 2022 form, identical to the
-Company Knowledge / Report Templates copy (SHA-256
-`4d110f77202e9d184ed7c2e1de44adc91de717542aaa2d82489fce701536d7ff`).
-Only Area Served, Outlet No., Type, Size and Design CFM inputs are populated.
-Initial/Actual inputs remain blank and percentage formulas are preserved.
-Outlets are grouped by reviewed system, 28 per original form; further forms
-continue on the same tab. No source text replaces calculation columns.
+The supply diffuser master is a sanitized copy of the user-approved ABP
+reference layout. Job values and measurements are removed; its original
+31 formulas, including the row-27 totals, are retained unchanged.
+The system goes in A5; room, outlet number, type, numeric round-neck size and
+design CFM occupy the existing input cells. Initial/Actual inputs remain blank.
+Outlets are grouped by reviewed system, 21 per original form; further forms
+continue on the same tab and numbering restarts for each system. Copied pages
+translate relative references without changing formula logic.
 PDF outlet fields can be corrected in the review table before building. Blank
 airflow or system fields remain blank rather than borrowing a unit total.
+Scanned type-A symbols are candidates, not confirmed supply outlets. They
+start unchecked, with no automatic system or room assignment. Confirm the
+duct connection and room, then use Include; exhaust symbols stay unchecked.
+Nearby room names and sheet unit tags are evidence for review only. The parser
+does not automatically trace ducts or extract every grille type.
 More than 500 detected outlets fails explicitly instead of silently truncating.

@@ -143,7 +143,8 @@ class SchedulePdfTests(unittest.TestCase):
         written = {
             'D6': payload['type'],
             'E6': payload['size'],
-            'A6': payload['system']+' / '+payload['location'],
+            'A5': payload['system'],
+            'A6': payload['location'],
         }
         for address, original in written.items():
             cell = sheet[address]
@@ -191,7 +192,7 @@ class SchedulePdfTests(unittest.TestCase):
             self.assertEqual(by['EF-1']['proposed']['motor_hp'], 0.25)
             outlets = scanned['diffusers']
             self.assertEqual([item['design_cfm'] for item in outlets], [25, 25, 100])
-            self.assertTrue(all(item['type'] == 'A' and item['system'] == 'DOAS-1' for item in outlets))
+            self.assertTrue(all(item['type'] == 'A' and item['system'] == '' and item['include'] is False for item in outlets))
             self.assertEqual([item['size'] for item in outlets], ['6"Ø', '6"Ø', '8"Ø'])
             self.assertNotIn(900, [item['design_cfm'] for item in outlets])
             self.assertIn('supply_outlets', scanned['signals'])
@@ -208,6 +209,8 @@ class SchedulePdfTests(unittest.TestCase):
             for row in scanned['records']:
                 if row.get('template') and row['template'] not in chosen:
                     chosen.append(row['template'])
+            for outlet in outlets:
+                outlet.update(include=True, system='DOAS-1', location='Reviewed room')
             reviewed = []
             for row in scanned['records']:
                 row = apply_proposed(row)
@@ -264,7 +267,7 @@ class SchedulePdfTests(unittest.TestCase):
             self.assertEqual(diffusers['F3'].value, 'INITIAL')
             exported = [(diffusers.cell(row, 4).value, diffusers.cell(row, 5).value, diffusers.cell(row, 7).value)
                         for row in range(6, 12) if diffusers.cell(row, 4).value]
-            self.assertEqual(exported, [('A', '6"Ø', 25), ('A', '6"Ø', 25), ('A', '8"Ø', 100)])
+            self.assertEqual(exported, [('A', 6, 25), ('A', 6, 25), ('A', 8, 100)])
             self.assertIsNone(diffusers['F6'].value)
             self.assertIsNone(diffusers['H6'].value)
             self.assertNotEqual(diffusers['G6'].value, 900)
@@ -321,12 +324,12 @@ class SchedulePdfTests(unittest.TestCase):
             reviewed.append(row)
         self.assertEqual(sum(row['status'] == 'VERIFIED' for row in reviewed), 32)
         outlets = scanned['diffusers']
-        doas_size_6 = [item for item in outlets if item['system'] == 'DOAS-1' and item['neck_in'] == 6]
+        doas_size_6 = [item for item in outlets if item['reference'] == 'page 4' and item['neck_in'] == 6]
         # These callouts are the plan text. A finished report's count of 21 is a
         # comparison after the build, not a number this test is allowed to require.
         self.assertEqual(Counter(item['design_cfm'] for item in doas_size_6),
                          Counter({25: 13, 100: 2, 50: 2, 150: 1, 60: 1, 65: 1}))
-        self.assertTrue(any(item['design_cfm'] == 150 and 'BREAK ROOM 111' in item['location'] for item in doas_size_6))
+        self.assertTrue(any(item['design_cfm'] == 150 and 'BREAK ROOM 111' in item['evidence'] for item in doas_size_6))
         self.assertTrue(all(item['design_cfm'] != 1000 for item in outlets))
         unlabeled = [item for item in outlets if item['reference'] == 'page 2']
         self.assertEqual(len(unlabeled), 2)
@@ -373,18 +376,14 @@ class SchedulePdfTests(unittest.TestCase):
                     exported.append((supply.cell(row, 4).value, supply.cell(row, 5).value,
                                      supply.cell(row, 1).value, supply.cell(row, 7).value,
                                      supply.cell(row, 6).value, supply.cell(row, 8).value))
-        self.assertEqual(len(exported), len(outlets))
-        self.assertTrue(all(item[0] == 'A' and item[4] is None and item[5] is None for item in exported))
-        exported_size_6 = [item[3] for item in exported if str(item[2]).startswith('DOAS-1 /') and str(item[1]).startswith('6')]
-        self.assertEqual(Counter(exported_size_6), Counter({25: 13, 100: 2, 50: 2, 150: 1, 60: 1, 65: 1}))
-        exported_size_8 = [item[3] for item in exported if str(item[2]).startswith('DOAS-1 /') and str(item[1]).startswith('8')]
-        self.assertEqual(Counter(exported_size_8), Counter({225: 2, 100: 1}))
-        self.assertNotIn(1000, [item[3] for item in exported])
+        # Unreviewed drawing candidates never populate the supply form.
+        self.assertTrue(all(item['include'] is False and item['system']=='' for item in outlets))
+        self.assertEqual(exported, [])
         self.assertIsNone(book['EXHAUST FAN']['U7'].value)
         vrf = find_tag(book['FAN COIL UNITS DX'], 'VRF-20C')
         self.assertIsNotNone(vrf)
         self.assertEqual(book['FAN COIL UNITS DX'].cell(vrf[0] + 8, vrf[1]).value, 550)
-        out = Path('/opt/cursor/artifacts/CocaCola_McComb_PreField_source.xlsx')
+        out = Path(os.environ.get('ABP_TEST_OUTPUT', 'test-output')) / 'McComb_unreviewed_source.xlsx'
         out.parent.mkdir(parents=True, exist_ok=True)
         out.write_bytes(raw)
 

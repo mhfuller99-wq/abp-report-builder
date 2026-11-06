@@ -499,7 +499,9 @@ def parse_supply_outlets(words, page_number, name):
     area = _sheet_area(words)
     rooms = _room_labels(words)
     tags = _page_supply_tags(words)
-    system = next(iter(tags)) if len(tags) == 1 else ''
+    # A type-A grille can serve exhaust as well as supply. A unit elsewhere on
+    # the page does not establish a duct connection; require explicit review.
+    system = ''
     outlets = []
     for mark in marks:
         if mark[4].upper() != 'A:':
@@ -559,16 +561,19 @@ def parse_supply_outlets(words, page_number, name):
         elif unlabeled:
             evidence += f'; nearby integer {unlabeled} is not labeled CFM'
         outlets.append({
+            'include': False,
             'type': 'A',
             'size': size[4],
             'neck_in': float(neck.group(1)),
             'shape': 'round' if neck.group(2) else 'rectangular',
             'system': system,
-            'location': location,
+            'location': '',
             'design_cfm': design,
             'source': name,
             'reference': f'page {page_number}',
-            'evidence': evidence,
+            'evidence': evidence + '; confirm supply duct and room before including'
+                        + (f'; nearby room candidate: {location}' if location else '')
+                        + (f'; sheet units: {", ".join(sorted(tags))}' if tags else ''),
             '_y': mark[1],
             '_x': mark[0],
         })

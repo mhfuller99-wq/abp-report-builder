@@ -506,6 +506,7 @@ def validate_payload(payload):
     if not isinstance(outlets,list) or len(outlets)>500:raise ValueError('Invalid supply outlets')
     for item in outlets:
         if not isinstance(item,dict):raise ValueError('Invalid supply outlet')
+        if 'include' in item and not isinstance(item['include'],bool):raise ValueError('Invalid outlet inclusion choice')
         cfm=item.get('design_cfm')
         if cfm not in (None,''):
             try:n=float(cfm)
@@ -560,27 +561,34 @@ def populate_equipment(wb,records,selected):
     return count
 
 def populate_diffusers(wb,diffusers):
-    """Fill only input cells in the original ABP form; repeat intact 28-outlet pages."""
+    """Fill the approved 21-outlet form without touching its original totals."""
     if not diffusers:return 0
     name='Supply Diffusers.xlsx'
     first=next((sheet for sheet in wb.worksheets if getattr(sheet,'_template_file',None)==name),None)
     if first is None:return 0
     # Keep each system together without guessing an association for unlabeled outlets.
     groups={}
-    for item in diffusers:groups.setdefault(str(item.get('system') or ''),[]).append(item)
+    for item in diffusers:
+        if item.get('include') is False:continue
+        groups.setdefault(str(item.get('system') or ''),[]).append(item)
     count=0;page=0
     for system,items in groups.items():
-        for start in range(0,len(items),28):
+        for start in range(0,len(items),21):
             if page==0:ws=first
             else:
                 before=set(wb.sheetnames);add_template(wb,LOOKUP[name])
                 ws=wb[next(title for title in wb.sheetnames if title not in before)]
                 reset_measurements(ws)
             page+=1
-            for row,item in enumerate(items[start:start+28],6):
+            ws['A5']=excel_safe(system)
+            for row,item in enumerate(items[start:start+21],6):
                 count+=1
-                location=' / '.join(part for part in (system,str(item.get('location') or '')) if part)
-                for column,value in [(1,location),(3,count),(4,item.get('type')),(5,item.get('size')),(7,item.get('design_cfm'))]:
+                location=str(item.get('location') or '')
+                size=item.get('size')
+                # Round necks use the original form's numeric inch convention.
+                match=re.fullmatch(r'(\d+(?:\.\d+)?)\s*["\u2033]?\s*[\u00d8\u00f8]?',str(size or ''))
+                if match:size=float(match.group(1))
+                for column,value in [(1,location),(3,start+row-5),(4,item.get('type')),(5,size),(7,item.get('design_cfm'))]:
                     if value in (None,''):continue
                     cell=ws.cell(row,column)
                     if cell.data_type=='f':raise ValueError('Diffuser input overlaps a template formula')
@@ -702,11 +710,11 @@ window.addEventListener('DOMContentLoaded',()=>{
 let sourceFiles=[],tags=[],records=[],diffusers=[];const $=id=>document.getElementById(id);
 function renderOutlets(){
  const box=$('outlets');if(!box)return;box.replaceChildren();if(!diffusers.length)return;
- const title=document.createElement('h3');title.textContent='Review supply outlets';box.append(title);
- const note=document.createElement('p');note.textContent=diffusers.length+' outlets. Check each callout against the PDF. Edit the system, room, type, size, or design CFM below. Blank values need review; unit totals are never used as outlet CFM. The original ABP form keeps initial and actual readings blank.';box.append(note);
+ const title=document.createElement('h3');title.textContent='Review outlet candidates';box.append(title);
+ const note=document.createElement('p');note.textContent=diffusers.length+' candidates. Confirm the supply duct connection and room in the drawing, then check Include. Grille letters alone do not distinguish supply from exhaust. Unchecked candidates stay out of the supply sheet. Edit the system, room, size and design CFM as needed. Initial and actual readings stay blank.';box.append(note);
  const wrap=document.createElement('div');wrap.className='review-scroll';const table=document.createElement('table');table.className='outlet-table';
- const header=document.createElement('tr');for(const label of ['Type','Size','System','Area served','Design CFM','Source']){const th=document.createElement('th');th.textContent=label;header.append(th)}table.append(header);
- diffusers.forEach((outlet,index)=>{const row=document.createElement('tr');for(const field of ['type','size','system','location','design_cfm']){const td=document.createElement('td'),input=document.createElement('input');input.type=field==='design_cfm'?'number':'text';input.setAttribute('aria-label','Outlet '+(index+1)+' '+field.replaceAll('_',' '));if(field==='design_cfm'){input.min='0';input.max='1000000';input.step='any'}else input.maxLength=120;input.value=outlet[field]??'';input.oninput=()=>{outlet[field]=field==='design_cfm'?(input.value===''?null:Number(input.value)):input.value};td.append(input);row.append(td)}const source=document.createElement('td');source.textContent=[outlet.source,outlet.reference,outlet.evidence].filter(Boolean).join(' · ');row.append(source);table.append(row)});wrap.append(table);box.append(wrap);
+ const header=document.createElement('tr');for(const label of ['Include','Type','Size','System','Area served','Design CFM','Source']){const th=document.createElement('th');th.textContent=label;header.append(th)}table.append(header);
+ diffusers.forEach((outlet,index)=>{const row=document.createElement('tr');const includeCell=document.createElement('td'),include=document.createElement('input');include.type='checkbox';include.checked=outlet.include!==false;include.setAttribute('aria-label','Include outlet '+(index+1)+' in supply sheet');include.onchange=()=>{outlet.include=include.checked};includeCell.append(include);row.append(includeCell);for(const field of ['type','size','system','location','design_cfm']){const td=document.createElement('td'),input=document.createElement('input');input.type=field==='design_cfm'?'number':'text';input.setAttribute('aria-label','Outlet '+(index+1)+' '+field.replaceAll('_',' '));if(field==='design_cfm'){input.min='0';input.max='1000000';input.step='any'}else input.maxLength=120;input.value=outlet[field]??'';input.oninput=()=>{outlet[field]=field==='design_cfm'?(input.value===''?null:Number(input.value)):input.value};td.append(input);row.append(td)}const source=document.createElement('td');source.textContent=[outlet.source,outlet.reference,outlet.evidence].filter(Boolean).join(' · ');row.append(source);table.append(row)});wrap.append(table);box.append(wrap);
 }
 async function init(){let t=await readApiJson(await fetch('/api/templates'));if(!Array.isArray(t)||t.some(x=>typeof x!=='string'))throw Error('Invalid worksheet list. Refresh the page to try again.');$('templates').innerHTML=t.map(x=>`<label class="template"><input type="checkbox" value="${x.replaceAll('&','&amp;').replaceAll('"','&quot;')}">${worksheetLabel(x).replaceAll('&','&amp;').replaceAll('<','&lt;')}</label>`).join('');for(const box of document.querySelectorAll('.template input'))box.checked=defaultPack.has(box.value);templatesReady=true;updateWorkspace()}init().catch(e=>{templateError=e.message;updateWorkspace()});$('selectall').onclick=()=>document.querySelectorAll('.template input').forEach(x=>x.checked=true);$('clear').onclick=()=>document.querySelectorAll('.template input').forEach(x=>x.checked=false);
 function sourcesChanged(){tags=[];records=[];diffusers=[];renderReview();renderOutlets();$('scanstatus').textContent='Source files changed. Scan the complete file list before building.';$('status').textContent='';updateWorkspace();renderSourceFiles()}
@@ -716,7 +724,7 @@ $('files').onchange=()=>{addSources(Array.from($('files').files));$('files').val
 for(const event of ['dragenter','dragover'])$('source-drop-zone').addEventListener(event,e=>{e.preventDefault();e.dataTransfer.dropEffect='copy'});
 $('source-drop-zone').addEventListener('drop',e=>{e.preventDefault();addSources(Array.from(e.dataTransfer.files))});
 renderSourceFiles();
-$('scan').onclick=async()=>{if(!templatesReady){$('scanstatus').textContent=templateError||'Wait for report worksheets to load.';return}let files=sourceFiles;if(!files.length){$('scanstatus').textContent='Choose files first';return}let form=new FormData();for(let f of files)form.append('files',f);$('scan').disabled=true;$('files').disabled=true;$('buildmethod').disabled=true;$('generate').disabled=true;$('loadproject').disabled=true;$('scanstatus').textContent='Reading files...';try{let r=await fetch('/api/scan',{method:'POST',body:form});let data=await readApiJson(r);tags=data.tags||[];records=(data.records||[]).map(row=>{const copy={...row};applyProposed(copy);return copy});diffusers=Array.isArray(data.diffusers)?data.diffusers:[];$('scanstatus').textContent=`Found ${tags.length} equipment entries and ${diffusers.length} supply outlets. Review the suggested design values and verify each unit before you build the report.`+(data.warnings.length?' Warnings: '+data.warnings.join(' | '):'');$('tags').innerHTML='';renderReview();renderOutlets();let recommendation=await readApiJson(await fetch('/api/suggest',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({tags,signals:data.signals||[],sparse:data.sparse===true})}));if(!Array.isArray(recommendation.recommended))throw Error('Template recommendations unavailable');let chosen=new Set(recommendation.recommended.map(x=>x.name));for(const row of records)if(row.template)chosen.add(row.template);document.querySelectorAll('.template input').forEach(x=>x.checked=chosen.has(x.value));let safe=x=>String(x||'').replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('>','&gt;');$('template-recommendations').innerHTML='<strong>Recommended '+recommendation.recommended.length+' ABP templates</strong><p>Selected automatically based on the uploaded documents. Review and change any checked boxes before building your report.</p>'+recommendation.recommended.map(x=>'<div class="recommend-item"><span>'+safe(worksheetLabel(x.name))+(x.review?' <em>Review type</em>':'')+'</span><small>'+safe(x.reason)+'</small></div>').join('')+'<p class="muted">'+safe(recommendation.review_note)+'</p>'}catch(e){$('scanstatus').textContent=e.message}finally{$('scan').disabled=false;$('files').disabled=false;$('buildmethod').disabled=false;$('generate').disabled=false;$('loadproject').disabled=false;updateWorkspace()}};
+$('scan').onclick=async()=>{if(!templatesReady){$('scanstatus').textContent=templateError||'Wait for report worksheets to load.';return}let files=sourceFiles;if(!files.length){$('scanstatus').textContent='Choose files first';return}let form=new FormData();for(let f of files)form.append('files',f);$('scan').disabled=true;$('files').disabled=true;$('buildmethod').disabled=true;$('generate').disabled=true;$('loadproject').disabled=true;$('scanstatus').textContent='Reading files...';try{let r=await fetch('/api/scan',{method:'POST',body:form});let data=await readApiJson(r);tags=data.tags||[];records=(data.records||[]).map(row=>{const copy={...row};applyProposed(copy);return copy});diffusers=Array.isArray(data.diffusers)?data.diffusers:[];$('scanstatus').textContent=`Found ${tags.length} equipment entries and ${diffusers.length} outlet candidates. Review the suggested design values and verify each unit before you build the report.`+(data.warnings.length?' Warnings: '+data.warnings.join(' | '):'');$('tags').innerHTML='';renderReview();renderOutlets();let recommendation=await readApiJson(await fetch('/api/suggest',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({tags,signals:data.signals||[],sparse:data.sparse===true})}));if(!Array.isArray(recommendation.recommended))throw Error('Template recommendations unavailable');let chosen=new Set(recommendation.recommended.map(x=>x.name));for(const row of records)if(row.template)chosen.add(row.template);document.querySelectorAll('.template input').forEach(x=>x.checked=chosen.has(x.value));let safe=x=>String(x||'').replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('>','&gt;');$('template-recommendations').innerHTML='<strong>Recommended '+recommendation.recommended.length+' ABP templates</strong><p>Selected automatically based on the uploaded documents. Review and change any checked boxes before building your report.</p>'+recommendation.recommended.map(x=>'<div class="recommend-item"><span>'+safe(worksheetLabel(x.name))+(x.review?' <em>Review type</em>':'')+'</span><small>'+safe(x.reason)+'</small></div>').join('')+'<p class="muted">'+safe(recommendation.review_note)+'</p>'}catch(e){$('scanstatus').textContent=e.message}finally{$('scan').disabled=false;$('files').disabled=false;$('buildmethod').disabled=false;$('generate').disabled=false;$('loadproject').disabled=false;updateWorkspace()}};
 
 const unitForms=__UNIT_FORMS_JSON__;
 function defaultUnitForm(tag, record){const heat=record&&(record.heating_input_btu??record.proposed?.heating_input_btu);if(/^(DOAS)[- ]?[0-9]/.test(tag))return (heat!==undefined&&heat!==null&&heat!=='')?'Fan Coil Units DX GAS.xlsx':'Fan Coil Units DX.xlsx';if(/^(AHU|RTU|OAU|MAU|AC)[- ]?[0-9]/.test(tag))return 'Air Moving Equipment.xlsx';if(/^(EF|KEF|TEF|CEF|SEF)[- ]?[0-9]/.test(tag))return 'Exhaust Fans _Std._.xlsx';if(/^(VRF|SSAU)[- ]?[0-9]/.test(tag))return 'Fan Coil Units DX.xlsx';if(/^KH[- ]?[0-9]/.test(tag))return 'Kitchen Hood.xlsx';return ''}
