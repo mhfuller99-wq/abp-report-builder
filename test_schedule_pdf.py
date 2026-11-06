@@ -141,11 +141,9 @@ class SchedulePdfTests(unittest.TestCase):
         })
         sheet = load_workbook(io.BytesIO(raw))['SUPPLY DIFFUSERS']
         written = {
-            'B6': payload['type'],
-            'C6': payload['size'],
-            'D6': payload['system'],
-            'E6': payload['location'],
-            'I6': ' · '.join((payload['source'], payload['reference'], payload['evidence'])),
+            'D6': payload['type'],
+            'E6': payload['size'],
+            'A6': payload['system']+' / '+payload['location'],
         }
         for address, original in written.items():
             cell = sheet[address]
@@ -262,10 +260,10 @@ class SchedulePdfTests(unittest.TestCase):
             self.assertIsNone(coils.cell(spot[0] + 2, spot[1]).value)
             self.assertLess(book.sheetnames.index('SUPPLY DIFFUSERS'), book.sheetnames.index('DUCT TRAVERSE RECT.'))
             diffusers = book['SUPPLY DIFFUSERS']
-            self.assertEqual(diffusers['A1'].value, 'SUPPLY DIFFUSERS')
-            self.assertEqual(diffusers['F4'].value, 'INITIAL')
-            exported = [(diffusers.cell(row, 2).value, diffusers.cell(row, 3).value, diffusers.cell(row, 7).value)
-                        for row in range(6, 12) if diffusers.cell(row, 2).value]
+            self.assertEqual(diffusers['A2'].value, 'SUPPLY DIFFUSERS')
+            self.assertEqual(diffusers['F3'].value, 'INITIAL')
+            exported = [(diffusers.cell(row, 4).value, diffusers.cell(row, 5).value, diffusers.cell(row, 7).value)
+                        for row in range(6, 12) if diffusers.cell(row, 4).value]
             self.assertEqual(exported, [('A', '6"Ø', 25), ('A', '6"Ø', 25), ('A', '8"Ø', 100)])
             self.assertIsNone(diffusers['F6'].value)
             self.assertIsNone(diffusers['H6'].value)
@@ -369,16 +367,17 @@ class SchedulePdfTests(unittest.TestCase):
         self.assertLess(book.sheetnames.index('SUPPLY DIFFUSERS'), book.sheetnames.index('DUCT TRAVERSE RECT.'))
         supply = book['SUPPLY DIFFUSERS']
         exported = []
-        for row in range(6, 40):
-            if supply.cell(row, 2).value:
-                exported.append((supply.cell(row, 2).value, supply.cell(row, 3).value,
-                                 supply.cell(row, 4).value, supply.cell(row, 7).value,
-                                 supply.cell(row, 6).value, supply.cell(row, 8).value))
+        for off in range(0,supply.max_row,42):
+            for row in range(6+off,34+off):
+                if supply.cell(row, 3).value:
+                    exported.append((supply.cell(row, 4).value, supply.cell(row, 5).value,
+                                     supply.cell(row, 1).value, supply.cell(row, 7).value,
+                                     supply.cell(row, 6).value, supply.cell(row, 8).value))
         self.assertEqual(len(exported), len(outlets))
         self.assertTrue(all(item[0] == 'A' and item[4] is None and item[5] is None for item in exported))
-        exported_size_6 = [item[3] for item in exported if item[2] == 'DOAS-1' and str(item[1]).startswith('6')]
+        exported_size_6 = [item[3] for item in exported if str(item[2]).startswith('DOAS-1 /') and str(item[1]).startswith('6')]
         self.assertEqual(Counter(exported_size_6), Counter({25: 13, 100: 2, 50: 2, 150: 1, 60: 1, 65: 1}))
-        exported_size_8 = [item[3] for item in exported if item[2] == 'DOAS-1' and str(item[1]).startswith('8')]
+        exported_size_8 = [item[3] for item in exported if str(item[2]).startswith('DOAS-1 /') and str(item[1]).startswith('8')]
         self.assertEqual(Counter(exported_size_8), Counter({225: 2, 100: 1}))
         self.assertNotIn(1000, [item[3] for item in exported])
         self.assertIsNone(book['EXHAUST FAN']['U7'].value)

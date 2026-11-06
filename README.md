@@ -119,3 +119,18 @@ page breaks and repeated artwork. Original master files are never edited.
 Repeated formulas use Excel-style relative reference translation only; their
 operators, constants, absolute references and calculation logic are retained.
 Approved-reference reports retain their existing sheet arrangement.
+
+Source uploads accumulate across file-picker selections and drops. The visible
+list supports individual removal and a combined 200 MB limit. Exact duplicates
+(name, size, modified time) are not added twice.
+
+The supply diffuser master is the original ABP 2022 form, identical to the
+Company Knowledge / Report Templates copy (SHA-256
+`4d110f77202e9d184ed7c2e1de44adc91de717542aaa2d82489fce701536d7ff`).
+Only Area Served, Outlet No., Type, Size and Design CFM inputs are populated.
+Initial/Actual inputs remain blank and percentage formulas are preserved.
+Outlets are grouped by reviewed system, 28 per original form; further forms
+continue on the same tab. No source text replaces calculation columns.
+PDF outlet fields can be corrected in the review table before building. Blank
+airflow or system fields remain blank rather than borrowing a unit total.
+More than 500 detected outlets fails explicitly instead of silently truncating.

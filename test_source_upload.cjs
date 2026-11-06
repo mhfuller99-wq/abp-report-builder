@@ -1,0 +1,12 @@
+const fs=require('fs'),vm=require('vm'),assert=require('assert');
+const ctx=vm.createContext({});vm.runInContext(fs.readFileSync(__dirname+'/abp_ui.js','utf8'),ctx);
+const file=(name,size=10,lastModified=1)=>({name,size,lastModified});
+let files=ctx.mergeSourceFiles([], [file('drawings.pdf')]);
+files=ctx.mergeSourceFiles(files,[file('submittal.pdf'),file('schedule.xlsx')]);
+assert.equal(files.length,3);
+assert.equal(ctx.mergeSourceFiles(files,[file('drawings.pdf')]).length,3);
+assert.equal(ctx.mergeSourceFiles(files,[file('drawings.pdf',11)]).length,4);
+assert.throws(()=>ctx.mergeSourceFiles(files,[file('bad.exe')]));
+assert.throws(()=>ctx.mergeSourceFiles(files,[file('large.pdf',200000000)]));
+assert.equal(files.length,3);
+console.log('Cumulative selection, multi-file batches, duplicate handling, type and size limits passed.');
