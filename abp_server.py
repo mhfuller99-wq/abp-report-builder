@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """ABP local report builder. Uses original workbook templates; no cloud upload."""
-import io,json,re,sys,zipfile,html,datetime,hashlib,hmac,time,math,csv,os,secrets,base64,ipaddress,socket,threading
+import io,json,re,sys,zipfile,html,datetime,hashlib,hmac,time,math,csv,os,secrets,base64,ipaddress,socket,threading,gc
+from abp_upload import multipart
 from pathlib import Path
 from http.server import ThreadingHTTPServer,BaseHTTPRequestHandler
 from socketserver import TCPServer
@@ -22,6 +23,7 @@ LOOKUP={p.name:p for p in FILES}
 TAGS=re.compile(r'\b(?:(?:BCU|BC|CH|CHP|CHWP|HWP|CWP|PCP|SCP|PHP|SHP|P|B|F|AH|ACU|PAC|KSF)(?:\s*-\s*|\s+)|(?:AHU|RTU|OAU|DOAS|CRU|MAU|ERV|HRV|FCU|FC|VAV|FPP|IU|IDU|MSFC|MSE|MS|PTAC|CRAC|IHP|HPBC|HP|AC|ACC|DSS|DCU|KEF|TEF|CEF|SEF|RLF|KH|EF|SF|RF|GF|PU|EUH|EWH|CUH|UH|FFU|LF|VRF|SSAU|SSCU|GUH|HVLS|PF|FS|EH)(?:\s*-\s*|\s+)?)\d+[A-Z]?(?:[-.][A-Z0-9]+)*\b',re.I)
 MAX_RECORDS=500
 MAX_UPLOAD=200_000_000
+WORK_LOCK=threading.Lock()
 # Title-block scraps and image-only drawings fall below this. A real schedule does not.
 SPARSE_TEXT_LIMIT=500
 OFFICE_FRONT=('Project Information.xlsx','Notes.xlsx')
@@ -59,8 +61,11 @@ def excel_safe(value):
 def read_sources(blobs):
     """Collect every occurrence and provenance. Do not invent values from surrounding text."""
     warnings=[];records={};sources=[];total_chars=0;preview=[];signals=set();diffusers=[]
-    if sum(len(data) for _,data in blobs)>MAX_UPLOAD:raise ValueError('Total source size exceeds 200 MB')
-    for name,data in blobs:
+    total_size=0
+    for name,source in blobs:
+        data=source.read(MAX_UPLOAD+1) if hasattr(source,'read') else source
+        total_size+=len(data)
+        if total_size>MAX_UPLOAD:raise ValueError('Total source size exceeds 200 MB')
         name=Path(name).name[:160];ext=Path(name).suffix.lower();chunks=[];structured=[]
         try:
             if ext=='.pdf':
@@ -140,6 +145,8 @@ def read_sources(blobs):
                 if len(records[tag]['candidates'])<30:records[tag]['candidates'].append({**candidate,'source':name})
             if len(records)>MAX_RECORDS:warnings.append('More than 500 unique tags found; only first 500 will be shown')
         except Exception as e:warnings.append(name+': could not parse ('+str(e)[:120]+')')
+        finally:
+            del data
     for record in records.values():
         annotate(record)
         form=inferred_form(record['tag'], record)
@@ -998,23 +1005,30 @@ class Handler(BaseHTTPRequestHandler):
             except (ValueError,IndexError):
                 self.login_page(error='session');return
         if self.gate():return
+        # Allow the previous response's brief cleanup to finish before reporting
+        # busy; do not read or retain a waiting request body.
+        if not WORK_LOCK.acquire(timeout=2):
+            self.close_connection=True
+            self.respond(b'{"error":"Another document job is running. Please wait for it to finish and try again."}',code=503,extra_headers=[('Retry-After','10'),('Connection','close')]);return
+        started=time.monotonic()
+        print(f'Document request started: {path}',flush=True)
         try:
             n=int(self.headers.get('Content-Length','0'))
             if n<0 or n>MAX_UPLOAD:raise ValueError('Upload limit is 200 MB')
-            data=self.rfile.read(n)
             if path=='/api/suggest':
                 if n>2_000_000:raise ValueError('Template suggestion request too large')
-                request=json.loads(data)
+                request=json.loads(self.rfile.read(n))
                 self.respond(json.dumps(suggested_templates(request.get('tags',[]),request.get('signals',[]),sparse=request.get('sparse') is True)).encode());return
             if path=='/api/build':
                 if n>8_000_000:raise ValueError('Build request exceeds 8 MB')
-                payload=json.loads(data);out=build(payload);self.respond(out,'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',filename='ABP_PreField_TAB.xlsx');return
+                payload=json.loads(self.rfile.read(n));out=build(payload);self.respond(out,'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',filename='ABP_PreField_TAB.xlsx');return
             if path in ('/api/reference/inspect','/api/reference/build'):
-                from email.parser import BytesParser
-                from email.policy import default
-                ct=self.headers.get('Content-Type','')
-                msg=BytesParser(policy=default).parsebytes(('Content-Type: '+ct+'\r\nMIME-Version: 1.0\r\n\r\n').encode()+data)
-                fields={p.get_param('name',header='content-disposition'):p.get_payload(decode=True) or b'' for p in msg.iter_parts()}
+                if n>8_100_000:raise ValueError('Reference workbook must be smaller than 8 MB')
+                with multipart(self.rfile,n,self.headers.get('Content-Type',''),8_000_000) as parts:
+                    fields={}
+                    for name,_,file in parts:
+                        if name in fields:raise ValueError('Duplicate reference field')
+                        fields[name]=file.read()
                 reference=fields.get('reference',b'')
                 if path.endswith('/inspect'):
                     self.respond(json.dumps(inspect_reference(reference)).encode());return
@@ -1022,14 +1036,21 @@ class Handler(BaseHTTPRequestHandler):
                 out=build_reference(reference,fields.get('project',b'').decode(),fields.get('location',b'').decode())
                 self.respond(out,'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',filename='ABP_PreField_TAB.xlsx');return
             if path=='/api/scan':
-                from email.parser import BytesParser
-                from email.policy import default
-                ct=self.headers.get('Content-Type','')
-                msg=BytesParser(policy=default).parsebytes(('Content-Type: '+ct+'\r\nMIME-Version: 1.0\r\n\r\n').encode()+data)
-                blobs=[(p.get_filename() or 'unnamed',p.get_payload(decode=True) or b'') for p in msg.iter_parts() if p.get_filename()]
-                self.respond(json.dumps(read_sources(blobs)).encode());return
+                with multipart(self.rfile,n,self.headers.get('Content-Type',''),MAX_UPLOAD) as parts:
+                    result=read_sources((filename,file) for _,filename,file in parts if filename)
+                self.respond(json.dumps(result).encode());return
             self.respond(b'Not found','text/plain',404)
-        except Exception as e:self.respond(json.dumps({'error':str(e)}).encode(),code=400)
+        except Exception as e:
+            self.close_connection=True
+            self.respond(json.dumps({'error':str(e)}).encode(),code=400)
+        finally:
+            # Workbook objects contain cycles; collect them before admitting the
+            # next job. GET/health requests stay available during document work.
+            try:
+                gc.collect()
+                if 'pymupdf' in sys.modules:sys.modules['pymupdf'].TOOLS.store_shrink(100)
+            finally:WORK_LOCK.release()
+            print(f'Document request finished: {path}; seconds={time.monotonic()-started:.1f}',flush=True)
 class ReportHTTPServer(ThreadingHTTPServer):
     def server_bind(self):
         # HTTPServer's reverse DNS lookup can block before socket.listen().

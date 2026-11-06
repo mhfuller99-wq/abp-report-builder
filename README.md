@@ -140,3 +140,12 @@ duct connection and room, then use Include; exhaust symbols stay unchecked.
 Nearby room names and sheet unit tags are evidence for review only. The parser
 does not automatically trace ducts or extract every grille type.
 More than 500 detected outlets fails explicitly instead of silently truncating.
+
+Document requests run one at a time per service process. A simultaneous request
+gets a retry message before its body is read; health checks remain available.
+Multipart files stream to temporary storage in 64 KiB chunks, are analyzed one
+at a time, and are removed after the request, including failures. The combined
+200 MB upload limit is unchanged. Reference uploads are limited before reading,
+and worksheet dimensions are checked before loading cell objects. Workbook
+cycles and the PDF cache are cleared between jobs. Request start/finish logs
+identify the endpoint and elapsed time without recording uploaded contents.

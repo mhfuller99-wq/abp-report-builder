@@ -2,6 +2,8 @@
 import io
 import re
 import zipfile
+import xml.etree.ElementTree as ET
+from openpyxl.utils.cell import range_boundaries
 from openpyxl import load_workbook
 from openpyxl.cell.cell import MergedCell
 from openpyxl.workbook.properties import CalcProperties
@@ -22,6 +24,24 @@ def open_reference(data):
             raise ValueError('Reference workbook expands beyond 50 MB')
         if any('vbaProject' in x.filename for x in archive.infolist()):
             raise ValueError('Use a macro-free .xlsx reference')
+        # Check dimensions before openpyxl expands cells and merged ranges.
+        cells=0
+        for name in archive.namelist():
+            if not re.fullmatch(r'xl/worksheets/sheet\d+\.xml',name):continue
+            with archive.open(name) as sheet:
+                explicit=0; area=0
+                for _,element in ET.iterparse(sheet,events=('end',)):
+                    local=element.tag.rsplit('}',1)[-1]
+                    if local=='dimension' and element.get('ref'):
+                        _,_,col,row=range_boundaries(element.get('ref'))
+                        area=col*row
+                    if local=='mergeCell' and element.get('ref'):
+                        _,_,col,row=range_boundaries(element.get('ref'))
+                        area=max(area,col*row)
+                    if local=='c':explicit+=1
+                    if cells+max(area,explicit)>MAX_CELLS:raise ValueError('Reference workbook has too many cells')
+                    element.clear()
+                cells+=max(area,explicit)
     wb = load_workbook(io.BytesIO(data), keep_links=False)
     if sum(s.max_row * s.max_column for s in wb) > MAX_CELLS:
         raise ValueError('Reference workbook has too many cells')
