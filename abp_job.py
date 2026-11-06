@@ -4,8 +4,9 @@ import re
 NUMERIC_FIELDS = ('design_cfm','osa_cfm','osa_min_cfm','esp','total_sp','motor_hp','motor_volts','motor_fla','design_gpm',
                   'cooling_edb','cooling_ewb','cooling_ldb','cooling_lwb',
                   'heating_cfm','heating_edb','heating_ldb','heating_input_btu','heating_output_btu',
-                  'cooling_total_btu','cooling_sensible_btu','electric_heating_edb','electric_heating_ldb')
-TEXT_FIELDS = ('manufacturer','model','unit_type','service','equipment_location','area_served')
+                  'cooling_total_btu','cooling_sensible_btu','electric_heating_edb','electric_heating_ldb',
+                  'heater_volts','heater_phase','heater_amps','heater_stages','heater_kw','heating_ewt','heating_lwt','water_dp_ft')
+TEXT_FIELDS = ('manufacturer','model','unit_type','service','equipment_location','area_served','heating_type')
 COIL_FIELDS = {'design_cfm':8,'cooling_edb':14,'cooling_ewb':15,'cooling_ldb':16,
                'cooling_lwb':17,'heating_cfm':23,'heating_edb':25,'heating_ldb':26,
                'cooling_total_btu':19,'cooling_sensible_btu':20,'heating_output_btu':28}

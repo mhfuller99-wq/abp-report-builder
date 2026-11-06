@@ -23,6 +23,14 @@ def design_field(label, schedule=False):
         'esp':{'ESP','ESP IN W C','EXTERNAL S P','EXTERNAL S P IN W C','EXTERNAL STATIC PRESSURE'},
         'motor_hp':{'MOTOR HP','DESIGN HP','HORSEPOWER'},
         'design_gpm':{'DESIGN GPM','WATER FLOW GPM','FLOW RATE GPM'},
+        'heating_cfm':{'HEATING CFM','HEATING AIRFLOW CFM'},
+        'heater_volts':{'HEATER VOLTS','HEATER DESIGN VOLTS'},
+        'heater_phase':{'HEATER PHASE','HEATER PHASES'},
+        'heater_amps':{'HEATER AMPS','HEATER DESIGN AMPS'},
+        'heater_stages':{'HEATER STAGES'},
+        'heating_ewt':{'HEATING ENTERING WATER TEMP','HEATING ENTERING WATER TEMPERATURE'},
+        'heating_lwt':{'HEATING LEAVING WATER TEMP','HEATING LEAVING WATER TEMPERATURE'},
+        'water_dp_ft':{'WATER DP FT','WATER PRESSURE DROP FT'},
     }
     for field,names in aliases.items():
         if label in names:return field
@@ -61,7 +69,7 @@ def extract_design_rows(rows, sheet, tag_pattern):
     schedule='SCHEDULE' in normalized(sheet)
     for i,row in enumerate(rows):
         labels=[normalized(v) for v in row]
-        tag_cols=[c for c,l in enumerate(labels) if l in ('MARK','TAG','UNIT','UNIT TAG','EQUIPMENT TAG','UNIT DESIGNATION')]
+        tag_cols=[c for c,l in enumerate(labels) if l in ('MARK','TAG','UNIT','UNIT TAG','EQUIPMENT TAG','UNIT DESIGNATION','UNIT ID')]
         fields={c:design_field(v,schedule) for c,v in enumerate(row)}
         fields={c:f for c,f in fields.items() if f}
         if len(tag_cols)!=1 or not fields:continue
@@ -72,7 +80,7 @@ def extract_design_rows(rows, sheet, tag_pattern):
                 continue
             for c,field in fields.items():emit(tag,field,at(r,c),r,c,row[c])
     # ABP report panels: tags on a unit row, DESIGN/ACTUAL below it.
-    unit_rows=[i for i,row in enumerate(rows) if any(normalized(v) in ('UNIT DESIGNATION','COIL DESIGNATION') for v in row)]
+    unit_rows=[i for i,row in enumerate(rows) if any(normalized(v) in ('UNIT DESIGNATION','COIL DESIGNATION','UNIT ID') for v in row)]
     for idx,i in enumerate(unit_rows):
         end=unit_rows[idx+1] if idx+1<len(unit_rows) else min(i+45,len(rows))
         units=[(c,tag_at(v)) for c,v in enumerate(rows[i]) if tag_at(v)]
@@ -83,6 +91,11 @@ def extract_design_rows(rows, sheet, tag_pattern):
                     labels=[v for v in rows[r][:c] if v is not None and str(v).strip()]
                     if not labels:continue
                     field=design_field(labels[0],True)
+                    if normalized(sheet).startswith('UNIT HEATER'):
+                        field={'CFM':'heating_cfm','ENTERING AIR TEMP D B':'heating_edb','LEAVING AIR TEMP D B':'heating_ldb',
+                               'VOLTS':'heater_volts','PHASE':'heater_phase','AMPS':'heater_amps','STAGES':'heater_stages',
+                               'ENTERING WATER TEMP':'heating_ewt','LEAVING WATER TEMP':'heating_lwt',
+                               'WATER P FT':'water_dp_ft'}.get(normalized(labels[0]),field)
                     if field:emit(tag,field,at(r,c),r,c,labels[0])
             elif len(units)==1:
                 # Hood reports label their design cell directly instead of a column.
@@ -97,6 +110,9 @@ def extract_design_rows(rows, sheet, tag_pattern):
 # Actual cell maps from the supplied master workbooks. This is separate from
 # recommendations: the reviewer explicitly chooses the unit's report form.
 UNIT_FORMS={
+    'Unit Heater ELE.xlsx':{'tag':'C3','area_served':'C4','heating_cfm':'C10','heating_edb':'C12','heating_ldb':'C13','heater_stages':'C16','heater_volts':'C18','heater_phase':'C19','heater_amps':'C20'},
+    'Unit Heater GAS.xlsx':{'tag':'C3','area_served':'C4','heating_cfm':'C10','heating_edb':'C12','heating_ldb':'C13'},
+    'Unit Heater WTR.xlsx':{'tag':'C3','area_served':'C4','heating_cfm':'C10','heating_edb':'C12','heating_ldb':'C13','heating_ewt':'C17','heating_lwt':'C18','design_gpm':'C20','water_dp_ft':'C21'},
     'Air Moving Equipment.xlsx':{'tag':'G3','design_cfm':'G17','osa_cfm':'G18','total_sp':'G20','esp':'G21','motor_hp':'T4','motor_volts':'T5','motor_fla':'T6','service':'G10','area_served':'G11','equipment_location':'G12','unit_type':'G9'},
     'Exhaust Fans _Std._.xlsx':{'tag':'H3','design_cfm':'H17','esp':'H21','motor_hp':'U4','motor_volts':'U5','motor_fla':'U6','service':'H10','area_served':'H11'},
     'Exhaust Fans _Sm._.xlsx':{'tag':'C3','design_cfm':'C10','esp':'C11'},
@@ -110,6 +126,22 @@ UNIT_FORMS={
 }
 TEXT_CELLS={'service','area_served','equipment_location','unit_type'}
 
+HEATER_FORMS={'ELECTRIC':'Unit Heater ELE.xlsx','GAS':'Unit Heater GAS.xlsx','HOT WATER':'Unit Heater WTR.xlsx'}
+
+
+def heater_form(tag, record=None):
+    """Only typed tags or explicit heating-type evidence determine heater form."""
+    record=record or {}
+    types=set()
+    if re.match(r'^EUH[- ]?\d',tag,re.I):types.add('ELECTRIC')
+    if re.match(r'^GUH[- ]?\d',tag,re.I):types.add('GAS')
+    sources=[record, record.get('text_proposed') or {}]
+    sources += [item.get('text') or {} for item in record.get('candidates') or []]
+    for source in sources:
+        value=normalized(source.get('heating_type'))
+        if value in HEATER_FORMS:types.add(value)
+    return HEATER_FORMS[next(iter(types))] if len(types)==1 else None
+
 
 def doas_fan_coil(record):
     """DX fan-coil form that matches the source heating type. Gas input selects gas heat."""
@@ -119,6 +151,7 @@ def doas_fan_coil(record):
     for item in record.get('candidates') or []:
         fields.update(item.get('values') or {})
         if item.get('evidence'):notes.append(str(item['evidence']))
+        if (item.get('text') or {}).get('unit_type'):notes.append(item['text']['unit_type'])
     for source in (record, record.get('proposed') or {}):
         for key,value in source.items():
             if value not in (None,''):fields.add(key)
@@ -132,15 +165,18 @@ def doas_fan_coil(record):
 
 def inferred_form(tag, record=None):
     tag=str(tag or '').upper()
+    if re.match(r'^(EUH|GUH|CUH|UH)[- ]?\d',tag):return heater_form(tag, record)
     if re.match(r'^DOAS[- ]?\d',tag):return doas_fan_coil(record)
     if re.match(r'^(AHU|PAHU|RTU|OAU|MAU|AC)[- ]?\d',tag):return 'Air Moving Equipment.xlsx'
     if re.match(r'^EF[- ]?\d',tag) and record:
         proposed=record.get('proposed') or {}
         service=(record.get('text_proposed') or {}).get('service')
-        if service in ('CEILING','INLINE') and 0 < proposed.get('design_cfm',0) <= 200 and 0 < proposed.get('motor_hp',0) <= .1:
+        # Explicit ceiling-fan service selects the small fan form; watts-only
+        # nameplates must not force a standard form or invent motor horsepower.
+        if service == 'CEILING' or (service == 'INLINE' and 0 < proposed.get('design_cfm',0) <= 200):
             return 'Exhaust Fans _Sm._.xlsx'
     if re.match(r'^(EF|KEF|TEF|CEF|SEF|RLF)[- ]?\d',tag):return 'Exhaust Fans _Std._.xlsx'
-    if re.match(r'^(VRF|SSAU|MSAH)[- ]?\d',tag):return 'Fan Coil Units DX.xlsx'
+    if re.match(r'^(VRF|SSAU|MSAH|IU|IDU|DSS)[- ]?\d',tag):return 'Fan Coil Units DX.xlsx'
     if re.match(r'^KH[- ]?\d',tag):return 'Kitchen Hood.xlsx'
     return None
 

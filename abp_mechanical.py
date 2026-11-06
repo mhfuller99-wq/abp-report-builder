@@ -6,6 +6,16 @@ duct connection, or replace an older drawing with an unapproved revision.
 import re
 
 
+def page_words(page):
+    """Use displayed page coordinates; PDF text coordinates ignore page rotation."""
+    words = page.get_text('words') or []
+    if not getattr(page, 'rotation', 0):
+        return words
+    import pymupdf
+    matrix = page.rotation_matrix
+    return [(*tuple(pymupdf.Rect(w[:4]) * matrix), *w[4:]) for w in words]
+
+
 def center(word):
     return (word[0] + word[2]) / 2
 
@@ -35,41 +45,135 @@ def phrases(words, pattern):
             and other[0] <= box[0] and other[2] >= box[2] for other in found)]
 
 
+TAG = r'(?:PAHU|MSAH|MSHP|EUH|GUH|CUH|UH|EF|SF|RF|FS|PF|VRF|IU|IDU|DSS|DOAS|SSAU|AHU|RTU|MAU|OAU|FCU|SSCU|HVLS|EH)-\d+(?:\.\d+)*[A-Z]?'
+
+
+def expand_marks(value):
+    """Expand explicit same-family lists and bounded integer ranges, atomically."""
+    value = value.upper().strip()
+    first = re.match(r'(' + TAG + r')', value)
+    if not first:
+        return []
+    prefix = first.group(1).split('-', 1)[0]
+    result = []
+    for part in re.split(r'\s*(?:,|&|\bAND\b)\s*', value):
+        if not part:
+            return []
+        if not part.startswith(prefix+'-'):
+            part = prefix+'-'+part
+        if re.fullmatch(TAG, part):
+            if part.split('-',1)[0] != prefix:
+                return []
+            result.append(part)
+            continue
+        match = re.fullmatch(r'(' + TAG + r')\s*(?:THRU|THROUGH|TO|–|-)\s*(' + TAG + r'|\d+)', part)
+        if not match:
+            return []
+        start, end = match.groups()
+        family, start = start.rsplit('-',1)
+        if '-' in end:
+            other, end = end.rsplit('-',1)
+            if other != family:
+                return []
+        if family != prefix or not start.isdigit() or not end.isdigit() or not 0 <= int(end)-int(start) < 100:
+            return []
+        result.extend(f'{prefix}-{n}' for n in range(int(start),int(end)+1))
+    return list(dict.fromkeys(result))
+
+
+def selection_airflows(words):
+    """Read explicitly unit-labeled vertical airflow columns in selection tables."""
+    result = {}
+    for label, field in [(r'Supply(?: Air)?', 'design_cfm'), (r'Outdoor Air|Outside Air', 'osa_cfm')]:
+        choices = []
+        for anchor in phrases(words, label):
+            units = [w for w in words if w[4].upper() == '(CFM)'
+                     and abs(center(w)-center(anchor)) < 12 and 0 < w[1]-anchor[1] < 20]
+            if len(units) != 1:
+                continue
+            unit = units[0]
+            numbers = [w for w in words if re.fullmatch(r'\d[\d,]*(?:\.\d+)?',w[4])
+                       and abs(center(w)-center(unit)) < 12 and 5 < w[1]-unit[1] < 25]
+            if len(numbers) == 1:
+                choices.append(float(numbers[0][4].replace(',','')))
+        if len(choices) == 1:
+            result[field] = choices[0]
+    return result
+
+
 def schedule_candidates(words, page_number, name):
     """Read supported families beneath explicit MARK and design column headers.
 
     Column positions, not a fixed numeric order, determine the field. Repeated
     MARK columns bound adjacent schedules. Unlabeled numbers are never imported.
     """
-    found = []
-    for tagword in words:
-        if not re.fullmatch(r'(?:PAHU|MSAH|MSHP|EUH|EF)-\d+[A-Z]?', tagword[4], re.I):
+    words = list(words)
+    # Stacked family/number tags are accepted only beneath a matching tag column.
+    for word in list(words):
+        if not re.fullmatch(TAG.split(')-', 1)[0] + ')', word[4], re.I):
             continue
-        marks = [w for w in words if w[4].upper() == 'MARK'
-                 and 0 < tagword[1] - w[1] < 85 and abs(center(w) - center(tagword)) < 30]
+        marks = [w for w in words if w[4].upper() in {'MARK','TAG'}
+                 and 0 < word[1]-w[1] < 600 and abs(center(w)-center(word)) < 20]
+        numbers = [w for w in words if re.fullmatch(r'\d+(?:\.\d+)*[A-Z]?',w[4])
+                   and 5 < w[1]-word[1] < 20 and abs(center(w)-center(word)) < 4]
+        if marks and len(numbers) == 1:
+            n = numbers[0]
+            y = (word[1]+n[1])/2
+            words.append((word[0],y,word[2],y+word[3]-word[1],word[4]+'-'+n[4],*word[5:]))
+    found = []
+    consumed = set()
+    for tagword in words:
+        if id(tagword) in consumed or not re.match(TAG, tagword[4], re.I):
+            continue
+        adjacent = sorted([w for w in words if abs(w[1]-tagword[1]) < 2 and w[0] >= tagword[0]], key=lambda w: w[0])
+        mark_words = [tagword]
+        for w in adjacent[1:]:
+            if w[0]-mark_words[-1][2] > 18 or not re.fullmatch(r'(?:'+TAG+r'|THRU|THROUGH|TO|AND|[,&–-]|\d+(?:,\d+)*,?)', w[4], re.I):
+                break
+            mark_words.append(w)
+        tags = []
+        for count in range(len(mark_words),0,-1):
+            tags = expand_marks(' '.join(w[4] for w in mark_words[:count]))
+            if tags:
+                consumed.update(id(w) for w in mark_words[:count])
+                break
+        if not tags:
+            continue
+        marks = [w for w in words if w[4].upper() in {'MARK','TAG','UNIT MARK','UNIT TAG'}
+                 and 0 < tagword[1]-w[1] < 600 and abs(center(w)-center(tagword)) < 30]
         if not marks:
             continue
         mark = max(marks, key=lambda w: w[1])
-        right = min((w[0] - 12 for w in words if w[4].upper() == 'MARK'
+        first_row = min((w[1] for w in words if re.fullmatch(TAG,w[4],re.I)
+                         and w[1] > mark[1] and abs(center(w)-center(mark)) < 30), default=tagword[1])
+        right = min((w[0] - 12 for w in words if w[4].upper() in {'MARK','TAG','UNIT MARK','UNIT TAG'}
                      and abs(w[1] - mark[1]) < 5 and w[0] > mark[2]), default=100000)
         header = [w for w in words if mark[0] - 20 <= w[0] < right
-                  and mark[1] - 65 < w[1] <= mark[1] + 2]
+                  and mark[1] - 65 < w[1] < first_row - 3]
         if any(w[4].upper() in {'ACTUAL','MEASURED','INITIAL','FINAL'} for w in header):
             continue
-        row = [w for w in words if mark[0] - 20 <= w[0] < right and abs(w[1] - tagword[1]) < 2]
-        family = tagword[4].split('-')[0].upper()
+        row = [w for w in words if mark[0] - 20 <= w[0] < right and abs(w[1] - tagword[1]) < 3]
+        family = tags[0].split('-')[0]
         values = {}
         text = {}
 
         def take(pattern, field, scale=1):
             anchors = phrases(header, pattern)
+            if field.startswith('heater_'):
+                motor = phrases(header, r'(?:MOTOR|FAN) (?:VOLTS?|VOLTAGE|PHASE|PH|AMPS|FLA|KW)')
+                anchors = [a for a in anchors if not any(abs(a[1]-b[1]) < 3 and b[0] <= a[0] and b[2] >= a[2] for b in motor)]
+            if field == 'design_cfm':
+                outside = phrases(header, r'(?:OUTSIDE AIR|OUTDOOR AIR|OA|OSA|EXHAUST|RETURN)(?: CFM| \(CFM\))|(?:PEAK|MAXIMUM|MAX|RATED|SELECTED)(?: FAN)? AIRFLOW')
+                anchors = [a for a in anchors if not any(abs(a[1]-b[1]) < 3 and b[0] <= a[0] and b[2] >= a[2] for b in outside)]
             if len(anchors) != 1:
                 return
             x = center(anchors[0])
-            choices = [w for w in row if abs(center(w) - x) < 25
-                       and re.fullmatch(r'\d[\d,]*(?:\.\d+)?', w[4])]
+            tolerance = max(25, (anchors[0][2]-anchors[0][0])/2) if field == 'selected_cfm' else 25
+            choices = [w for w in row if abs(center(w) - x) < tolerance
+                       and re.fullmatch(r'(?:\d[\d,]*(?:\.\d+)?|\.\d+)' + (r'|\d+/[1-9]\d*' if field == 'motor_hp' else ''), w[4])]
             if len(choices) == 1:
-                values[field] = float(choices[0][4].replace(',', '')) * scale
+                value = choices[0][4].replace(',', '')
+                values[field] = (float(value.split('/')[0])/float(value.split('/')[1]) if '/' in value else float(value)) * scale
 
         if family == 'EF':
             take(r'SCFM(?: @ \S+)?', 'design_cfm')
@@ -102,16 +206,50 @@ def schedule_candidates(words, page_number, name):
         elif family == 'MSAH':
             take(r'TOTAL CFM', 'design_cfm')
             take(r'MCA', 'unit_mca')
-        elif family == 'EUH':
-            # Keep the source heating capacity even when no validated form exists.
+        elif family in {'EUH','GUH','CUH','UH'}:
+            # Capacities are evidence; the original heater BTU/kW cells are formulas.
             take(r'\(BTUH\)', 'heating_output_btu')
+            take(r'(?:HEATER )?(?:VOLT|VOLTS|VOLTAGE)', 'heater_volts')
+            take(r'(?:HEATER )?(?:PH|PHASE)', 'heater_phase')
+            take(r'(?:HEATER )?AMPS', 'heater_amps')
+            take(r'(?:HEATER )?STAGES', 'heater_stages')
+            take(r'\(KW\)|HEATER KW', 'heater_kw')
+            take(r'ENTERING WATER TEMP\.?|EWT', 'heating_ewt')
+            take(r'LEAVING WATER TEMP\.?|LWT', 'heating_lwt')
+            take(r'GPM', 'design_gpm')
+            take(r'WATER (?:DP|∆P) FT\.?', 'water_dp_ft')
+            kinds = []
+            for pattern, kind in [(r'ELECTRIC UNIT HEATER SCHEDULE','ELECTRIC'),
+                                  (r'GAS(?: FIRED)? UNIT HEATER SCHEDULE','GAS'),
+                                  (r'(?:HOT WATER|HYDRONIC) UNIT HEATER SCHEDULE','HOT WATER')]:
+                if phrases(header, pattern):kinds.append(kind)
+            if len(kinds)==1:text['heating_type']=kinds[0]
+        take(r'(?:DESIGN |TOTAL |SUPPLY |SUPPLY AIR |SA )?(?:CFM|AIRFLOW)(?: \(CFM\))?|SCFM(?: @ \S+)?', 'design_cfm')
+        take(r'(?:OUTSIDE AIR|OUTDOOR AIR|OA|OSA)(?: CFM| \(CFM\))?', 'osa_cfm')
+        take(r'(?:ESP|E\.S\.P\.)(?: \(.*\))?', 'esp')
+        take(r'MOTOR HP', 'motor_hp')
+        take(r'MOTOR FLA', 'motor_fla')
+        take(r'MOTOR VOLTS|VOLTAGE \(V\)', 'motor_volts')
+        take(r'FAN RPM', 'fan_rpm')
+        take(r'MCA', 'unit_mca')
+        if family in {'EUH','GUH','CUH','UH'}:
+            take(r'HEATING CFM|CFM', 'heating_cfm')
+            values.pop('design_cfm', None)
+        if phrases(header, r'DUCTED') and phrases(header, r'UNIT FAN'):
+            take(r'SA', 'design_cfm')
+        peak = phrases(header, r'Peak Fan Airflow')
+        if peak:
+            take(r'Peak Fan Airflow', 'selected_cfm')
+        if family == 'DOAS':
+            text['unit_type'] = 'DOAS'
         evidence = ' '.join(w[4] for w in sorted(row, key=lambda w: w[0]))
-        item = {'tag': tagword[4].upper(), 'values': values, 'text': text,
+        item = {'tag': tags[0], 'values': values, 'text': text,
                 'source': name, 'reference': f'page {page_number}',
-                'evidence': evidence[:240], 'basis': 'PLAN_SCHEDULE'}
-        if family in {'EUH', 'MSHP'}:
+                'evidence': evidence[:240], 'basis': 'SUBMITTAL_SELECTION' if peak else 'PLAN_SCHEDULE'}
+        if family == 'MSHP':
             item['unmapped'] = True
-        found.append(item)
+        for tag in tags:
+            found.append({**item, 'tag': tag, 'values': values.copy()})
     return found
 
 
@@ -119,26 +257,32 @@ def diffuser_legend(doc):
     """Read type and neck from a labeled ceiling-diffuser table, never max CFM."""
     legend = {}
     for page in doc:
-        words = page.get_text('words') or []
-        if not phrases(words, r'LOUVERED FACE CEILING DIFFUSER SCHEDULE'):
+        words = page_words(page)
+        if not phrases(words, r'(?:LOUVERED FACE CEILING )?DIFFUSER (?:SCHEDULE|LEGEND)|(?:REGISTER,? GRILLE,? (?:&|AND) DIFFUSER|AIR DEVICE|AIR DISTRIBUTION DEVICE) SCHEDULE'):
             continue
         for row in rows(words):
             for i, word in enumerate(row):
-                if not re.fullmatch(r'S[A-Z]', word[4]):
+                if not re.fullmatch(r'(?:S[A-Z]|[A-Z]\d?|SD\d*)', word[4]):
                     continue
                 tail = row[i + 1:]
+                description = ' '.join(w[4] for w in words if word[0] < w[0] < word[0]+170
+                                       and abs(w[1]-word[1]) < 16).upper()
+                if re.fullmatch(r'[A-Z]', word[4]) and ('RETURN' in description or 'EXHAUST' in description):
+                    continue
                 necks = [w for w in tail if 0 < w[0] - word[0] < 300
                          and re.fullmatch(r'\d+(?:\.\d+)?"[Øø]', w[4])]
                 if necks:
                     size = min(necks, key=lambda w: w[0])[4]
                     legend.setdefault(word[4], set()).add(size)
+                elif re.fullmatch(r'[A-Z]', word[4]) and ('SUPPLY' in description or 'DIFFUSER' in description):
+                    legend.setdefault(word[4], set()).add('')
     return {mark: next(iter(sizes)) for mark, sizes in legend.items() if len(sizes) == 1}
 
 
 def keyed_outlets(words, page_number, name, legend):
     """Read stacked symbol/airflow callouts, preserving unconfirmed associations."""
     # Avoid schedules, details and their rated maximum flows.
-    if not phrases(words, r'FLOOR PLAN - HVAC'):
+    if not phrases(words, r'(?:FLOOR )?PLAN - HVAC|(?:MECHANICAL|HVAC)(?: FLOOR)? PLAN|(?:FIRST|SECOND|GROUND) FLOOR HVAC PLAN'):
         return []
     notes = set()
     for row in rows(words):
@@ -163,8 +307,18 @@ def keyed_outlets(words, page_number, name, legend):
                 size, kind = kind, 'DUCT GRILLE'
         if size is None:
             continue
+        # A type followed by a neck, with its flow stacked under that neck.
+        # Both links must be unique; a loose nearby number is never enough.
+        necks = [w for w in words if 0 < w[0]-word[2] < 18 and abs(w[1]-word[1]) < 3
+                 and re.fullmatch(r'\d+(?:\.\d+)?(?:[xX]\d+(?:\.\d+)?"|"[ØOo])',w[4])]
+        flow_anchor = word
+        if len(necks) == 1:
+            flow_anchor = necks[0]
+            size = necks[0][4]
         numbers = [w for w in words if re.fullmatch(r'\d{1,4}', w[4])
-                   and abs(w[0] - word[0]) < 4 and 6 < w[1] - word[1] < 14]
+                   and (abs(w[0] - flow_anchor[0]) < 4 or
+                        (flow_anchor is word and not size and abs(center(w)-center(word)) < 4))
+                   and 6 < w[1] - flow_anchor[1] < 14]
         if len(numbers) != 1:
             continue
         flow = int(numbers[0][4])

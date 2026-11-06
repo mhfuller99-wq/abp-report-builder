@@ -12,7 +12,7 @@ from openpyxl.utils import get_column_letter
 from abp_reference import inspect_reference, build_reference, reset_measurements
 from abp_fidelity import preserve_template_parts
 from abp_grouped import group_template_sheets
-from abp_design import extract_design_rows, UNIT_FORMS, TEXT_CELLS, unit_form, inferred_form
+from abp_design import extract_design_rows, UNIT_FORMS, TEXT_CELLS, HEATER_FORMS, unit_form, inferred_form
 from abp_job import NUMERIC_FIELDS, TEXT_FIELDS, canonical_tag, postal_match, performance_candidates, populate_identity, populate_support, prepare_documentation
 from abp_schedule import parse_pdf, annotate
 
@@ -150,6 +150,8 @@ def read_sources(blobs):
     for record in records.values():
         annotate(record)
         form=inferred_form(record['tag'], record)
+        for heat, heater_template in HEATER_FORMS.items():
+            if form==heater_template:signals.add('unit_heater_'+heat.lower().replace(' ','_'))
         if form:record['template']=form
         elif any(item.get('unmapped') or str(item.get('reference','')).startswith('page') for item in record.get('candidates') or []):
             record['template']=''
@@ -167,6 +169,11 @@ def read_sources(blobs):
         for item in record.get('candidates') or []:
             for key in ('fan_rpm','motor_watts','unit_mca','unit_mop','brake_hp'):
                 (item.get('values') or {}).pop(key,None)
+    unresolved = [record['tag'] for record in records.values() if not record.get('proposed')]
+    if unresolved:
+        warnings.append('No usable design values for detected equipment: ' + ', '.join(unresolved[:30]) + (' …' if len(unresolved)>30 else '') + '. Review schedules manually.')
+    if sources:
+        warnings.append('Extraction is not a complete equipment or outlet takeoff. Compare every schedule and plan with the detected list; unrecognized marks, ranges, scanned sheets and unsupported layouts may be missing.')
     image_only=any('image-only PDF' in warning or 'no readable text' in warning for warning in warnings)
     if len({item.get('source') for item in diffusers})>1:
         warnings.append('Outlet candidates occur in multiple documents. Review drawing revisions and include each physical outlet once; candidates are not automatically combined or superseded.')
@@ -270,9 +277,13 @@ def suggested_templates(tags,signals=None,*,sparse=False):
             add(name,reason)
     if 'exhaust_grilles' in signals:
         add('Exhaust Grilles.xlsx.xlsx','Exhaust grille schedule detected; review device types',True)
-    if tagged('EUH|EWH|CUH|UH') or 'unit_heater' in signals:
+    if tagged('EUH') or 'unit_heater_electric' in signals:add('Unit Heater ELE.xlsx','Electric unit heater tag or source heating type; review design')
+    if tagged('GUH') or 'unit_heater_gas' in signals:add('Unit Heater GAS.xlsx','Gas unit heater tag or source heating type; review design')
+    if 'unit_heater_hot_water' in signals:add('Unit Heater WTR.xlsx','Source explicitly identifies hot-water unit heater; review design')
+    if tagged('CUH|UH') or 'unit_heater' in signals:
+        # A generic heater tag does not establish electric, gas, or water heat.
         for name in lookup_templates(r'unit\s*heater'):
-            add(name,'Unit heater tag or schedule heading')
+            if name not in HEATER_FORMS.values():add(name,'Generic heater form; confirm heating type',True)
     if 'water_coil' in signals:
         add('Coil WTR CLG WTR HT.xlsx','Water-coil schedule heading detected')
     if tagged('B'):add('Boiler.xlsx','Boiler tag; confirm service and design data',True)
@@ -506,6 +517,9 @@ def validate_payload(payload):
         if r.get('status')=='VERIFIED':
             form=unit_form(r)
             if not form:raise ValueError(f'{tag}: select a unit report form or use an approved reference for unsupported equipment')
+            expected=inferred_form(tag,r)
+            if form in HEATER_FORMS.values() and expected in HEATER_FORMS.values() and form!=expected:
+                raise ValueError(f'{tag}: selected heater form disagrees with its heating type')
             if form not in selected:raise ValueError(f'{tag}: include its selected unit report form in the worksheet list')
             if coil and coil not in selected:raise ValueError(f'{tag}: include its selected companion coil form')
             if form=='Air Moving Equipment.xlsx' and coil is None and all(t in selected for t in ('Coil DX GAS HT.xlsx','COIL DX HP ELE.xlsx')):raise ValueError(f'{tag}: choose a companion coil form for this unit')
@@ -518,6 +532,12 @@ def validate_payload(payload):
             if not math.isfinite(n) or n<0 or n>1_000_000:raise ValueError(f'{tag}: out-of-range {field}')
         for field in TEXT_FIELDS:
             if field in r and (not isinstance(r[field],str) or len(r[field])>120):raise ValueError(f'{tag}: invalid {field}')
+        if r.get('heating_type') not in (None,'') and r['heating_type'].strip().upper() not in HEATER_FORMS:
+            raise ValueError(f'{tag}: heating type must be ELECTRIC, GAS, or HOT WATER')
+        if r.get('heater_phase') not in (None,'') and float(r['heater_phase']) not in (1,3):
+            raise ValueError(f'{tag}: heater phase must be 1 or 3')
+        if r.get('heater_stages') not in (None,'') and (float(r['heater_stages'])<1 or not float(r['heater_stages']).is_integer()):
+            raise ValueError(f'{tag}: heater stages must be a positive integer')
         if r.get('osa_min_cfm') not in (None,''):
             if unit_form(r)!='Air Moving Equipment.xlsx':raise ValueError(f'{tag}: minimum outside air requires an air-moving form')
             if r.get('osa_cfm') in (None,'') or float(r['osa_min_cfm'])>float(r['osa_cfm']):raise ValueError(f'{tag}: minimum outside air must not exceed maximum outside air')
@@ -547,9 +567,9 @@ def populate_equipment(wb,records,selected):
         if not kind or kind not in selected:continue
         # Fill the existing side-by-side Design/Actual slots before copying a page.
         slots=[(0,0)]
-        if kind in ('Fan Coil Units DX.xlsx','Fan Coil Units WTR.xlsx','Fan Coil Units DX GAS.xlsx'):
+        if kind in ('Fan Coil Units DX.xlsx','Fan Coil Units WTR.xlsx','Fan Coil Units DX GAS.xlsx','Unit Heater GAS.xlsx','Unit Heater WTR.xlsx'):
             slots=[(col,0) for col in (0,2,4,6)]
-        elif kind=='Fan Coil Units DX ELE.xlsx':
+        elif kind in ('Fan Coil Units DX ELE.xlsx','Unit Heater ELE.xlsx'):
             slots=[(col,0) for col in (0,4,8)]
         elif kind=='Exhaust Fans _Sm._.xlsx':
             slots=[(col,row) for row in (0,13) for col in (0,2,4,6)]
@@ -747,7 +767,7 @@ renderSourceFiles();
 $('scan').onclick=async()=>{if(!templatesReady){$('scanstatus').textContent=templateError||'Wait for report worksheets to load.';return}let files=sourceFiles;if(!files.length){$('scanstatus').textContent='Choose files first';return}let form=new FormData();for(let f of files)form.append('files',f);$('scan').disabled=true;$('files').disabled=true;$('buildmethod').disabled=true;$('generate').disabled=true;$('loadproject').disabled=true;$('scanstatus').textContent='Reading files...';try{let r=await fetch('/api/scan',{method:'POST',body:form});let data=await readApiJson(r);tags=data.tags||[];records=(data.records||[]).map(row=>{const copy={...row};applyProposed(copy);return copy});diffusers=Array.isArray(data.diffusers)?data.diffusers:[];$('scanstatus').textContent=`Found ${tags.length} equipment entries and ${diffusers.length} outlet candidates. Review the suggested design values and verify each unit before you build the report.`+(data.warnings.length?' Warnings: '+data.warnings.join(' | '):'');$('tags').innerHTML='';renderReview();renderOutlets();let recommendation=await readApiJson(await fetch('/api/suggest',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({tags,signals:data.signals||[],sparse:data.sparse===true})}));if(!Array.isArray(recommendation.recommended))throw Error('Template recommendations unavailable');let chosen=new Set(recommendation.recommended.map(x=>x.name));const assigned=new Set(records.map(r=>r.template).filter(Boolean));if(assigned.size){for(const name of Object.keys(unitForms))if(!assigned.has(name))chosen.delete(name)}for(const name of assigned)chosen.add(name);for(const row of records)if(row.coil_template)chosen.add(row.coil_template);document.querySelectorAll('.template input').forEach(x=>x.checked=chosen.has(x.value));let safe=x=>String(x||'').replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('>','&gt;');$('template-recommendations').innerHTML='<strong>Recommended '+recommendation.recommended.length+' ABP templates</strong><p>Selected automatically based on the uploaded documents. Review and change any checked boxes before building your report.</p>'+recommendation.recommended.map(x=>'<div class="recommend-item"><span>'+safe(worksheetLabel(x.name))+(x.review?' <em>Review type</em>':'')+'</span><small>'+safe(x.reason)+'</small></div>').join('')+'<p class="muted">'+safe(recommendation.review_note)+'</p>'}catch(e){$('scanstatus').textContent=e.message}finally{$('scan').disabled=false;$('files').disabled=false;$('buildmethod').disabled=false;$('generate').disabled=false;$('loadproject').disabled=false;updateWorkspace()}};
 
 const unitForms=__UNIT_FORMS_JSON__;
-function defaultUnitForm(tag, record){const heat=record&&(record.heating_input_btu??record.proposed?.heating_input_btu);if(/^(DOAS)[- ]?[0-9]/.test(tag))return (heat!==undefined&&heat!==null&&heat!=='')?'Fan Coil Units DX GAS.xlsx':'Fan Coil Units DX.xlsx';if(/^(PAHU|AHU|RTU|OAU|MAU|AC)[- ]?[0-9]/.test(tag))return 'Air Moving Equipment.xlsx';if(/^(EF|KEF|TEF|CEF|SEF)[- ]?[0-9]/.test(tag))return 'Exhaust Fans _Std._.xlsx';if(/^(VRF|SSAU|MSAH)[- ]?[0-9]/.test(tag))return 'Fan Coil Units DX.xlsx';if(/^KH[- ]?[0-9]/.test(tag))return 'Kitchen Hood.xlsx';return ''}
+function defaultUnitForm(tag, record){if(/^EUH[- ]?[0-9]/.test(tag))return 'Unit Heater ELE.xlsx';if(/^GUH[- ]?[0-9]/.test(tag))return 'Unit Heater GAS.xlsx';if(/^(UH|CUH)[- ]?[0-9]/.test(tag)){const kind=String(record?.heating_type||record?.text_proposed?.heating_type||'').trim().toUpperCase();return ({ELECTRIC:'Unit Heater ELE.xlsx',GAS:'Unit Heater GAS.xlsx','HOT WATER':'Unit Heater WTR.xlsx'})[kind]||''}const heat=record&&(record.heating_input_btu??record.proposed?.heating_input_btu);if(/^(DOAS)[- ]?[0-9]/.test(tag))return (heat!==undefined&&heat!==null&&heat!=='')?'Fan Coil Units DX GAS.xlsx':'Fan Coil Units DX.xlsx';if(/^(PAHU|AHU|RTU|OAU|MAU|AC)[- ]?[0-9]/.test(tag))return 'Air Moving Equipment.xlsx';if(/^(EF|KEF|TEF|CEF|SEF)[- ]?[0-9]/.test(tag))return 'Exhaust Fans _Std._.xlsx';if(/^(VRF|SSAU|MSAH)[- ]?[0-9]/.test(tag))return 'Fan Coil Units DX.xlsx';if(/^KH[- ]?[0-9]/.test(tag))return 'Kitchen Hood.xlsx';return ''}
 function applyProposed(record){record.status='UNVERIFIED';for(const [field,value] of Object.entries(record.proposed||{})){if(field==='manufacturer'||field==='model')continue;if(record[field]===undefined||record[field]===null||record[field]==='')record[field]=value}for(const [field,value] of Object.entries(record.text_proposed||{})){if(field==='manufacturer'||field==='model')continue;if(record[field]===undefined||record[field]===null||record[field]==='')record[field]=value}if(record.template===undefined||record.template===null)record.template=defaultUnitForm(record.tag, record)}
 function renderReview(){
  if(!records.length){$('review').innerHTML='<p class="empty-review">No equipment to review yet. Scan your project documents to get started.</p>';return}

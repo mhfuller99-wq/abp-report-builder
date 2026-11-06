@@ -48,7 +48,7 @@ class MechanicalTests(unittest.TestCase):
     def test_supported_and_unsupported_form_choices(self):
         self.assertEqual(inferred_form('PAHU-1'),'Air Moving Equipment.xlsx')
         self.assertEqual(inferred_form('MSAH-1'),'Fan Coil Units DX.xlsx')
-        self.assertIsNone(inferred_form('EUH-1'))
+        self.assertEqual(inferred_form('EUH-1'),'Unit Heater ELE.xlsx')
         self.assertIsNone(inferred_form('MSHP-1'))
         self.assertEqual(inferred_form('EF-1',{'proposed':{'design_cfm':75,'motor_hp':.02},
                          'text_proposed':{'service':'CEILING'}}),'Exhaust Fans _Sm._.xlsx')

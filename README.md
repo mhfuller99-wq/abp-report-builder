@@ -36,8 +36,8 @@ rather than silently leaving historical field measurements in the output.
 Source-document mode reads text schedules from PDF drawings and submittals.
 Rows are taken from visual lines, so a grille mark cannot combine with a
 distant dimension. VRF indoor units, dedicated outside-air units and exhaust
-fans map to the DX fan-coil, air-moving and standard exhaust forms. Submittal
-unit totals and motor nameplate values outrank the plan; fan speed is not
+fans map to the DX fan-coil, air-moving and standard exhaust forms. Design targets and manufacturer selected performance remain separate;
+conflicting values are left blank for review; fan speed is not
 motor RPM and unit MCA is not motor FLA. Extracted values stay unverified
 until the reviewer accepts them. Manufacturer and model are not written into
 the pre-field workbook. The workbook is project information, notes, the
@@ -156,9 +156,8 @@ identify the endpoint and elapsed time without recording uploaded contents.
 The source scanner recognizes PAHU and MSAH equipment from labeled schedules,
 reads fan values by column headings, and supports explicit shared PAHU submittal
 tag lists. Outdoor MSHP equipment stays visible for review without automatically
-creating another indoor TAB form. EUH candidates retain their source evidence;
-there is currently no validated unit-heater master in the installed library, so
-they cannot be verified with an empty form selection.
+creating another indoor TAB form. EUH candidates use the supplied electric unit-heater form.
+Equipment cannot be verified with an empty form selection.
 
 The DX/heat-pump/electric companion form has separate heat-pump and electric-strip
 temperature inputs. A per-unit companion-form choice prevents mixed systems
@@ -178,3 +177,39 @@ TEST ONLY evidence with a simulated review of six supported equipment units and
 one explicitly selected drawing revision. Keep its output outside this repository;
 it does not approve source revisions or make the report field-ready. Original
 customer PDFs and completed reports are never uploaded or committed.
+
+
+### General schedule review
+
+Text PDF schedules use displayed page coordinates, unit marks, and column headers,
+including IU/DSS decimal identifiers, stacked marks, and explicit fan lists/ranges.
+Vendor-neutral labeled DOAS selection pages require a unique explicit unit mark.
+Requested airflow and selected performance remain separate from field readings.
+Conflicts stay blank for review; no scan certifies a complete takeoff.
+Diffuser legends provide neck sizes or supply-device classifications, never duct
+associations. Compare every schedule and plan with the detected list.
+
+Synthetic regressions contain no private drawing data. Passing these tests is not
+private-project acceptance. Customer source files and completed masters stay local.
+
+
+### Supplied unit-heater forms
+
+The original Unit Heater ELE, GAS, and WTR workbooks are included without byte
+changes. EUH tags select electric and GUH tags select gas. Generic UH/CUH tags
+require an explicit heating type or a reviewer-selected form; they do not default
+to water heat. Electric pages have three unit slots; gas/water pages have four.
+Additional units continue on intact repeated pages under the same worksheet tab.
+
+Only reviewed inputs are populated. Heater volts, phases, amps, stages, heating
+airflow, temperatures, water flow, and pressure drop map to their printed design
+cells. Rated kW and BTU remain source evidence when their form cells are formulas.
+No amperage, airflow, or temperature is back-calculated from those ratings. Actual
+inputs, serial numbers and signoffs remain blank; original formulas and print
+settings are retained. Reference imports recognize UNIT ID and clear all electric
+phase-leg readings while retaining design values.
+
+Run `python -m unittest test_heaters -v` and `node test_heater_ui.cjs` for heater
+regressions. The opt-in WCU probe now checks the electric heater along with the
+previous six supported units; it never approves drawing revisions or uploads
+customer files.

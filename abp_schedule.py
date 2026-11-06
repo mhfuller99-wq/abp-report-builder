@@ -2,17 +2,17 @@
 
 Words are grouped into visual rows. A tag is accepted only when it leads a
 schedule row or an explicit mark, so a distant column cannot glue "B" to "6"
-or a model fragment into an equipment tag. Submittal unit totals and motor
-nameplate values outrank the plan schedule. Supply-outlet airflow is read
+or a model fragment into an equipment tag. Design targets and manufacturer selected performance remain separate;
+conflicting values require review. Supply-outlet airflow is read
 only from a plan callout (type mark, neck, and CFM). A unit total is never
 copied onto an outlet. Fan RPM is never stored as motor RPM, and unit MCA is
 never stored as motor FLA.
 """
 import re
-from abp_mechanical import schedule_candidates, diffuser_legend, keyed_outlets, packaged_submittals
+from abp_mechanical import schedule_candidates, diffuser_legend, keyed_outlets, packaged_submittals, TAG, expand_marks, page_words, selection_airflows
 
 LEAD = re.compile(
-    r'^(EF|VRF|DOAS|SSAU|SSCU|EUH|GUH|HVLS|PF|FS|EH|PAHU|MSAH|MSHP)-\d+[A-Z]?\b', re.I)
+    r'^(' + TAG.split('(?:', 1)[1].split(')', 1)[0] + r')-\d+(?:\.\d+)*[A-Z]?\b', re.I)
 MAPPED = re.compile(r'^(?:EF|VRF|DOAS|SSAU)-\d+[A-Z]?$', re.I)
 VOLT = re.compile(r'\b(\d{2,3}(?:-\d{2,3})?)/(\d+)/(\d)\b')
 UNIT_TOTALS = {
@@ -22,10 +22,11 @@ UNIT_TOTALS = {
     'electric_heating_edb', 'electric_heating_ldb',
     'heating_input_btu', 'heating_output_btu',
     'cooling_total_btu', 'cooling_sensible_btu',
+    'heater_volts', 'heater_phase', 'heater_amps', 'heater_stages', 'heating_ewt', 'heating_lwt', 'water_dp_ft', 'design_gpm',
 }
 # Kept on the candidate so a reviewer can see them. They are not form inputs:
 # fan RPM is not motor RPM, watts are not horsepower, unit MCA is not motor FLA.
-EVIDENCE_ONLY = {'fan_rpm', 'motor_watts', 'unit_mca', 'unit_mop', 'brake_hp'}
+EVIDENCE_ONLY = {'fan_rpm', 'motor_watts', 'unit_mca', 'unit_mop', 'brake_hp', 'selected_cfm', 'heater_kw'}
 
 
 def is_submittal(basis):
@@ -268,6 +269,9 @@ def parse_page(words, page_number, name):
         if tag in scheduled:
             continue
         family = lead.group(1).upper()
+        if any(w[4].upper() in {'ACTUAL', 'MEASURED', 'INITIAL', 'FINAL'}
+               and 0 < words_in_row[0][1] - w[1] < 100 for w in words):
+            continue
         # New packaged/split families require schedule or explicit submittal
         # evidence. A plan tag touching a keyed note can read as PAHU-12.
         if family in {'PAHU', 'MSAH', 'MSHP'}:
@@ -285,19 +289,38 @@ def parse_page(words, page_number, name):
 
 
 def _page_segments(page):
-    return segments(page.get_text('words') or [])
+    return segments(page_words(page))
 
 
 def parse_doas_submittal(doc, name):
-    blob = []
+    found = []
     for page in doc:
-        for y, words in _page_segments(page):
-            blob.append((y, text_of(words), page.number + 1))
+        text = page.get_text(sort=True)
+        marks = set(m.upper() for m in re.findall(r'\bDOAS-\d+(?:\.\d+)*[A-Z]?\b', text, re.I))
+        marks.update('DOAS-'+n for n in re.findall(r'\bDOAS\s*\(#(\d+)\)', text, re.I))
+        if len(marks) != 1:
+            continue
+        tag = next(iter(marks))
+        if not (re.search(r'(?:Unit (?:Mark|Tag)|Mark|Tag)\s*:\s*'+re.escape(tag)+r'\b', text, re.I)
+                or re.search(r'^\s*'+re.escape(tag)+r'\s*$', text, re.I | re.M)
+                or re.search(r'\bDOAS\s*\(#\d+\)', text, re.I)):
+            continue
+        if len(set(re.findall(r'Supply Air:\s*([\d,]+)\s*CFM', text, re.I))) > 1:
+            continue
+        found.extend(_parse_doas_selection_page(page, name, tag))
+    return found
+
+
+def _parse_doas_selection_page(page, name, tag):
+    blob = [(y, text_of(words), page.number + 1) for y, words in _page_segments(page)]
     joined = '\n'.join(text for _y, text, _page in blob)
-    if 'DOAS' not in joined.upper() or not re.search(r'Supply Air:\s*[\d,]+', joined, re.I):
+    table_values = selection_airflows(page_words(page))
+    if 'DOAS' not in joined.upper() or not (table_values or re.search(r'Supply Air:\s*[\d,]+', joined, re.I)):
         return []
-    values = {}
+    values = table_values
     text = {}
+    if re.search(r'\bIndirect Gas\b', joined, re.I):
+        text['unit_type'] = 'DOAS / INDIRECT GAS'
 
     def grab(pattern, field, scale=1, page_hint=None):
         match = re.search(pattern, joined, re.I)
@@ -363,14 +386,12 @@ def parse_doas_submittal(doc, name):
         values['brake_hp'] = number(bhp.group(1))
     if values.get('design_cfm') and values.get('osa_cfm') == values['design_cfm']:
         text['service'] = 'DEDICATED OUTSIDE AIR'
-    heating_cfm = values.get('design_cfm')
-    if heating_cfm:
-        values['heating_cfm'] = heating_cfm
-    evidence = (f'DOAS-1 submittal nameplate; motor FLA {values.get("motor_fla")}; '
+    grab(r'Heating Air(?:flow)?:\s*([\d,]+)\s*CFM', 'heating_cfm')
+    evidence = (f'{tag} submittal nameplate; motor FLA {values.get("motor_fla")}; '
                 f'unit MCA {values.get("unit_mca")}; fan RPM {values.get("fan_rpm")}')
     if not values.get('design_cfm'):
         return []
-    return [candidate('DOAS-1', values, 'submittal', evidence, 'SUBMITTAL_NAMEPLATE', text)]
+    return [candidate(tag, values, f'page {page.number + 1}', evidence, 'SUBMITTAL_NAMEPLATE', text)]
 
 
 def parse_fan_submittal(doc, name):
@@ -378,10 +399,13 @@ def parse_fan_submittal(doc, name):
     for page in doc:
         rows = [text_of(words) for _y, words in _page_segments(page)]
         page_text = '\n'.join(rows)
-        mark = re.search(r'Mark:\s*((?:EF)-\d+)', page_text, re.I)
+        mark = re.search(r'Mark:\s*(EF-\d+(?:\s*(?:,|&|THRU|THROUGH|TO|–|-)\s*(?:EF-)?\d+)*)', page_text, re.I)
         if not mark:
             continue
-        tag = mark.group(1).upper()
+        tags = expand_marks(mark.group(1))
+        if not tags:
+            continue
+        tag = ', '.join(tags)
         values = {}
 
         def grab(pattern, field):
@@ -389,18 +413,20 @@ def parse_fan_submittal(doc, name):
             if match:
                 values[field] = number(match.group(1).replace(',', ''))
 
-        grab(r'Actual Volume \(CFM\)\s*([\d,]+)', 'design_cfm')
-        if 'design_cfm' not in values:
-            grab(r'Requested Volume \(CFM\)\s*([\d,]+)', 'design_cfm')
+        grab(r'Requested Volume \(CFM\)\s*([\d,]+)', 'design_cfm')
+        grab(r'Actual Volume \(CFM\)\s*([\d,]+)', 'selected_cfm')
         grab(r'Fan RPM\s*(\d+)', 'fan_rpm')
-        grab(r'FLA \(A\)\s*([\d.]+)', 'motor_fla')
+        grab(r'FLA \((?:A|Amps)\)\s*([\d.]+)', 'motor_fla')
+        grab(r'Total External SP[^\n]*?\s(\d*\.\d+)', 'esp')
         grab(r'Input Watts \(W\)\s*(\d+)', 'motor_watts')
         volts = VOLT.search(page_text)
         if volts:
             values['motor_volts'] = single_voltage(volts.group(0))
         evidence = (f'{tag} fan submittal; fan RPM {values.get("fan_rpm")}; '
                     f'motor FLA {values.get("motor_fla")}; {values.get("motor_watts")} W')
-        found.append(candidate(tag, values, f'page {page.number + 1}', evidence, 'SUBMITTAL_NAMEPLATE'))
+        service = 'CEILING' if 'Ceiling Exhaust Fan' in page_text else 'INLINE' if 'Inline Fan' in page_text else ''
+        for tag in tags:
+            found.append(candidate(tag, values.copy(), f'page {page.number + 1}', evidence, 'SUBMITTAL_NAMEPLATE', {'service': service} if service else {}))
     return found
 
 
@@ -603,13 +629,20 @@ def parse_pdf(name, data):
             raise ValueError('PDF has more than 300 pages')
         legend = diffuser_legend(doc)
         for index, page in enumerate(doc):
-            words = page.get_text('words') or []
+            words = page_words(page)
             if len(text_of(words).strip()) < 40:
                 warnings.append(f'{name}: page {index + 1} has no readable text and may be a scanned sheet; manual takeoff required')
             found.extend(parse_page(words, index + 1, name))
             outlets.extend(parse_supply_outlets(words, index + 1, name))
             outlets.extend(keyed_outlets(words, index + 1, name, legend))
         found.extend(parse_doas_submittal(doc, name))
+        for page in doc:
+            page_text = page.get_text(sort=True)
+            if 'DOAS' in page_text.upper() and (re.search(r'Supply Air:\s*[\d,]+', page_text, re.I)
+                                               or selection_airflows(page_words(page))):
+                if not any(is_submittal(item.get('basis')) and item.get('reference') == f'page {page.number + 1}'
+                           and item.get('values', {}).get('design_cfm') for item in found):
+                    warnings.append(f'{name}: page {page.number + 1} DOAS selection could not be uniquely associated with a unit mark; review manually')
         found.extend(parse_fan_submittal(doc, name))
         found.extend(packaged_submittals(doc, name))
     for item in found:
@@ -646,17 +679,22 @@ def resolve_proposed(candidates):
         sub_values = _unique(submittal, field)
         plan_values = _unique(plan, field)
         if field in UNIT_TOTALS and len(sub_values) == 1:
-            proposed[field] = sub_values[0]
             if plan_values and plan_values != sub_values:
-                plan_text = ', '.join(f'{value:g}' if isinstance(value, float) else str(value) for value in plan_values)
-                sub_text = f'{sub_values[0]:g}' if isinstance(sub_values[0], float) else str(sub_values[0])
-                flags.append(f'{field}: submittal {sub_text} used; plan had {plan_text}')
+                flags.append(f'{field}: design target {plan_values} and manufacturer selected performance {sub_values} disagree; left blank for review')
+            else:
+                proposed[field] = sub_values[0]
         elif len(sub_values) > 1:
             flags.append(f'{field}: submittal values disagree; left blank for review')
         elif len(plan_values) == 1:
             proposed[field] = plan_values[0]
         elif len(plan_values) > 1:
             flags.append(f'{field}: plan values disagree; left blank for review')
+    selected_flow = _unique(candidates, 'selected_cfm')
+    if selected_flow:
+        flags.append(f'Manufacturer selected fan airflow {selected_flow} CFM is retained separately from requested design airflow and is not an actual field reading')
+    heater_kw = _unique(candidates, 'heater_kw')
+    if heater_kw:
+        flags.append(f'Rated heater capacity {heater_kw} kW stays as source evidence; original kW and BTU formulas are not overwritten and may differ because of rounded electrical ratings')
     fan = _unique(candidates, 'fan_rpm')
     if len(fan) > 1:
         flags.append('Fan RPM sources disagree ({}); not written to motor RPM'.format(
@@ -674,7 +712,7 @@ def resolve_proposed(candidates):
     if mca and fla is not None and mca[0] != fla:
         flags.append(f'Unit MCA {mca[0]:g} A is not motor FLA {fla:g} A')
     text = {}
-    for field in ('area_served', 'service', 'equipment_location', 'unit_type'):
+    for field in ('area_served', 'service', 'equipment_location', 'unit_type', 'heating_type'):
         choices = []
         for item in candidates:
             value = (item.get('text') or {}).get(field)
@@ -692,6 +730,8 @@ def resolve_proposed(candidates):
 def annotate(record):
     """Attach a review proposal without verifying or filling design inputs."""
     proposed, flags, text = resolve_proposed(record.get('candidates') or [])
+    record['design_targets'] = [item for item in record.get('candidates', []) if not is_submittal(item.get('basis'))]
+    record['selected_performance'] = [item for item in record.get('candidates', []) if is_submittal(item.get('basis'))]
     record['proposed'] = proposed
     record['flags'] = flags
     record['text_proposed'] = text

@@ -183,8 +183,9 @@ class SchedulePdfTests(unittest.TestCase):
             self.assertIsNone(by['DOAS-1']['design_cfm'])
             self.assertEqual(by['DOAS-1']['status'], 'UNVERIFIED')
             self.assertEqual(by['DOAS-1']['template'], 'Fan Coil Units DX GAS.xlsx')
-            self.assertEqual(by['DOAS-1']['proposed']['design_cfm'], 900)
-            self.assertEqual(by['DOAS-1']['proposed']['esp'], 0.4)
+            self.assertNotIn('design_cfm', by['DOAS-1']['proposed'])
+            self.assertTrue(any('disagree' in flag for flag in by['DOAS-1']['flags']))
+            self.assertNotIn('esp', by['DOAS-1']['proposed'])
             self.assertEqual(by['DOAS-1']['proposed']['motor_fla'], 2.2)
             self.assertNotIn('fan_rpm', by['DOAS-1']['proposed'])
             self.assertEqual(by['VRF-1']['proposed']['design_cfm'], 550)
@@ -214,6 +215,8 @@ class SchedulePdfTests(unittest.TestCase):
             reviewed = []
             for row in scanned['records']:
                 row = apply_proposed(row)
+                if row['tag'] == 'DOAS-1':
+                    row.update(row['selected_performance'][0]['values'])
                 if row.get('template') and row.get('design_cfm') not in (None, ''):
                     row['status'] = 'VERIFIED'
                 reviewed.append(row)

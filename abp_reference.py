@@ -13,7 +13,7 @@ MAX_CELLS = 200_000
 SUPPORTED = ('AIR MOVING EQUIPMENT', 'MAU', 'COIL DX GAS', 'SUPPLY DIFFUSERS',
              'DUCT TRAVERSE RECT', 'KITCHEN HOOD', 'EXHAUST FANS SMALL',
              'PROJECT SUMMARY', 'INSTRUMENT', 'CHILLER', 'FAN COIL', 'EXHAUST FAN', 'EXHAUST GRILL', 'PUMP',
-             'NOTES', 'PROJECT INFO', 'COVER', 'ABBREVIATION', 'PRE-TAB')
+             'UNIT HEATER', 'NOTES', 'PROJECT INFO', 'COVER', 'ABBREVIATION', 'PRE-TAB')
 
 
 def open_reference(data):
@@ -58,7 +58,7 @@ def inventory(wb):
     units = []
     for ws in wb:
         for row in ws:
-            label = next((c for c in row if str(c.value).strip().upper() in ('UNIT DESIGNATION', 'COIL DESIGNATION')), None)
+            label = next((c for c in row if str(c.value).strip().upper() in ('UNIT DESIGNATION', 'COIL DESIGNATION', 'UNIT ID')), None)
             if label:
                 for c in row[label.column:]:
                     if c.value and c.data_type != 'f' and re.fullmatch(r'(?:[A-Z]+[- ]\d+[A-Z]?|MAU)', str(c.value).strip(), re.I):
@@ -103,7 +103,7 @@ def reset_special_layout(ws):
     kind = family(ws)
     special = {'AIR MOVING EQUIPMENT', 'MAU', 'COIL DX GAS', 'SUPPLY DIFFUSERS',
                'DUCT TRAVERSE RECT', 'KITCHEN HOOD', 'EXHAUST FANS SMALL',
-               'PROJECT SUMMARY', 'INSTRUMENT', 'COVER'}
+               'PROJECT SUMMARY', 'INSTRUMENT', 'COVER', 'UNIT HEATER'}
     if kind not in special:
         return False
 
@@ -114,7 +114,17 @@ def reset_special_layout(ws):
                     continue
                 if c.data_type != 'f':c.value = None
 
-    if kind in ('AIR MOVING EQUIPMENT', 'MAU'):
+    if kind == 'UNIT HEATER':
+        starts = [c.row-3 for row in ws for c in row if str(c.value or '').strip().upper() == 'UNIT ID']
+        for off in starts:
+            electric = str(ws.cell(off+9,3).value or '').strip().upper() == 'ELECTRIC'
+            columns = (4,8,12) if electric else (4,6,8,10)
+            for col in columns:
+                for row in ws.iter_rows(min_row=off+10,max_row=off+(28 if electric else 29),
+                                        min_col=col,max_col=col+(2 if electric else 0)):
+                    for cell in row:blank(cell.coordinate)
+            for cell in ws[off+7][2:]:blank(cell.coordinate)
+    elif kind in ('AIR MOVING EQUIPMENT', 'MAU'):
         starts = [c.row-3 for row in ws for c in row
                   if str(c.value or '').strip().upper() == 'UNIT DESIGNATION']
         for off in starts:
