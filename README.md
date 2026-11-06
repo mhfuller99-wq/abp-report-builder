@@ -149,3 +149,32 @@ at a time, and are removed after the request, including failures. The combined
 and worksheet dimensions are checked before loading cell objects. Workbook
 cycles and the PDF cache are cleared between jobs. Request start/finish logs
 identify the endpoint and elapsed time without recording uploaded contents.
+
+
+## Packaged-unit and alternate drawing notation review
+
+The source scanner recognizes PAHU and MSAH equipment from labeled schedules,
+reads fan values by column headings, and supports explicit shared PAHU submittal
+tag lists. Outdoor MSHP equipment stays visible for review without automatically
+creating another indoor TAB form. EUH candidates retain their source evidence;
+there is currently no validated unit-heater master in the installed library, so
+they cannot be verified with an empty form selection.
+
+The DX/heat-pump/electric companion form has separate heat-pump and electric-strip
+temperature inputs. A per-unit companion-form choice prevents mixed systems
+from being copied to both gas and electric forms. Formula cells are never replaced
+with schedule capacities or inferred electrical data.
+
+Stacked ceiling-diffuser and keyed duct-grille callouts are unselected review
+candidates. Neck sizes come from the same document's legend when available.
+Missing legends, room assignments, duct connections, and drawing revisions require
+review. Multiple documents' outlets are never silently combined or superseded.
+The download status reports unresolved equipment and selected outlet counts.
+
+Synthetic regressions: `python -m unittest test_mechanical` and
+`node test_mechanical_ui.cjs`. The opt-in local integration probe is
+`python verify_private_wcu.py SOURCE_DIRECTORY OUTPUT_DIRECTORY`. It produces
+TEST ONLY evidence with a simulated review of six supported equipment units and
+one explicitly selected drawing revision. Keep its output outside this repository;
+it does not approve source revisions or make the report field-ready. Original
+customer PDFs and completed reports are never uploaded or committed.

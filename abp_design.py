@@ -133,9 +133,14 @@ def doas_fan_coil(record):
 def inferred_form(tag, record=None):
     tag=str(tag or '').upper()
     if re.match(r'^DOAS[- ]?\d',tag):return doas_fan_coil(record)
-    if re.match(r'^(AHU|RTU|OAU|MAU|AC)[- ]?\d',tag):return 'Air Moving Equipment.xlsx'
+    if re.match(r'^(AHU|PAHU|RTU|OAU|MAU|AC)[- ]?\d',tag):return 'Air Moving Equipment.xlsx'
+    if re.match(r'^EF[- ]?\d',tag) and record:
+        proposed=record.get('proposed') or {}
+        service=(record.get('text_proposed') or {}).get('service')
+        if service in ('CEILING','INLINE') and 0 < proposed.get('design_cfm',0) <= 200 and 0 < proposed.get('motor_hp',0) <= .1:
+            return 'Exhaust Fans _Sm._.xlsx'
     if re.match(r'^(EF|KEF|TEF|CEF|SEF|RLF)[- ]?\d',tag):return 'Exhaust Fans _Std._.xlsx'
-    if re.match(r'^(VRF|SSAU)[- ]?\d',tag):return 'Fan Coil Units DX.xlsx'
+    if re.match(r'^(VRF|SSAU|MSAH)[- ]?\d',tag):return 'Fan Coil Units DX.xlsx'
     if re.match(r'^KH[- ]?\d',tag):return 'Kitchen Hood.xlsx'
     return None
 

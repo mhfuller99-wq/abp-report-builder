@@ -9,15 +9,17 @@ copied onto an outlet. Fan RPM is never stored as motor RPM, and unit MCA is
 never stored as motor FLA.
 """
 import re
+from abp_mechanical import schedule_candidates, diffuser_legend, keyed_outlets, packaged_submittals
 
 LEAD = re.compile(
-    r'^(EF|VRF|DOAS|SSAU|SSCU|EUH|GUH|HVLS|PF|FS|EH)-\d+[A-Z]?\b', re.I)
+    r'^(EF|VRF|DOAS|SSAU|SSCU|EUH|GUH|HVLS|PF|FS|EH|PAHU|MSAH|MSHP)-\d+[A-Z]?\b', re.I)
 MAPPED = re.compile(r'^(?:EF|VRF|DOAS|SSAU)-\d+[A-Z]?$', re.I)
 VOLT = re.compile(r'\b(\d{2,3}(?:-\d{2,3})?)/(\d+)/(\d)\b')
 UNIT_TOTALS = {
     'design_cfm', 'osa_cfm', 'esp', 'total_sp', 'motor_hp', 'motor_fla', 'motor_volts',
     'cooling_edb', 'cooling_ewb', 'cooling_ldb', 'cooling_lwb',
     'heating_edb', 'heating_ldb', 'heating_cfm',
+    'electric_heating_edb', 'electric_heating_ldb',
     'heating_input_btu', 'heating_output_btu',
     'cooling_total_btu', 'cooling_sensible_btu',
 }
@@ -238,7 +240,8 @@ def wrapped_words(index, rows):
 
 def parse_page(words, page_number, name):
     reference = f'page {page_number}'
-    found = []
+    found = schedule_candidates(words, page_number, name)
+    scheduled = {item['tag'] for item in found}
     rows = segments(words)
     for index, (_y, words_in_row) in enumerate(rows):
         line = text_of(words_in_row)
@@ -262,7 +265,13 @@ def parse_page(words, page_number, name):
         if re.search(r'\bTHRU\b', line, re.I) and lead.group(1).upper() == 'FS':
             continue
         tag = lead.group(0).upper()
+        if tag in scheduled:
+            continue
         family = lead.group(1).upper()
+        # New packaged/split families require schedule or explicit submittal
+        # evidence. A plan tag touching a keyed note can read as PAHU-12.
+        if family in {'PAHU', 'MSAH', 'MSHP'}:
+            continue
         parser = PARSERS.get(family)
         item = parser(line, reference) if parser else None
         if item is None:
@@ -592,14 +601,17 @@ def parse_pdf(name, data):
     with pymupdf.open(stream=data, filetype='pdf') as doc:
         if doc.page_count > 300:
             raise ValueError('PDF has more than 300 pages')
+        legend = diffuser_legend(doc)
         for index, page in enumerate(doc):
             words = page.get_text('words') or []
             if len(text_of(words).strip()) < 40:
                 warnings.append(f'{name}: page {index + 1} has no readable text and may be a scanned sheet; manual takeoff required')
             found.extend(parse_page(words, index + 1, name))
             outlets.extend(parse_supply_outlets(words, index + 1, name))
+            outlets.extend(keyed_outlets(words, index + 1, name, legend))
         found.extend(parse_doas_submittal(doc, name))
         found.extend(parse_fan_submittal(doc, name))
+        found.extend(packaged_submittals(doc, name))
     for item in found:
         item.setdefault('source', name)
     return found, warnings, outlets

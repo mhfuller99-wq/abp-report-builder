@@ -4,11 +4,21 @@ import re
 NUMERIC_FIELDS = ('design_cfm','osa_cfm','osa_min_cfm','esp','total_sp','motor_hp','motor_volts','motor_fla','design_gpm',
                   'cooling_edb','cooling_ewb','cooling_ldb','cooling_lwb',
                   'heating_cfm','heating_edb','heating_ldb','heating_input_btu','heating_output_btu',
-                  'cooling_total_btu','cooling_sensible_btu')
+                  'cooling_total_btu','cooling_sensible_btu','electric_heating_edb','electric_heating_ldb')
 TEXT_FIELDS = ('manufacturer','model','unit_type','service','equipment_location','area_served')
 COIL_FIELDS = {'design_cfm':8,'cooling_edb':14,'cooling_ewb':15,'cooling_ldb':16,
                'cooling_lwb':17,'heating_cfm':23,'heating_edb':25,'heating_ldb':26,
                'cooling_total_btu':19,'cooling_sensible_btu':20,'heating_output_btu':28}
+COIL_FORMS = ('Coil DX GAS HT.xlsx', 'COIL DX HP ELE.xlsx')
+
+
+def support_form(record, selected):
+    if 'coil_template' in record:
+        return record['coil_template'] if record['coil_template'] in selected else None
+    choices=[name for name in COIL_FORMS if name in selected]
+    # Preserve older reviews that selected one companion form. Mixed types
+    # require per-unit choices, rather than copying every unit to both forms.
+    return choices[0] if len(choices)==1 else None
 
 def canonical_tag(value):
     return re.sub(r'\s*-\s*|\s+', '-', value.strip().upper())
@@ -66,15 +76,32 @@ def populate_identity(ws, record, safe):
         if record.get(field) and ws[address].data_type!='f':ws[address]=safe(record[field])
 
 def populate_support(wb, records, selected, lookup, add, reset, sheet_name):
-    verified=[r for r in records if r.get('status')=='VERIFIED' and r.get('template','Air Moving Equipment.xlsx')=='Air Moving Equipment.xlsx']
+    from abp_design import unit_form
+    verified=[r for r in records if r.get('status')=='VERIFIED' and unit_form(r)=='Air Moving Equipment.xlsx']
     coil='Coil DX GAS HT.xlsx'
-    if coil in selected and verified:
-        for start in range(0,len(verified),3):
+    gas_units=[r for r in verified if support_form(r,selected)==coil]
+    if coil in selected and gas_units:
+        for start in range(0,len(gas_units),3):
             before=set(wb.sheetnames);add(wb,lookup[coil]);ws=wb[next(n for n in wb.sheetnames if n not in before)];reset(ws)
             ws.title=sheet_name(wb,'COIL DX GAS '+str(start//3+1))
-            for col,rec in zip(('D','F','H'),verified[start:start+3]):
+            for col,rec in zip(('D','F','H'),gas_units[start:start+3]):
                 ws[f'{col}4']=rec['tag']
                 for field,row in COIL_FIELDS.items():
+                    if rec.get(field) not in (None,'') and ws[f'{col}{row}'].data_type!='f':ws[f'{col}{row}']=float(rec[field])
+    electric='COIL DX HP ELE.xlsx'
+    electric_units=[r for r in verified if support_form(r,selected)==electric]
+    if electric in selected and electric_units:
+        fields={'design_cfm':8,'cooling_edb':12,'cooling_ewb':13,'cooling_ldb':14,'cooling_lwb':15,
+                'heating_cfm':20,'heating_edb':21,'heating_ldb':22,
+                'electric_heating_edb':26,'electric_heating_ldb':27}
+        # Explicitly separate heat-pump and electric-strip temperatures. The
+        # electrical KW/BTU calculation cells remain the original formulas.
+        for start in range(0,len(electric_units),3):
+            before=set(wb.sheetnames);add(wb,lookup[electric]);ws=wb[next(n for n in wb.sheetnames if n not in before)];reset(ws)
+            ws.title=sheet_name(wb,'COIL DX HP ELE '+str(start//3+1))
+            for col,rec in zip(('D','H','L'),electric_units[start:start+3]):
+                ws[f'{col}4']=rec['tag']
+                for field,row in fields.items():
                     if rec.get(field) not in (None,'') and ws[f'{col}{row}'].data_type!='f':ws[f'{col}{row}']=float(rec[field])
     traverse='Duct Traverse Rect..xlsx'
     if traverse in selected and verified:
