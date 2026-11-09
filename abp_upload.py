@@ -4,17 +4,23 @@ from email.parser import BytesParser
 from email.policy import default
 from tempfile import TemporaryFile
 import re
+import os
+import time
 
 CHUNK = 64 * 1024
 
 class Reader:
     def __init__(self, stream, length):
         self.stream, self.remaining, self.buffer = stream, length, b''
+        self.deadline=time.monotonic()+60
 
     def more(self):
         if not self.remaining:
             raise ValueError('Incomplete multipart upload')
-        chunk = self.stream.read(min(CHUNK, self.remaining))
+        if time.monotonic()>self.deadline:raise ValueError('Upload time limit reached')
+        read=getattr(self.stream,'read1',self.stream.read)
+        chunk = read(min(CHUNK, self.remaining))
+        if time.monotonic()>self.deadline:raise ValueError('Upload time limit reached')
         if not chunk:
             raise ValueError('Upload ended before its declared length')
         self.remaining -= len(chunk)
@@ -55,7 +61,7 @@ def multipart(stream, length, content_type, limit):
             name=headers.get_param('name',header='content-disposition')
             if not name:raise ValueError('Upload field is missing its name')
             if len(parts)>=100:raise ValueError('Upload at most 100 parts at a time')
-            file=TemporaryFile(); parts.append((name,headers.get_filename(),file))
+            file=TemporaryFile(dir=os.environ.get("ABP_SCAN_TMPDIR")); parts.append((name,headers.get_filename(),file))
             ending=reader.until([b'\r\n'+marker+b'\r\n',b'\r\n'+marker+b'--'],file.write,limit)
             file.seek(0)
             if ending.endswith(b'--'):break
