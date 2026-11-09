@@ -1,6 +1,8 @@
 """Bounded, review-only PDF recognition. Never feed this output to resolve_proposed.
 No writes to source PDFs, workbooks, repositories, or external services.
 """
+import os
+import sys
 import csv
 import io
 import math
@@ -39,7 +41,7 @@ def tesseract_words(page, pixels, timeout):
         source = Path(directory) / 'page.png'
         output = Path(directory) / 'recognized'
         pix.save(str(source))
-        subprocess.run(['tesseract', str(source), str(output), '-l', 'eng', '--psm', '6', 'tsv'],
+        subprocess.run([sys.executable, str(Path(__file__).with_name('abp_limits.py')), '--exec-with-parent', str(os.getpid()), 'tesseract', str(source), str(output), '-l', 'eng', '--psm', '6', 'tsv'],
                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                        timeout=timeout, check=True)
         tsv = output.with_suffix('.tsv')
@@ -222,7 +224,7 @@ import threading
 _OCR_SLOT = threading.BoundedSemaphore(1)
 
 
-def extract(data, source='source.pdf', timeout=65):
+def extract(data, source='source.pdf', timeout=65, *, path=None):
     """Run all OCR parsing/rendering in a memory/CPU/wall-clock bounded process.
 
     Return a compact review-only queue, never native/OCR words to normal parsers.
@@ -232,20 +234,27 @@ def extract(data, source='source.pdf', timeout=65):
     import os
     import signal
     import sys
-    if len(data) > Budget().max_pdf_bytes:
+    if (Path(path).stat().st_size if path is not None else len(data)) > Budget().max_pdf_bytes:
         return {'review_candidates': [], 'warnings': [source + ': OCR input exceeds 40 MB; manual image review required.']}
     if os.name != 'posix' or not _OCR_SLOT.acquire(blocking=False):
         return {'review_candidates': [], 'warnings': [source + ': OCR unavailable or busy; rescan later or review images manually.']}
     try:
-        with tempfile.TemporaryDirectory(prefix='abp-ocr-job-') as directory:
+        with tempfile.TemporaryDirectory(prefix='abp-ocr-job-', dir=os.environ.get('ABP_SCAN_TMPDIR')) as directory:
             root = Path(directory)
-            (root / 'source.pdf').write_bytes(data)
+            from abp_limits import mark_staging
+            mark_staging(root)
+            if path is not None:
+                import shutil
+                shutil.copyfile(path, root / 'source.pdf')
+            else:
+                (root / 'source.pdf').write_bytes(data)
             child = subprocess.Popen([sys.executable, str(Path(__file__).resolve()), '--worker', str(root)],
                                      stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                                      start_new_session=True,
                                      # Keep page rasters/TSV files inside the parent's cleanup
                                      # scope even if the worker is terminated with SIGKILL.
-                                     env={**os.environ, 'OMP_THREAD_LIMIT': '1',
+                                     env={'PATH':os.defpath, 'HOME':directory, 'LANG':'C.UTF-8',
+                                          'ABP_PARENT_PID':str(os.getpid()), 'OMP_THREAD_LIMIT': '1',
                                           'TMPDIR': directory, 'TEMP': directory, 'TMP': directory})
             try:
                 child.wait(timeout=timeout)
@@ -274,6 +283,9 @@ def extract(data, source='source.pdf', timeout=65):
 def _worker(directory):
     import json
     import resource
+    from abp_limits import bind_to_parent
+    bind_to_parent(os.environ['ABP_PARENT_PID'])
+    resource.setrlimit(resource.RLIMIT_CORE,(0,0))
     resource.setrlimit(resource.RLIMIT_AS, (256 * 1024**2, 256 * 1024**2))
     resource.setrlimit(resource.RLIMIT_CPU, (60, 60))
     resource.setrlimit(resource.RLIMIT_FSIZE, (48 * 1024**2, 48 * 1024**2))
