@@ -10,6 +10,8 @@ COPY abp_*.py .
 COPY abp_ui.js .
 COPY 03_Workbooks_and_Master_Templates/ 03_Workbooks_and_Master_Templates/
 COPY 04_Company_Branding/ 04_Company_Branding/
+RUN mkdir -p /var/tmp/abp && chown abp /var/tmp/abp && chmod 700 /var/tmp/abp
+ENV ABP_SCAN_TMPDIR=/var/tmp/abp
 USER abp
 EXPOSE 10000
 CMD ["sh", "-c", "exec python abp_server.py ${PORT:-10000} --lan"]
