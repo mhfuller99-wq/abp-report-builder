@@ -627,12 +627,12 @@ def parse_supply_outlets(words, page_number, name):
     return outlets
 
 
-def parse_pdf(name, data):
+def parse_pdf(name, data=None, *, path=None):
     import pymupdf
     warnings = []
     found = []
     outlets = []
-    with pymupdf.open(stream=data, filetype='pdf') as doc:
+    with (pymupdf.open(filename=path) if path is not None else pymupdf.open(stream=data, filetype='pdf')) as doc:
         if doc.page_count > 300:
             raise ValueError('PDF has more than 300 pages')
         legend = diffuser_legend(doc)
