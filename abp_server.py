@@ -15,6 +15,7 @@ from abp_grouped import group_template_sheets
 from abp_design import extract_design_rows, UNIT_FORMS, TEXT_CELLS, HEATER_FORMS, unit_form, inferred_form
 from abp_job import NUMERIC_FIELDS, TEXT_FIELDS, COIL_FORMS, canonical_tag, postal_match, performance_candidates, populate_identity, populate_support, prepare_documentation
 from abp_schedule import parse_pdf, annotate
+from abp_scan import scan as bounded_pdf_scan, ScanIncomplete
 
 ROOT=Path(__file__).resolve().parent
 TEMPLATES=ROOT/'03_Workbooks_and_Master_Templates'
@@ -24,6 +25,9 @@ TAGS=re.compile(r'\b(?:(?:BCU|BC|CH|CHP|CHWP|HWP|CWP|PCP|SCP|PHP|SHP|P|B|F|AH|AC
 MAX_RECORDS=500
 MAX_UPLOAD=200_000_000
 WORK_LOCK=threading.Lock()
+if os.environ.get('ABP_SCAN_TMPDIR'):
+    from abp_limits import cleanup_orphan_staging
+    cleanup_orphan_staging(os.environ['ABP_SCAN_TMPDIR'])
 # Title-block scraps and image-only drawings fall below this. A real schedule does not.
 SPARSE_TEXT_LIMIT=500
 OFFICE_FRONT=('Project Information.xlsx','Notes.xlsx')
@@ -63,40 +67,37 @@ def read_sources(blobs):
     warnings=[];records={};sources=[];total_chars=0;preview=[];signals=set();diffusers=[];image_review=[]
     import time
     ocr_deadline=time.monotonic()+65
+    scan_deadline=time.monotonic()+100
     total_size=0
     for name,source in blobs:
-        data=source.read(MAX_UPLOAD+1) if hasattr(source,'read') else source
-        total_size+=len(data)
-        if total_size>MAX_UPLOAD:raise ValueError('Total source size exceeds 200 MB')
         name=Path(name).name[:160];ext=Path(name).suffix.lower();chunks=[];structured=[]
+        data=None;source_digest=None
+        if ext!='.pdf':
+            data=source.read(MAX_UPLOAD+1) if hasattr(source,'read') else source
+            total_size+=len(data)
+            if total_size>MAX_UPLOAD:raise ValueError('Total source size exceeds 200 MB')
         try:
             if ext=='.pdf':
-                from abp_ocr import extract as extract_image_review
-                remaining=ocr_deadline-time.monotonic()
-                if remaining>0:
-                    image_result=extract_image_review(data,name,timeout=remaining)
-                    if len(image_review)+len(image_result['review_candidates'])<=500:
-                        image_review.extend(image_result['review_candidates'])
-                    else:warnings.append(name+': image review queue limit reached; this file image candidates were not added; split the source set')
-                    warnings.extend(image_result['warnings'])
-                else:warnings.append(name+': image-reading time budget exhausted; review images manually')
-                # Schedule rows come from visual lines. Flattened page text joins a
-                # grille mark to a distant dimension, so it is not searched for tags.
-                parsed,pdf_warnings,outlets=parse_pdf(name,data)
-                warnings.extend(pdf_warnings)
-                diffusers.extend(outlets)
-                if outlets:signals.add('supply_outlets')
-                import pymupdf
-                with pymupdf.open(stream=data,filetype='pdf') as doc:
-                    if doc.page_count>300:raise ValueError('PDF has more than 300 pages')
-                    for i,page in enumerate(doc):
-                        words=page.get_text('words') or []
-                        txt=' '.join(word[4] for word in sorted(words,key=lambda item:(item[1],item[0])))
-                        chunks.append((f'page {i+1}',txt))
-                        for candidate in performance_candidates(txt,TAGS):
-                            structured.append({**candidate,'reference':f'page {i+1}','basis':'TAGGED_PERFORMANCE'})
-                for item in parsed:
-                    structured.append(item)
+                stream=source if hasattr(source,'read') else io.BytesIO(source)
+                if time.monotonic()>=scan_deadline:raise ScanIncomplete('Scan request time limit reached; split the source set. No partial scan accepted.')
+                native=bounded_pdf_scan(name,stream,timeout=min(30,scan_deadline-time.monotonic()),ocr_timeout=max(0,ocr_deadline-time.monotonic()),input_limit=MAX_UPLOAD-total_size)
+                if native['status']!='completed_native_stage':
+                    raise ScanIncomplete(name+': '+native['warnings'][0])
+                total_size+=native['source']['bytes']
+                source_digest=native['source']['sha256']
+                image_result=native['ocr']
+                if len(image_review)+len(image_result['review_candidates'])<=500:
+                    image_review.extend(image_result['review_candidates'])
+                else:warnings.append(name+': image review queue limit reached; this file image candidates were not added; split the source set')
+                warnings.extend(image_result['warnings'])
+                warnings.extend(native['warnings'])
+                diffusers.extend(native['outlets'])
+                if native['outlets']:signals.add('supply_outlets')
+                chunks=native['chunks']
+                for place,txt in chunks:
+                    for candidate in performance_candidates(txt,TAGS):
+                        structured.append({**candidate,'reference':place,'basis':'TAGGED_PERFORMANCE'})
+                structured.extend(native['candidates'])
                 if not any(text.strip() for _,text in chunks):warnings.append(name+': image-only PDF; manual takeoff required')
             elif ext=='.csv':
                 decoded=data.decode('utf-8-sig')
@@ -123,7 +124,7 @@ def read_sources(blobs):
                     structured.extend(extract_design_rows(source_rows,ws.title,TAGS))
                 wb.close()
             else:warnings.append(name+': unsupported source type');continue
-            sources.append({'name':name,'sections':len(chunks),'sha256':hashlib.sha256(data).hexdigest()})
+            sources.append({'name':name,'sections':len(chunks),'sha256':source_digest or hashlib.sha256(data).hexdigest()})
             for place,chunk in chunks:
                 total_chars+=len(chunk)
                 # Heading evidence is only a recommendation, never verified TAB data.
@@ -155,6 +156,7 @@ def read_sources(blobs):
                     records[tag]={'tag':tag,**evidence,'occurrences':[evidence],'design_cfm':None,'osa_cfm':None,'esp':None,'motor_hp':None,'design_gpm':None,'status':'UNVERIFIED','candidates':[]}
                 if len(records[tag]['candidates'])<30:records[tag]['candidates'].append({**candidate,'source':name})
             if len(records)>MAX_RECORDS:warnings.append('More than 500 unique tags found; only first 500 will be shown')
+        except ScanIncomplete:raise
         except Exception as e:warnings.append(name+': could not parse ('+str(e)[:120]+')')
         finally:
             del data
@@ -1093,6 +1095,7 @@ class Handler(BaseHTTPRequestHandler):
             self.close_connection=True
             self.respond(b'{"error":"Another document job is running. Please wait for it to finish and try again."}',code=503,extra_headers=[('Retry-After','10'),('Connection','close')]);return
         started=time.monotonic()
+        self.connection.settimeout(30)
         print(f'Document request started: {path}',flush=True)
         try:
             n=int(self.headers.get('Content-Length','0'))
@@ -1124,7 +1127,7 @@ class Handler(BaseHTTPRequestHandler):
             self.respond(b'Not found','text/plain',404)
         except Exception as e:
             self.close_connection=True
-            self.respond(json.dumps({'error':str(e)}).encode(),code=400)
+            self.respond(json.dumps({'error':str(e), **({'scan_status':'incomplete','complete_takeoff':False} if isinstance(e,ScanIncomplete) else {})}).encode(),code=400)
         finally:
             # Workbook objects contain cycles; collect them before admitting the
             # next job. GET/health requests stay available during document work.
