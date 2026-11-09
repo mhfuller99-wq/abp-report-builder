@@ -176,7 +176,11 @@ def inferred_form(tag, record=None):
         if service == 'CEILING' or (service == 'INLINE' and 0 < proposed.get('design_cfm',0) <= 200):
             return 'Exhaust Fans _Sm._.xlsx'
     if re.match(r'^(EF|KEF|TEF|CEF|SEF|RLF)[- ]?\d',tag):return 'Exhaust Fans _Std._.xlsx'
-    if re.match(r'^(VRF|SSAU|MSAH|IU|IDU|DSS)[- ]?\d',tag):return 'Fan Coil Units DX.xlsx'
+    if re.match(r'^(BCU|FCU)[- ]?\d',tag):
+        heat=((record or {}).get('text_proposed') or {}).get('heating_type')
+        if heat=='HOT WATER':return 'Fan Coil Units WTR.xlsx'
+        if tag.startswith('BCU-'):return None
+    if re.match(r'^(VRF|SSAU|MSAH|IU|IDU|DSS|FCU)[- ]?\d',tag):return 'Fan Coil Units DX.xlsx'
     if re.match(r'^KH[- ]?\d',tag):return 'Kitchen Hood.xlsx'
     return None
 

@@ -10,7 +10,7 @@ TEXT_FIELDS = ('manufacturer','model','unit_type','service','equipment_location'
 COIL_FIELDS = {'design_cfm':8,'cooling_edb':14,'cooling_ewb':15,'cooling_ldb':16,
                'cooling_lwb':17,'heating_cfm':23,'heating_edb':25,'heating_ldb':26,
                'cooling_total_btu':19,'cooling_sensible_btu':20,'heating_output_btu':28}
-COIL_FORMS = ('Coil DX GAS HT.xlsx', 'COIL DX HP ELE.xlsx')
+COIL_FORMS = ('Coil DX GAS HT.xlsx', 'COIL DX HP ELE.xlsx', 'Coil WTR CLG WTR HT.xlsx')
 
 
 def support_form(record, selected):
@@ -104,6 +104,16 @@ def populate_support(wb, records, selected, lookup, add, reset, sheet_name):
                 ws[f'{col}4']=rec['tag']
                 for field,row in fields.items():
                     if rec.get(field) not in (None,'') and ws[f'{col}{row}'].data_type!='f':ws[f'{col}{row}']=float(rec[field])
+    water='Coil WTR CLG WTR HT.xlsx'
+    for rec in verified:
+        if support_form(rec,selected)!=water:continue
+        before=set(wb.sheetnames);add(wb,lookup[water]);ws=wb[next(n for n in wb.sheetnames if n not in before)];reset(ws)
+        ws.title=sheet_name(wb,'COIL WATER '+rec['tag'])
+        ws['D3']=rec['tag']
+        fields={'design_cfm':'D6','cooling_edb':'F11','cooling_ewb':'F12','cooling_ldb':'F13','cooling_lwb':'F14',
+                'heating_edb':'H11','heating_ldb':'H13','heating_ewt':'H17','heating_lwt':'H18'}
+        for field,address in fields.items():
+            if rec.get(field) not in (None,'') and ws[address].data_type!='f':ws[address]=float(rec[field])
     traverse='Duct Traverse Rect..xlsx'
     if traverse in selected and verified:
         for rec in verified:

@@ -9,10 +9,10 @@ copied onto an outlet. Fan RPM is never stored as motor RPM, and unit MCA is
 never stored as motor FLA.
 """
 import re
-from abp_mechanical import schedule_candidates, diffuser_legend, keyed_outlets, packaged_submittals, TAG, expand_marks, page_words, selection_airflows
+from abp_mechanical import schedule_candidates, diffuser_legend, keyed_outlets, packaged_submittals, TAG, expand_marks, page_words, selection_airflows, readable_text
 
 LEAD = re.compile(
-    r'^(' + TAG.split('(?:', 1)[1].split(')', 1)[0] + r')-\d+(?:\.\d+)*[A-Z]?\b', re.I)
+    r'^(' + TAG.split('(?:', 1)[1].split(')', 1)[0] + r')-\d+(?:\.\d+)*[A-Z]?(?:-\d+(?:\.\d+)*[A-Z]?)?\b', re.I)
 MAPPED = re.compile(r'^(?:EF|VRF|DOAS|SSAU)-\d+[A-Z]?$', re.I)
 VOLT = re.compile(r'\b(\d{2,3}(?:-\d{2,3})?)/(\d+)/(\d)\b')
 UNIT_TOTALS = {
@@ -243,6 +243,14 @@ def parse_page(words, page_number, name):
     reference = f'page {page_number}'
     found = schedule_candidates(words, page_number, name)
     scheduled = {item['tag'] for item in found}
+    # A complete printed plan mark remains a review item even when it is not
+    # the first word of a visual row. It supplies no inferred design values.
+    for word in words:
+        tag=word[4].upper()
+        if re.fullmatch(r'(?:RTU|AHU|KEF|BCU)-\d+(?:[.-]\d+)*[A-Z]?',tag) and tag not in scheduled:
+            found.append({'tag':tag,'values':{},'text':{},'source':name,'reference':reference,
+                          'basis':'PLAN_TAG','evidence':'Printed equipment mark only; confirm scheduled scope, revision and design data'})
+            scheduled.add(tag)
     rows = segments(words)
     for index, (_y, words_in_row) in enumerate(rows):
         line = text_of(words_in_row)
@@ -295,7 +303,7 @@ def _page_segments(page):
 def parse_doas_submittal(doc, name):
     found = []
     for page in doc:
-        text = page.get_text(sort=True)
+        text = readable_text(page)
         marks = set(m.upper() for m in re.findall(r'\bDOAS-\d+(?:\.\d+)*[A-Z]?\b', text, re.I))
         marks.update('DOAS-'+n for n in re.findall(r'\bDOAS\s*\(#(\d+)\)', text, re.I))
         if len(marks) != 1:
@@ -630,6 +638,13 @@ def parse_pdf(name, data):
         legend = diffuser_legend(doc)
         for index, page in enumerate(doc):
             words = page_words(page)
+            if len(words)<100 and any('PLAN' in w[4].upper() for w in words):
+                warnings.append(f'{name}: page {index + 1} is a plan with little readable text; graphic or outlined labels may be missing. Compare the visible drawing manually before accepting coverage')
+            # A readable title block does not make an embedded raster schedule
+            # readable. Report substantial raster content without claiming OCR.
+            if any(pymupdf.Rect(info['bbox']).get_area() > page.rect.get_area()*.25
+                   for info in page.get_image_info()):
+                warnings.append(f'{name}: page {index + 1} contains substantial raster content; text extraction may omit schedules or callouts even when its title block is readable')
             if len(text_of(words).strip()) < 40:
                 warnings.append(f'{name}: page {index + 1} has no readable text and may be a scanned sheet; manual takeoff required')
             found.extend(parse_page(words, index + 1, name))
@@ -637,7 +652,7 @@ def parse_pdf(name, data):
             outlets.extend(keyed_outlets(words, index + 1, name, legend))
         found.extend(parse_doas_submittal(doc, name))
         for page in doc:
-            page_text = page.get_text(sort=True)
+            page_text = readable_text(page)
             if 'DOAS' in page_text.upper() and (re.search(r'Supply Air:\s*[\d,]+', page_text, re.I)
                                                or selection_airflows(page_words(page))):
                 if not any(is_submittal(item.get('basis')) and item.get('reference') == f'page {page.number + 1}'

@@ -191,13 +191,13 @@ class WorksheetAutoSelectTests(unittest.TestCase):
 
     def test_readable_equipment_selects_only_needed_sheets(self):
         rtu=self.names(['RTU-1','DOAS-2'])
-        for name in ('Project Information.xlsx','Notes.xlsx','Air Moving Equipment.xlsx','Coil DX GAS HT.xlsx','Duct Traverse Rect..xlsx','Duct Traverse RND.xlsx'):
+        for name in ('Project Information.xlsx','Notes.xlsx','Air Moving Equipment.xlsx','Duct Traverse Rect..xlsx','Duct Traverse RND.xlsx'):
             self.assertIn(name, rtu)
         self.assertLess(rtu.index('Duct Traverse Rect..xlsx'), rtu.index('Duct Traverse RND.xlsx'))
         for banned in ('Cover - Drew.xlsx','Abbreviations.xlsx','PRE-TAB Checklist.xlsx','Project Summary.xlsx','Boiler.xlsx'):
             self.assertNotIn(banned, rtu)
-        coil=next(item for item in suggested_templates(['RTU-1'])['recommended'] if item['name']=='Coil DX GAS HT.xlsx')
-        self.assertTrue(coil['review'])
+        # Equipment tags alone do not establish a gas-heating coil.
+        self.assertNotIn('Coil DX GAS HT.xlsx', self.names(['RTU-1']))
         confirmed=next(item for item in suggested_templates(['RTU-1'], ['gas_heat'])['recommended'] if item['name']=='Coil DX GAS HT.xlsx')
         self.assertFalse(confirmed['review'])
         ahu=self.names(['AHU-1'])
@@ -270,9 +270,10 @@ class WorksheetAutoSelectTests(unittest.TestCase):
         self.assertTrue(tiny['sparse'])
         self.assertEqual(tiny['tags'], ['FCU-1','EF-2','RTU-3'])
         picked=self.names(tiny['tags'], tiny['signals'], sparse=tiny['sparse'])
-        for name in ('Project Information.xlsx','Notes.xlsx','Air Moving Equipment.xlsx','Fan Coil Units DX.xlsx','Exhaust Fans _Std._.xlsx','Coil DX GAS HT.xlsx','Duct Traverse Rect..xlsx','Duct Traverse RND.xlsx'):
+        for name in ('Project Information.xlsx','Notes.xlsx','Air Moving Equipment.xlsx','Fan Coil Units DX.xlsx','Exhaust Fans _Std._.xlsx','Duct Traverse Rect..xlsx','Duct Traverse RND.xlsx'):
             self.assertIn(name, picked)
         self.assertNotIn('Cover - Drew.xlsx', picked)
+        self.assertNotIn('Coil DX GAS HT.xlsx', picked)
         rich='\n'.join(['Tag,Design CFM,Notes']+[f'EF-{i},{100+i},EXHAUST FAN SCHEDULE area served' for i in range(1,40)]).encode()
         schedule=read_sources([('exhaust.csv', rich)])
         self.assertFalse(schedule['sparse'])
@@ -289,7 +290,7 @@ class WorksheetAutoSelectTests(unittest.TestCase):
         wb=load_workbook(io.BytesIO(build({'project':'Office order','templates':selected,'records':[
             {'tag':'RTU-1','status':'UNVERIFIED','candidates':[{'values':{'design_cfm':1},'source':'x','reference':'y','evidence':'z'}]}
         ]})))
-        self.assertEqual(wb.sheetnames, ['PROJECT INFO','NOTES','AIR MOVING EQUIPMENT','COIL DX GAS HT','EXHAUST FAN','EXHAUST FANS SMALL','FAN COIL UNITS DX','BOILER','DUCT TRAVERSE RECT.','DUCT TRAVERSE RND'])
+        self.assertEqual(wb.sheetnames, ['PROJECT INFO','NOTES','AIR MOVING EQUIPMENT','EXHAUST FAN','EXHAUST FANS SMALL','FAN COIL UNITS DX','BOILER','DUCT TRAVERSE RECT.','DUCT TRAVERSE RND'])
         banned=('ABP BUILD INFO','TAKEOFF REVIEW','SOURCE EVIDENCE','AIRFLOW CHECK','EXTRACTION CANDIDATES','ABBREVIATIONS','PRE-TAB CHECKLIST','PROJECT SUMMARY','INSTRUMENT','Cover ')
         for title in wb.sheetnames:
             self.assertNotIn(title.strip().upper(), {item.strip().upper() for item in banned})

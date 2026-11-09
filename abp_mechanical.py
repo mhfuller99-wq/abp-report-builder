@@ -9,15 +9,23 @@ import re
 def page_words(page):
     """Use displayed page coordinates; PDF text coordinates ignore page rotation."""
     words = page.get_text('words') or []
+    # Large drawing sets otherwise retain MuPDF rendering resources between
+    # repeated text passes. Returned word tuples do not depend on this cache.
+    import pymupdf
+    pymupdf.TOOLS.store_shrink(100)
     if not getattr(page, 'rotation', 0):
         return words
-    import pymupdf
     matrix = page.rotation_matrix
     return [(*tuple(pymupdf.Rect(w[:4]) * matrix), *w[4:]) for w in words]
 
 
 def center(word):
     return (word[0] + word[2]) / 2
+
+
+def readable_text(page):
+    """Bound text size by words, avoiding layout-padding on rotated drawings."""
+    return '\n'.join(' '.join(w[4] for w in row) for row in rows(page_words(page)))
 
 
 def rows(words, tolerance=2.6):
@@ -45,7 +53,8 @@ def phrases(words, pattern):
             and other[0] <= box[0] and other[2] >= box[2] for other in found)]
 
 
-TAG = r'(?:PAHU|MSAH|MSHP|EUH|GUH|CUH|UH|EF|SF|RF|FS|PF|VRF|IU|IDU|DSS|DOAS|SSAU|AHU|RTU|MAU|OAU|FCU|SSCU|HVLS|EH)-\d+(?:\.\d+)*[A-Z]?'
+TAG = r'(?:PAHU|MSAH|MSHP|EUH|GUH|CUH|UH|KEF|EF|SF|RF|FS|PF|VRF|IU|IDU|DSS|DOAS|SSAU|AHU|RTU|MAU|OAU|FCU|SSCU|HVLS|EH|BCU)-\d+(?:\.\d+)*[A-Z]?(?:-\d+(?:\.\d+)*[A-Z]?)?'
+MARK_HEADERS = {'MARK', 'TAG', 'ID', 'UNIT MARK', 'UNIT TAG'}
 
 
 def expand_marks(value):
@@ -61,7 +70,7 @@ def expand_marks(value):
             return []
         if not part.startswith(prefix+'-'):
             part = prefix+'-'+part
-        if re.fullmatch(TAG, part):
+        if re.fullmatch(TAG, part) and (prefix == 'BCU' or part.count('-') == 1):
             if part.split('-',1)[0] != prefix:
                 return []
             result.append(part)
@@ -112,7 +121,7 @@ def schedule_candidates(words, page_number, name):
     for word in list(words):
         if not re.fullmatch(TAG.split(')-', 1)[0] + ')', word[4], re.I):
             continue
-        marks = [w for w in words if w[4].upper() in {'MARK','TAG'}
+        marks = [w for w in words if w[4].upper() in MARK_HEADERS
                  and 0 < word[1]-w[1] < 600 and abs(center(w)-center(word)) < 20]
         numbers = [w for w in words if re.fullmatch(r'\d+(?:\.\d+)*[A-Z]?',w[4])
                    and 5 < w[1]-word[1] < 20 and abs(center(w)-center(word)) < 4]
@@ -139,18 +148,20 @@ def schedule_candidates(words, page_number, name):
                 break
         if not tags:
             continue
-        marks = [w for w in words if w[4].upper() in {'MARK','TAG','UNIT MARK','UNIT TAG'}
+        marks = [w for w in words if w[4].upper() in MARK_HEADERS
                  and 0 < tagword[1]-w[1] < 600 and abs(center(w)-center(tagword)) < 30]
         if not marks:
             continue
         mark = max(marks, key=lambda w: w[1])
         first_row = min((w[1] for w in words if re.fullmatch(TAG,w[4],re.I)
                          and w[1] > mark[1] and abs(center(w)-center(mark)) < 30), default=tagword[1])
-        right = min((w[0] - 12 for w in words if w[4].upper() in {'MARK','TAG','UNIT MARK','UNIT TAG'}
+        right = min((w[0] - 12 for w in words if w[4].upper() in MARK_HEADERS
                      and abs(w[1] - mark[1]) < 5 and w[0] > mark[2]), default=100000)
         header = [w for w in words if mark[0] - 20 <= w[0] < right
                   and mark[1] - 65 < w[1] < first_row - 3]
-        if any(w[4].upper() in {'ACTUAL','MEASURED','INITIAL','FINAL'} for w in header):
+        if any(w[4].upper() in {'ACTUAL','MEASURED','INITIAL','FINAL'}
+               and not (w[4].lower()=='actual' and any(u[4].lower()=='paper' and 0<u[0]-w[2]<8 and abs(u[1]-w[1])<3 for u in header))
+               for w in header):
             continue
         row = [w for w in words if mark[0] - 20 <= w[0] < right and abs(w[1] - tagword[1]) < 3]
         family = tags[0].split('-')[0]
@@ -232,6 +243,47 @@ def schedule_candidates(words, page_number, name):
         take(r'MOTOR VOLTS|VOLTAGE \(V\)', 'motor_volts')
         take(r'FAN RPM', 'fan_rpm')
         take(r'MCA', 'unit_mca')
+        # Stacked headers are common in CAD schedules. Bind each numeric value
+        # to its own labeled column; never use a fixed numeric field order.
+        numeric = [w for w in row if re.fullmatch(r'\d[\d,]*(?:\.\d+)?', w[4])]
+        def below(anchor, field):
+            choices = sorted(numeric, key=lambda w: abs(center(w)-center(anchor)))
+            if choices and abs(center(choices[0])-center(anchor)) < 18:
+                if len(choices) == 1 or abs(center(choices[1])-center(anchor)) > abs(center(choices[0])-center(anchor))+5:
+                    values.setdefault(field, float(choices[0][4].replace(',', '')))
+        for anchor in phrases(header, r'CFM|AIRFLOW|ESP|E\.S\.P\.|HP'):
+            context = ' '.join(w[4].upper() for w in sorted(header,key=lambda w:(w[1],w[0]))
+                               if abs(center(w)-center(anchor)) < 30 and 0 <= anchor[1]-w[1] < 38)
+            label = next((w[4].upper() for w in header if tuple(w[:4]) == anchor), '')
+            if label in {'ESP','E.S.P.'}:below(anchor,'esp')
+            elif label == 'HP' and 'MOTOR' in context:below(anchor,'motor_hp')
+            elif label in {'CFM','AIRFLOW'}:
+                if any(x in context for x in ('OUTDOOR','OUTSIDE','OA ')):below(anchor,'osa_cfm')
+                elif 'SUPPLY' in context or (label == 'AIRFLOW' and family == 'BCU'):below(anchor,'design_cfm')
+        for anchor in phrases(header, r'EXTERNAL'):
+            nearby = ' '.join(w[4].upper() for w in header if abs(center(w)-center(anchor)) < 22 and 0 < w[1]-anchor[1] < 40)
+            if 'STATIC' in nearby and 'PRESSURE' in nearby:below(anchor,'esp')
+        if phrases(header,r'OCCUPIED') and phrases(header,r'UNOCCUPIED'):
+            for label,field in [(r'TOTAL AIRFLOW','design_cfm'),(r'OUTSIDE AIR','osa_cfm')]:
+                anchors=phrases(header,label)
+                # Exclude a larger schedule title above the actual column band.
+                if anchors:
+                    lowest=max(a[1] for a in anchors)
+                    anchors=[a for a in anchors if abs(a[1]-lowest)<3]
+                if len(anchors)!=1:continue
+                anchor=anchors[0]
+                cfm_values=[float(w[4].replace(',','')) for w in numeric if abs(center(w)-center(anchor))<95
+                            and any(u[4].upper()=='CFM' and -2<u[0]-w[2]<8 and abs(u[1]-w[1])<3 for u in row)
+                            and float(w[4].replace(',',''))>0]
+                if len(cfm_values)==2 and len(set(cfm_values))==1:values[field]=cfm_values[0]
+        heat_labels = phrases(header, r'MEDIUM|TYPE')
+        for anchor in heat_labels:
+            above = ' '.join(w[4].upper() for w in header if abs(center(w)-center(anchor)) < 65 and 0 < anchor[1]-w[1] < 40)
+            if 'HEATING' not in above and family not in {'UH','EUH','GUH','BCU','RTU','OAU','AHU'}:continue
+            cell = ' '.join(w[4].upper() for w in row if abs(center(w)-center(anchor)) < 28)
+            if 'ELEC' in cell:text.update(heating_type='ELECTRIC',unit_type='ELECTRIC HEAT')
+            elif 'HOT WATER' in cell:text.update(heating_type='HOT WATER',unit_type='HYDRONIC')
+            elif re.search(r'\bGAS\b',cell):text.update(heating_type='GAS',unit_type='GAS HEAT')
         if family in {'EUH','GUH','CUH','UH'}:
             take(r'HEATING CFM|CFM', 'heating_cfm')
             values.pop('design_cfm', None)
@@ -258,23 +310,28 @@ def diffuser_legend(doc):
     legend = {}
     for page in doc:
         words = page_words(page)
-        if not phrases(words, r'(?:LOUVERED FACE CEILING )?DIFFUSER (?:SCHEDULE|LEGEND)|(?:REGISTER,? GRILLE,? (?:&|AND) DIFFUSER|AIR DEVICE|AIR DISTRIBUTION DEVICE) SCHEDULE'):
+        if not phrases(words, r'(?:LOUVERED FACE CEILING )?DIFFUSER (?:SCHEDULE|LEGEND)|(?:DIFFUSER/REGISTER/GRILLE|AIR TERMINAL|REGISTER,? GRILLE,? (?:&|AND) DIFFUSER|AIR DEVICE|AIR DISTRIBUTION DEVICE) SCHEDULE'):
             continue
+        all_neck_headers=phrases(words,r'NECK(?: SIZE)?')
         for row in rows(words):
             for i, word in enumerate(row):
-                if not re.fullmatch(r'(?:S[A-Z]|[A-Z]\d?|SD\d*)', word[4]):
+                if not re.fullmatch(r'(?:S[A-Z]|[A-Z]\d?|SD\d*|[A-Z]-\d+|\d+s)', word[4]):
                     continue
                 tail = row[i + 1:]
                 description = ' '.join(w[4] for w in words if word[0] < w[0] < word[0]+170
-                                       and abs(w[1]-word[1]) < 16).upper()
-                if re.fullmatch(r'[A-Z]', word[4]) and ('RETURN' in description or 'EXHAUST' in description):
+                                       and abs(w[1]-word[1]) < 4).upper()
+                if any(kind in description for kind in ('RETURN','EXHAUST','TRANSFER')):
                     continue
                 necks = [w for w in tail if 0 < w[0] - word[0] < 300
-                         and re.fullmatch(r'\d+(?:\.\d+)?"[Øø]', w[4])]
+                         and re.fullmatch(r'\d+(?:\.\d+)?(?:"[Øø]|"?[xX]\d+(?:\.\d+)?"?)', w[4])]
+                neck_headers=[a for a in all_neck_headers if 0<word[1]-a[1]<100 and word[0]<a[0]<word[0]+300]
+                if neck_headers:
+                    nearest=max(neck_headers,key=lambda a:a[1])
+                    necks=[w for w in necks if abs(center(w)-center(nearest))<30]
                 if necks:
                     size = min(necks, key=lambda w: w[0])[4]
                     legend.setdefault(word[4], set()).add(size)
-                elif re.fullmatch(r'[A-Z]', word[4]) and ('SUPPLY' in description or 'DIFFUSER' in description):
+                elif 'SUPPLY' in description or 'DIFFUSER' in description:
                     legend.setdefault(word[4], set()).add('')
     return {mark: next(iter(sizes)) for mark, sizes in legend.items() if len(sizes) == 1}
 
@@ -282,7 +339,9 @@ def diffuser_legend(doc):
 def keyed_outlets(words, page_number, name, legend):
     """Read stacked symbol/airflow callouts, preserving unconfirmed associations."""
     # Avoid schedules, details and their rated maximum flows.
-    if not phrases(words, r'(?:FLOOR )?PLAN - HVAC|(?:MECHANICAL|HVAC)(?: FLOOR)? PLAN|(?:FIRST|SECOND|GROUND) FLOOR HVAC PLAN'):
+    title_rows=[' '.join(w[4] for w in row) for row in rows(words)]
+    plan_title=any(re.match(r'^(?:HVAC|MECHANICAL)(?: FLOOR| CEILING)? PLAN\b',line,re.I) for line in title_rows)
+    if not plan_title and not phrases(words, r'(?:FLOOR )?PLAN - HVAC|(?:MECHANICAL|HVAC)(?: FLOOR| CEILING)? PLAN|(?:FIRST|SECOND|GROUND) FLOOR HVAC PLAN'):
         return []
     notes = set()
     for row in rows(words):
@@ -291,11 +350,28 @@ def keyed_outlets(words, page_number, name, legend):
         if match:
             notes.add(match[1])
     result = []
+    indicators=[w for w in words if w[4].upper()=='INDICATES']
     for word in words:
+        if any(0 < w[0]-word[0] < 140 and abs(w[1]-word[1])<18 for w in indicators):
+            continue  # A symbol-key example is not a physical outlet.
         size = None
-        kind = word[4]
+        kind = word[4].rstrip(',')
         if kind in legend:
             size = legend[kind]
+        elif re.fullmatch(r'[A-Z]',kind):
+            # Unclassified type letters need an explicit round neck/flow pair.
+            # Retain as unselected candidates, never infer a supply connection.
+            necks=[w for w in words if 0 < w[0]-word[2] < 18 and -8 < w[1]-word[1] < 0
+                   and re.fullmatch(r'\d+(?:\.\d+)?"[Øø⌀\ufffd]',w[4])]
+            if len(necks)==1:
+                neck=necks[0]
+                flows=[w for w in words if re.fullmatch(r'\d{1,4}',w[4]) and abs(w[0]-neck[0])<3 and 6<w[1]-neck[1]<15]
+                if len(flows)==1:
+                    result.append({'include':False,'type':kind,'size':neck[4],'shape':'round','system':'','location':'',
+                                   'design_cfm':int(flows[0][4]),'source':name,'reference':f'page {page_number}',
+                                   'evidence':'Type / round neck / airflow callout; supply service and duct association unconfirmed; review before including',
+                                   'position':[round(word[0],2),round(word[1],2)]})
+            continue
         elif re.fullmatch(r'S[A-Z]', kind):
             # An addendum may omit the original legend. Preserve the symbol as
             # an unselected candidate with no invented neck or system.
@@ -318,7 +394,13 @@ def keyed_outlets(words, page_number, name, legend):
         numbers = [w for w in words if re.fullmatch(r'\d{1,4}', w[4])
                    and (abs(w[0] - flow_anchor[0]) < 4 or
                         (flow_anchor is word and not size and abs(center(w)-center(word)) < 4))
-                   and 6 < w[1] - flow_anchor[1] < 14]
+                   and 6 < w[1] - flow_anchor[1] < 18]
+        if not numbers:
+            # Explicit CFM beside the value supports offset callouts. A nearby
+            # unlabeled number is deliberately insufficient.
+            numbers = [w for w in words if re.fullmatch(r'\d{1,4}',w[4])
+                       and abs(center(w)-center(word)) < 35 and 6 < w[1]-word[1] < 30
+                       and any(u[4].upper()=='CFM' and 0 < u[0]-w[2] < 8 and abs(u[1]-w[1]) < 3 for u in words)]
         if len(numbers) != 1:
             continue
         flow = int(numbers[0][4])
@@ -329,6 +411,14 @@ def keyed_outlets(words, page_number, name, legend):
                        'evidence': f'{word[4]} / {flow}; stacked plan callout; confirm supply duct, room and source revision'
                                    + ('; no neck legend in this document' if not size else ''),
                        'position': [round(word[0], 2), round(word[1], 2)]})
+        quantities=[re.fullmatch(r'\(TYP[- ](\d+)\)',w[4],re.I) for w in words
+                    if abs(center(w)-center(word)) < 25 and 0 < w[1]-numbers[0][1] < 18]
+        quantities=[int(m[1]) for m in quantities if m]
+        if len(quantities)==1 and 1 < quantities[0] <= 50:
+            item=result[-1]
+            item['evidence'] += f'; explicitly repeated TYP-{quantities[0]}; confirm each physical location'
+            for occurrence in range(2,quantities[0]+1):
+                result.append({**item,'evidence':item['evidence']+f'; occurrence {occurrence}'})
     return sorted(result, key=lambda item: (item['position'][1], item['position'][0]))
 
 
@@ -336,7 +426,7 @@ def packaged_submittals(doc, name):
     """Explicit shared Unit Tag lists in packaged-unit selection sheets."""
     result = []
     for page in doc:
-        text = page.get_text(sort=True)
+        text = readable_text(page)
         taglines = re.findall(r'Unit Tag:\s*([^\r\n]+)', text, re.I)
         if len(taglines) != 1 or not re.fullmatch(r'\s*PAHU-\d+(?:\s*,\s*PAHU-\d+)*\s*', taglines[0], re.I):
             continue

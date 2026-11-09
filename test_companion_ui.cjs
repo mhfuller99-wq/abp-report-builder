@@ -1,0 +1,10 @@
+const fs=require('fs'),vm=require('vm'),assert=require('assert');
+const ctx=vm.createContext({});vm.runInContext(fs.readFileSync(__dirname+'/abp_ui.js','utf8'),ctx);
+const gas='Coil DX GAS HT.xlsx',electric='COIL DX HP ELE.xlsx',water='Coil WTR CLG WTR HT.xlsx';
+let chosen=new Set([gas,electric,water,'Notes.xlsx']);
+ctx.applyCompanionChoices(chosen,[{coil_template:electric},{coil_template:''}]);
+assert.deepEqual([...chosen].sort(),[electric,'Notes.xlsx'].sort());
+ctx.applyCompanionChoices(chosen,[{coil_template:water}]);
+assert(chosen.has(water));assert(!chosen.has(gas));assert(!chosen.has(electric));
+ctx.applyCompanionChoices(chosen,[{}]);assert.deepEqual([...chosen],['Notes.xlsx']);
+console.log('Companion forms require per-unit evidence; unrelated document hints cannot select gas or water coils.');

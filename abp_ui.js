@@ -22,11 +22,19 @@ function reviewCoverage(records, outlets) {
 function worksheetLabel(name) {
   return name.replace(/(?:\.xlsx)+$/i,'').replaceAll('_',' ').replace(/\s+/g,' ').trim();
 }
+function applyCompanionChoices(chosen, records) {
+  const assigned=new Set(records.map(r=>r.coil_template).filter(Boolean));
+  for(const name of ['Coil DX GAS HT.xlsx','COIL DX HP ELE.xlsx','Coil WTR CLG WTR HT.xlsx']) {
+    if(assigned.has(name)) chosen.add(name); else chosen.delete(name);
+  }
+  return chosen;
+}
+
 async function readApiJson(response) {
   if(response.status===401) throw Error('Your session has expired. Save your review, then sign in again.');
   let data;
   try { data=await response.json(); }
-  catch { throw Error('The server did not return a valid response. Please try again.'); }
+  catch { throw Error(`The server did not return a valid response (HTTP ${response.status}). Your current review has been preserved. Please try again.`); }
   if(!response.ok) throw Error(data?.error||'The request could not be completed. Please try again.');
   return data;
 }
@@ -41,7 +49,7 @@ function validateSavedReview(data, templates, forms, tagPattern) {
     if(!object(r)||typeof r.tag!=='string'||!tagPattern.test(r.tag)||tags.has(r.tag.toUpperCase())||!['UNVERIFIED','VERIFIED','EXCLUDED'].includes(r.status)) invalid();
     tags.add(r.tag.toUpperCase());
     if(r.template!==undefined&&(typeof r.template!=='string'||r.template!==''&&!Object.hasOwn(forms,r.template))) invalid();
-    if(r.coil_template!==undefined&&!['','Coil DX GAS HT.xlsx','COIL DX HP ELE.xlsx'].includes(r.coil_template)) invalid();
+    if(r.coil_template!==undefined&&!['','Coil DX GAS HT.xlsx','COIL DX HP ELE.xlsx','Coil WTR CLG WTR HT.xlsx'].includes(r.coil_template)) invalid();
     for(const field of fields) if(r[field]!==undefined&&r[field]!==null&&r[field]!==''&&!numeric(r[field])) invalid();
     if(r.design_cfm!=null&&r.design_cfm!==''&&r.osa_cfm!=null&&r.osa_cfm!==''&&Number(r.osa_cfm)>Number(r.design_cfm)) invalid();
     for(const key of reviewTextFields) if(r[key]!==undefined&&(typeof r[key]!=='string'||r[key].length>120)) invalid();

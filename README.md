@@ -213,3 +213,21 @@ Run `python -m unittest test_heaters -v` and `node test_heater_ui.cjs` for heate
 regressions. The opt-in WCU probe now checks the electric heater along with the
 previous six supported units; it never approves drawing revisions or uploads
 customer files.
+
+### Additional schedule formats and coverage limits
+
+ID headers, stacked airflow columns and multi-part blower-coil identifiers are
+supported. Conflicting drawing revisions remain separate candidates for review.
+Explicit repeated outlet quantities remain unselected until each physical
+location and supply connection is checked. Symbol-key examples are excluded.
+
+Companion coil selection follows unit-specific electric, gas or hydronic evidence.
+Unconfirmed coil types stay unselected. Hydronic companion sheets retain the
+original preheat, cooling and reheat formulas and leave actual inputs blank.
+Raster schedules and plans with little readable text produce coverage warnings:
+a visible drawing can contain outlined labels that text extraction cannot read.
+Compare these sheets manually; completed report readings are not design inputs.
+
+PDF layout text is bounded by extracted words and the MuPDF resource cache is
+released between text passes. This reduces retained resources but does not
+establish the cause of a past server restart.
