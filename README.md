@@ -231,3 +231,45 @@ Compare these sheets manually; completed report readings are not design inputs.
 PDF layout text is bounded by extracted words and the MuPDF resource cache is
 released between text passes. This reduces retained resources but does not
 establish the cause of a past server restart.
+
+
+
+## Bounded image reading and hood review
+
+The source scan now runs image reading in a separate process with a 65-second
+shared scan budget, 256 MiB address-space limit, CPU limit and one concurrent
+OCR job. Each PDF permits 12 OCR page attempts, 8 million pixels per page and
+40 million total pixels. OCR PDFs larger than 40 MB are skipped with a warning;
+normal source handling remains separate. Temporary image/job files are deleted.
+The Docker image installs Tesseract and English data. Missing OCR or an exhausted
+budget leaves a visible manual-review warning rather than claiming completeness.
+
+An explicit hood schedule with single-line EXHAUST CFM / MAKEUP CFM columns
+produces separate, unverified values. Supported KH tags can be added only after
+checking the source-confirmation box; they still need equipment verification.
+Makeup air stays evidence only and never becomes outside air. Other detected
+hood tag formats are labeled manual-only without silently renaming equipment.
+OCR diffuser candidates use the existing conservative symbol readers; their
+system and room stay blank and inclusion is unchecked. Low-confidence OCR flow
+values stay blank. Image/hood candidates are saved with project reviews.
+
+The queue is not a complete equipment or outlet takeoff. Dense, rotated,
+multiline or unusual tables and poor scans can be missed. Existing native PDF
+processing is unchanged and is not covered by the OCR worker's resource limits.
+Actual readings and template formulas are not populated by image recognition.
+Run `python -m unittest test_ocr_hood -v` and `node test_image_review.cjs` for
+focused checks, then run the existing full Python and JavaScript regressions.
+
+
+Project reviews save as compact JSON. Save and restore enforce the same 2 MB
+UTF-8 limit on the complete project, including ordinary equipment and image
+candidates. Oversized reviews are rejected before download without changing the
+current review; split the source set rather than discarding evidence silently.
+
+The production OCR worker processes page words one page at a time instead of
+retaining all native/OCR word arrays until the document ends. Its address-space
+limit applies to each process, not combined service memory. A Tesseract child and
+the web server consume additional memory. Hosted aggregate-memory/load validation
+is still required. OCR runs while the existing document-operation lock is held
+for up to the remaining 65-second scan budget; competing document requests can
+receive the existing busy response, while health requests remain responsive.
