@@ -62,5 +62,23 @@ function validateSavedReview(data, templates, forms, tagPattern) {
     if(r.candidates!==undefined&&(!Array.isArray(r.candidates)||r.candidates.length>30||r.candidates.some(c=>!object(c)||!object(c.values)||Object.entries(c.values).some(([k,v])=>reviewTextFields.includes(k)?typeof v!=='string'||v.length>120:(!fields.includes(k)&&!reviewEvidenceFields.includes(k))||!numeric(v))||['source','reference','evidence'].some(k=>c[k]!==undefined&&typeof c[k]!=='string')))) invalid();
   }
   if(data.diffusers!==undefined&&(!Array.isArray(data.diffusers)||data.diffusers.length>500||data.diffusers.some(d=>!object(d)||(d.design_cfm!==undefined&&d.design_cfm!==null&&d.design_cfm!==''&&!numeric(d.design_cfm))))) invalid();
+  if(data.image_review!==undefined&&(!Array.isArray(data.image_review)||data.image_review.length>500||data.image_review.some(c=>!object(c)||!['kitchen_hood','diffuser'].includes(c.kind)||typeof c.tag!=='string'||c.tag.length>80||typeof c.source!=='string'||c.source.length>160||!Number.isInteger(c.page)||c.page<1||c.page>300||!object(c.review_values)||Object.entries(c.review_values).some(([k,v])=>!['exhaust_cfm','makeup_air_cfm','design_cfm'].includes(k)||!numeric(v))||c.evidence_text!==undefined&&(typeof c.evidence_text!=='string'||c.evidence_text.length>4000)||c.review_reasons!==undefined&&(!Array.isArray(c.review_reasons)||c.review_reasons.length>20||c.review_reasons.some(x=>typeof x!=='string'||x.length>1000))||['type','size'].some(k=>c[k]!==undefined&&(typeof c[k]!=='string'||c[k].length>120))||c.accepted!==undefined&&typeof c.accepted!=='boolean')))invalid();
   return {...data,records:data.records.map(r=>({...r,tag:r.tag.toUpperCase()}))};
+}
+
+// Save and restore share the same UTF-8 byte budget. Never download an unreadable review.
+const savedReviewByteLimit=2000000;
+function assertSavedReviewSize(bytes){
+  if(!Number.isFinite(bytes)||bytes<0||bytes>savedReviewByteLimit)throw Error('Project review exceeds 2 MB. Split the source set into smaller project reviews; your current review has not been changed.');
+}
+function serializeSavedReview(data){
+  const text=JSON.stringify(data);
+  assertSavedReviewSize(new Blob([text]).size);
+  return text;
+}
+async function parseSavedReviewFile(file){
+  assertSavedReviewSize(file.size);
+  const text=await file.text();
+  assertSavedReviewSize(new Blob([text]).size);
+  return JSON.parse(text);
 }
