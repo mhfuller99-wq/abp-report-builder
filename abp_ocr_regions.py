@@ -114,7 +114,15 @@ def ruled_regions(page, max_pixels=6_000_000, max_regions=12, deadline=None):
             truncated = True
             break
         boxes.append(box)
-    return sorted(boxes, key=lambda b: (b[1], b[0])), cost, truncated
+    # Interior header cells and column groups share the table's ruled edges.
+    # OCR the enclosing table once, preserving its tag column and heading,
+    # rather than spending the region budget on the same schedule repeatedly.
+    outer = [b for b in boxes if not any(b != other and
+             other[0] <= b[0] + 2 and other[1] <= b[1] + 2 and
+             other[2] >= b[2] - 2 and other[3] >= b[3] - 2 and
+             (other[2]-other[0])*(other[3]-other[1]) > (b[2]-b[0])*(b[3]-b[1])*1.05
+             for other in boxes)]
+    return sorted(outer, key=lambda b: (b[1], b[0])), cost, truncated
 
 
 def _clean(w):

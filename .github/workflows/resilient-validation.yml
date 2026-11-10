@@ -1,7 +1,7 @@
 name: Resilient scan validation
 on:
   push:
-    branches: [bounded-scan-staging-20261109]
+    branches: [main, bounded-scan-staging-20261109, fix/gulf-schedule-recognition]
   pull_request:
     branches: [main]
 permissions:

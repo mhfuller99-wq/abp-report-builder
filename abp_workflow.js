@@ -68,7 +68,11 @@ renderImageReview=function(){workflowOriginalImageReview();$('image-review').que
 function renderReadiness(){
  const box=$('readiness');if(!box)return;box.replaceChildren();
  const verified=records.filter(r=>r.status==='VERIFIED').length,unresolved=records.filter(r=>!['VERIFIED','EXCLUDED'].includes(r.status));
- const title=workflowElement('h3',verified+' equipment verified · '+unresolved.length+' unresolved');box.append(title);
+ const assessment=sourceReadiness(records,diffusers,imageReview,officeComparison?compareOfficeDesign(officeComparison,records,diffusers):null);
+ const title=workflowElement('h3',assessment.title);box.append(title);
+ if(assessment.empty)box.append(workflowElement('p','No job equipment was captured. A completed scan stage does not mean its schedules were recognized. Retry the schedule pages or add source-reviewed equipment before building.'));
+ if(assessment.pendingImages)box.append(workflowElement('p',assessment.pendingImages+' image candidates still require source review. They are not verified equipment.'));
+ if(assessment.problems)box.append(workflowElement('p',assessment.problems+' office comparison findings require review below. Missing IDs, differences and unsupported values remain unresolved.'));
  box.append(workflowElement('p',scanStateBlocked(scanState)?'Source coverage is incomplete or outdated. Review the omissions and acknowledge a partial report before building.':'Source extraction still requires manual review; it is never certified as a complete takeoff.'));
  for(const record of unresolved){
   const row=workflowElement('div');row.className='readiness-row';
@@ -172,6 +176,7 @@ async function followWorkflowJob(){
  finally{workflowControls(false);updateWorkspace();renderComparison();}
 }
 function renderComparison(){
+ renderReadiness();
  const box=$('office-comparison');if(!box||!officeComparison)return;box.replaceChildren();
  const result=compareOfficeDesign(officeComparison,records,diffusers),counts={};for(const row of result.rows)counts[row.status]=(counts[row.status]||0)+1;
  box.append(workflowElement('p',Object.entries(counts).map(([k,v])=>v+' '+k).join(' · ')+'. Office supply total '+result.office_total+' CFM; included builder total '+result.builder_total+' CFM.'));
@@ -231,6 +236,7 @@ function installWorkflow(){
    }catch(e){$('status').textContent=e.message;workflowControls(false);}return;
   }
   try{if(workflowBusy)return;if(!templatesReady)throw Error('Wait for report worksheets to load.');const payload=workflowOriginalPayload();
+   if(emptySourceReport(payload.records,payload.diffusers,scanState))throw Error('No reviewed equipment or included outlets. The source takeoff is empty; retry the schedules or add source-reviewed equipment before building a job report.');
    if(scanBuildBlocked(scanState,payload.scan_acknowledgement))throw Error(scanStateNotice()+'Review source omissions and enter a fresh partial-report acknowledgment.');
    if(!payload.project.trim())throw Error('Enter a project name.');if(!payload.templates.length)throw Error('Select at least one worksheet.');
    workflowJob={...(await readApiJson(await fetch('/api/jobs/build',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)}))),project:payload.project,partial:!!payload.scan_acknowledgement};
