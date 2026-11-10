@@ -279,7 +279,8 @@ def extract_local(data, source='synthetic.pdf', budget=Budget(), engine=tesserac
                 coverage['image_regions_truncated'] = True
             # Title blocks often contain hundreds of native characters while
             # the actual schedules use outlined glyphs, not extractable text.
-            sparse = sum(len(w['text']) for w in native) < 500
+            native_characters = sum(len(w['text']) for w in native)
+            sparse = native_characters < 40 or (page.rect.get_area() > 1_000_000 and native_characters < 500)
             if not eligible and not image_overflow and not sparse:
                 if images:
                     coverage['status'] = 'small_marginal_images_skipped'

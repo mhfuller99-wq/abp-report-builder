@@ -93,12 +93,13 @@ class HoodInformationTests(unittest.TestCase):
 
 class SelectorTests(unittest.TestCase):
     def test_outline_table_not_filtered_by_unrelated_marginal_image(self):
-        with ruled_pdf() as doc:
-            page=doc[0]
+        with pymupdf.open() as doc:
+            page=doc.new_page(width=1200,height=1600)
+            page.draw_rect(pymupdf.Rect(60,150,540,250),width=1)
             page.insert_text((20,40),' '.join(['AB']*55),fontsize=4)
             pix=pymupdf.Pixmap(pymupdf.csGRAY,pymupdf.IRect(0,0,10,10),False)
             pix.clear_with(240)
-            page.insert_image(pymupdf.Rect(20,740,50,760),pixmap=pix)
+            page.insert_image(pymupdf.Rect(20,1540,50,1560),pixmap=pix)
             calls=[]
             result=extract_local(doc.tobytes(),region_engine=lambda *a,**kw:calls.append(kw['clip']) or information_words(),retain_words=False)
             self.assertEqual(len(calls),1)
