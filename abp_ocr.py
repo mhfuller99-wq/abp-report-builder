@@ -21,12 +21,12 @@ class Budget:
     max_pixels: int = 8_000_000
     max_total_pixels: int = 40_000_000
     dpi: int = 180
-    per_page_seconds: float = 15
+    per_page_seconds: float = 35
     total_seconds: float = 60
     max_words: int = 30_000
     max_pdf_bytes: int = 40_000_000
     max_preview_pixels: int = 6_000_000
-    max_region_pixels: int = 3_000_000
+    max_region_pixels: int = 2_000_000
     max_page_pixels: int = 16_000_000
     max_regions: int = 24
     max_regions_per_page: int = 6
@@ -77,6 +77,25 @@ def equipment_candidates(words,source,page,method):
             'template':inferred_form(item['tag'],{'text_proposed':item.get('text',{})}), 'evidence':words[:300],
             'confidence_min':min((w.get('confidence') or 0 for w in words),default=0)})
     return found
+
+
+def prioritized_pages(doc, page_numbers, deadline):
+    """Read title-block schedule sheets before spending OCR time on plans.
+
+    This is an ordering hint, never evidence of complete coverage. Only native
+    words are inspected, at most 300 pages, inside the existing wall deadline.
+    All selected pages remain in the queue when the hint budget is exhausted.
+    """
+    import pymupdf
+    numbers=[i for i in range(len(doc)) if page_numbers is None or i+1 in page_numbers]
+    priorities={}
+    for i in numbers:
+        if time.monotonic()>=deadline:break
+        words=doc[i].get_text('words')
+        if len(words)<=30_000 and any(re.fullmatch(r'SCHEDULES?',w[4].strip(' .:;'),re.I) for w in words):
+            priorities[i]=0
+        pymupdf.TOOLS.store_shrink(100)
+    return sorted(numbers,key=lambda i:(priorities.get(i,1),i))
 
 
 def tesseract_region_words(page, pixels, timeout, clip=None, psm=11, max_zoom=3.):
@@ -245,7 +264,8 @@ def extract_local(data, source='synthetic.pdf', budget=Budget(), engine=tesserac
             raise ValueError('Encrypted PDF requires an unlocked copy')
         if len(doc) > 300:
             raise ValueError('PDF has more than 300 pages')
-        for number, page in enumerate(doc, 1):
+        for index in prioritized_pages(doc,page_numbers,started+budget.total_seconds):
+            number, page = index+1,doc[index]
             if checkpoint:checkpoint(report)
             if page_numbers is not None and number not in page_numbers:continue
             entry = {'page': number, 'ocr_status': 'not_needed'}
