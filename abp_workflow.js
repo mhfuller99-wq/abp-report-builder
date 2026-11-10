@@ -179,7 +179,8 @@ function renderComparison(){
  renderReadiness();
  const box=$('office-comparison');if(!box||!officeComparison)return;box.replaceChildren();
  const result=compareOfficeDesign(officeComparison,records,diffusers),counts={};for(const row of result.rows)counts[row.status]=(counts[row.status]||0)+1;
- box.append(workflowElement('p',Object.entries(counts).map(([k,v])=>v+' '+k).join(' · ')+'. Office supply total '+result.office_total+' CFM; included builder total '+result.builder_total+' CFM.'));
+ const outletSummary=officeComparison.outlets.length?'Office supply-outlet total '+result.office_total+' CFM; included builder outlet total '+result.builder_total+' CFM.':'No office supply-outlet rows were read. Equipment airflows are compared individually below.';
+ box.append(workflowElement('p',Object.entries(counts).map(([k,v])=>v+' '+k).join(' · ')+'. '+outletSummary));
  box.append(workflowElement('p','Comparison only: office values never populate this report. Actuals and formulas are ignored. Outlet rows are paired by system, type, flow and size; this does not establish physical outlet identity.'));
  for(const warning of result.warnings)box.append(workflowElement('p',warning));
  const wrap=workflowElement('div');wrap.className='review-scroll';const table=workflowElement('table'),head=workflowElement('tr');
