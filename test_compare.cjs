@@ -13,4 +13,8 @@ assert(result.rows.some(r=>r.item==='EF-2'&&r.status==='missing'));assert.equal(
 const ids=ctx.compareOfficeDesign({units:[{tag:'MUA-1',values:{design_cfm:2000},references:{}}],outlets:[],warnings:[]},[{tag:'MAU-1',design_cfm:2000,status:'VERIFIED'}],[]);
 assert.equal(ids.rows.length,2);assert(ids.rows.some(r=>r.status==='missing'));assert(!/\bfetch\s*\(/.test(fs.readFileSync(__dirname+'/abp_compare.js','utf8')));
 const unsupported=ctx.compareOfficeDesign({units:[{tag:'EF-1',values:{},references:{}}],outlets:[],warnings:[]},[{tag:'EF-1',status:'VERIFIED'}],[]);assert.equal(unsupported.rows[0].status,'unresolved');
+const heaters=Array.from({length:15},()=>[]);heaters[2]=['UNIT ID',null,'UH-7'];heaters[7]=[null,null,'DESIGN','ACTUAL'];heaters[9]=['CFM',null,1250,9999];
+const heaterOffice=ctx.officeDesignFromSheets([{name:'UNIT HEATER GAS',rows:heaters}]);
+assert.equal(heaterOffice.units[0].values.heating_cfm,1250);assert.equal(heaterOffice.units[0].values.design_cfm,undefined);
+assert.equal(ctx.compareOfficeDesign(heaterOffice,[{tag:'UH-7',heating_cfm:1250,status:'VERIFIED'}],[]).rows[0].status,'match');
 console.log('Office comparison ignores actuals, preserves repeated outlets, finds size differences, and keeps MAU/MUA IDs distinct.');

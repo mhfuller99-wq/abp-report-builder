@@ -52,19 +52,29 @@ def equipment_candidates(words,source,page,method):
     if not re.search(r'\b(?:SCHEDULE|DESIGN|REQUESTED)\b',text,re.I):return []
     if re.search(r'\b(?:ACTUAL|MEASURED|INITIAL|AS FOUND|TEST REPORT|FINAL READING)\b',text,re.I):return []
     if len(words)>30000:return []
-    tuples=[(*w['box'],w['text']) for w in words]
+    # Normalize printed dash variants and bordering table rules only. Never
+    # repair digits or infer a missing identity. Original OCR evidence remains.
+    def token(value):return value.translate(str.maketrans({'–':'-','—':'-','−':'-','‐':'-','‑':'-'})).strip('|{}[]')
+    tuples=[(*w['box'],token(w['text'])) for w in words]
+    confidence={(tuple(w['box']),token(w['text'])):w.get('confidence') for w in words}
     confident=all(w.get('confidence') is not None and w['confidence']>=80 for w in words)
     found=[];seen=set()
     for item in parse_page(tuples,page,source):
         values={k:v for k,v in item.get('values',{}).items() if k in UNIT_TOTALS}
-        if not values or item.get('tag') in seen:continue
+        if item.get('tag') in seen:continue
         seen.add(item['tag'])
+        reviewed = {}
+        for field,value in values.items():
+            evidence=item.get('value_words',{}).get(field,[])
+            scores=[confidence.get((tuple(w[:4]),w[4])) for w in evidence]
+            if confident or (scores and all(c is not None and c>=80 for c in scores)):
+                reviewed[field]=value
         found.append({'kind':'equipment','tag':item['tag'],'source':source,'page':page,
             'method':method,'status':'UNVERIFIED','include':False,
-            'review_values':values if confident else {},'values':{},
+            'review_values':reviewed,'values':{},
             'review_reasons':['Image schedule candidate: compare every value, equipment ID, column heading and source revision.'
-                if confident else 'Low OCR confidence in this crop; values left blank for manual source review.'],
-            'template':inferred_form(item['tag']), 'evidence':words[:300],
+                if confident else 'OCR confidence is checked per tag, heading and value; uncertain fields left blank for manual source review.'],
+            'template':inferred_form(item['tag'],{'text_proposed':item.get('text',{})}), 'evidence':words[:300],
             'confidence_min':min((w.get('confidence') or 0 for w in words),default=0)})
     return found
 
@@ -101,7 +111,9 @@ def tesseract_region_words(page, pixels, timeout, clip=None, psm=11, max_zoom=3.
         if tsv.stat().st_size > 8_000_000:
             raise ValueError('OCR text budget exceeded')
         result = []
-        for row in csv.DictReader(io.StringIO(tsv.read_text()), delimiter='\t'):
+        # Tesseract TSV contains literal inch/double-quote tokens; it does not
+        # CSV-escape them. CSV quoting can swallow following rows as one word.
+        for row in csv.DictReader(io.StringIO(tsv.read_text(encoding='utf-8')), delimiter='\t', quoting=csv.QUOTE_NONE):
             if row['level'] != '5' or not row['text'].strip():
                 continue
             x, y, w, h = (int(row[k]) for k in ('left', 'top', 'width', 'height'))
@@ -265,7 +277,10 @@ def extract_local(data, source='synthetic.pdf', budget=Budget(), engine=tesserac
             if image_overflow:
                 report['warnings'].append(f'Page {number}: image region limit reached; unlisted images require manual review.')
                 coverage['image_regions_truncated'] = True
-            sparse = sum(len(w['text']) for w in native) < 40
+            # Title blocks often contain hundreds of native characters while
+            # the actual schedules use outlined glyphs, not extractable text.
+            native_characters = sum(len(w['text']) for w in native)
+            sparse = native_characters < 40 or (page.rect.get_area() > 1_000_000 and native_characters < 500)
             if not eligible and not image_overflow and not sparse:
                 if images:
                     coverage['status'] = 'small_marginal_images_skipped'
@@ -287,6 +302,15 @@ def extract_local(data, source='synthetic.pdf', budget=Budget(), engine=tesserac
             def recognize(rect, psm, full_page=False):
                 nonlocal attempted, regions_attempted, page_regions, page_attempted
                 max_pixels = budget.max_pixels if full_page else min(budget.max_pixels, budget.max_region_pixels)
+                # Use the remaining pixel allowance for the next table instead
+                # of skipping a readable crop merely because its ideal render
+                # would exceed the per-page allowance. Caps never increase.
+                max_pixels = min(max_pixels,budget.max_total_pixels-total_pixels,budget.max_page_pixels-page_pixels)
+                if max_pixels < 10000:
+                    r={'box':list(rect),'status':'budget_skipped','method':f'ocr_psm{psm}',
+                       'reason':'Pixel budget exhausted; manual review required.'}
+                    record_region(coverage,r)
+                    return None,r
                 _, pixels = render_geometry(rect, max_pixels, (budget.dpi if full_page else budget.region_dpi) / 72)
                 r = {'box': list(rect), 'status': 'budget_skipped', 'method': f'ocr_psm{psm}', 'pixels': pixels}
                 record_region(coverage, r)
@@ -356,8 +380,9 @@ def extract_local(data, source='synthetic.pdf', budget=Budget(), engine=tesserac
                 if truncated:
                     coverage['selection_truncated'] = True
                     report['warnings'].append(f'Page {number}: table-selection budget exhausted; undetected regions require manual review.')
-                boxes = [box for box in boxes if image_overflow or not images or
-                         any(pymupdf.Rect(box).intersects(pymupdf.Rect(r['box'])) for r in eligible)]
+                # A visually ruled schedule need not intersect an embedded
+                # bitmap: CAD frequently outlines its text. Raster filtering
+                # here discarded real schedules and kept only title blocks.
             except (OSError, ValueError, RuntimeError, MemoryError) as exc:
                 preview_failed = True
                 coverage['selection_failed'] = type(exc).__name__
@@ -367,14 +392,18 @@ def extract_local(data, source='synthetic.pdf', budget=Budget(), engine=tesserac
             statuses = []
             if boxes:
                 coverage['unexamined_content'] = 'All content outside selected table crops; manual review required.'
+                retries = []
                 for box in boxes:
                     candidates, r = recognize(pymupdf.Rect(box), 11)
                     statuses.append(r['status'])
                     # Different segmentation only when no supported candidate was
                     # found. Never replace/suppress a low-confidence candidate.
-                    if candidates == []:
-                        _, fallback = recognize(pymupdf.Rect(box), 6)
-                        statuses.append(fallback['status'])
+                    if candidates == []: retries.append(box)
+                # Give every distinct table a first pass before spending the
+                # same bounded page budget on alternate segmentation.
+                for box in retries:
+                    _, fallback = recognize(pymupdf.Rect(box), 6)
+                    statuses.append(fallback['status'])
             else:
                 coverage['unexamined_content'] = 'Full-page OCR may miss content and associations; manual review required.'
                 candidates, r = recognize(page.rect, 6, full_page=True)

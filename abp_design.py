@@ -167,7 +167,7 @@ def inferred_form(tag, record=None):
     tag=str(tag or '').upper()
     if re.match(r'^(EUH|GUH|CUH|UH)[- ]?\d',tag):return heater_form(tag, record)
     if re.match(r'^DOAS[- ]?\d',tag):return doas_fan_coil(record)
-    if re.match(r'^(AHU|PAHU|RTU|OAU|MAU|AC)[- ]?\d',tag):return 'Air Moving Equipment.xlsx'
+    if re.match(r'^(AHU|PAHU|PU|RTU|OAU|MAU|AC)[- ]?\d',tag):return 'Air Moving Equipment.xlsx'
     if re.match(r'^EF[- ]?\d',tag) and record:
         proposed=record.get('proposed') or {}
         service=(record.get('text_proposed') or {}).get('service')

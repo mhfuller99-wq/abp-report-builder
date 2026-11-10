@@ -6,7 +6,7 @@ const compareNumber=x=>typeof x==='number'&&Number.isFinite(x)&&x>=0&&x<=1000000
 function compareField(label){
  const key=compareNormalize(label);
  if(/\b(ACTUAL|MEASURED|INITIAL|FINAL|TEST)\b/.test(key))return null;
- return ({'TOTAL AIRFLOW CFM':'design_cfm','TOTAL CFM':'design_cfm','DESIGN CFM':'design_cfm','CFM':'design_cfm','SUPPLY CFM':'design_cfm',
+ return ({'TOTAL AIRFLOW CFM':'design_cfm','TOTAL CFM':'design_cfm','DESIGN CFM':'design_cfm','CFM':'design_cfm','SUPPLY CFM':'design_cfm','HEATING CFM':'heating_cfm',
  'OSA AIRFLOW CFM':'osa_cfm','OSA CFM':'osa_cfm','OUTSIDE AIR CFM':'osa_cfm','OSA AIRFLOW MIN CFM':'osa_min_cfm','OSA AIRFLOW MAX CFM':'osa_cfm',
  'EXTERNAL S P IN W C':'esp','EXTERNAL S P':'esp','ESP':'esp','TOTAL S P IN W C':'total_sp','DESIGN GPM':'design_gpm','GPM':'design_gpm'})[key]||null;
 }
@@ -23,7 +23,8 @@ function officeDesignFromSheets(sheets){
     const unit=units.get(tag);const header=Array.from({length:Math.min(end,start+19)-start-1},(_,j)=>start+j+1).find(r=>compareNormalize(at(r,col))==='DESIGN');
     for(let r=header===undefined?start+1:header+1;r<(header===undefined?Math.min(end,start+6):end);r++){
      const label=(rows[r]||[]).slice(0,col).find(x=>x!=null&&String(x).trim());
-     const field=compareField(label),number=compareNumber(at(r,col));
+     let field=compareField(label);const number=compareNumber(at(r,col));
+     if(compareNormalize(label)==='CFM'&&/^UNIT HEATER\b/.test(compareNormalize(sheet.name)))field='heating_cfm';
      if(!field||number===null||header===undefined&&compareNormalize(label)!=='DESIGN CFM')continue;
      if(unit.values[field]!==undefined&&unit.values[field]!==number){delete unit.values[field];unit.conflict=true;warnings.push(tag+' has conflicting office design values for '+field);continue;}
      if(unit.conflict)continue;

@@ -1,0 +1,17 @@
+const fs=require('fs'),vm=require('vm'),assert=require('assert');
+const ctx=vm.createContext({});vm.runInContext(fs.readFileSync(__dirname+'/abp_ui.js','utf8'),ctx);
+const server=fs.readFileSync(__dirname+'/abp_server.py','utf8');
+vm.runInContext(server.split('\n').find(x=>x.startsWith('function defaultUnitForm(')),ctx);
+assert.equal(ctx.defaultUnitForm('PU-7'),'Air Moving Equipment.xlsx');
+const state={source_checkpoints:[{name:'synthetic.pdf'}]};
+assert(ctx.emptySourceReport([],[],state));
+assert(ctx.emptySourceReport([{status:'UNVERIFIED',template:'Air Moving Equipment.xlsx'}],[],state));
+assert(!ctx.emptySourceReport([{status:'VERIFIED',template:'Air Moving Equipment.xlsx'}],[],state));
+assert(!ctx.emptySourceReport([],[{include:true,design_cfm:100}],state));
+assert(!ctx.emptySourceReport([],[],{source_checkpoints:[]}));
+let r=ctx.sourceReadiness([],[],[{accepted:false},{accepted:true}],{rows:[{status:'missing'},{status:'match'}]});
+assert.match(r.title,/No equipment or outlets extracted/);assert.equal(r.pendingImages,1);assert.equal(r.problems,1);
+assert.match(ctx.reviewCoverage([],[]),/empty takeoff/);
+r=ctx.sourceReadiness([{status:'VERIFIED'},{status:'EXCLUDED'},{status:'UNVERIFIED'}],[],[],null);
+assert.match(r.title,/1 equipment verified.*1 equipment unresolved/);
+console.log('Readiness exposes empty scans, pending images and office mismatches; blank packs remain available.');

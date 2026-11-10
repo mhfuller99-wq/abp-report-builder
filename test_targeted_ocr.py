@@ -92,6 +92,38 @@ class HoodInformationTests(unittest.TestCase):
 
 
 class SelectorTests(unittest.TestCase):
+    def test_outline_table_not_filtered_by_unrelated_marginal_image(self):
+        with pymupdf.open() as doc:
+            page=doc.new_page(width=1200,height=1600)
+            page.draw_rect(pymupdf.Rect(60,150,540,250),width=1)
+            page.insert_text((20,40),' '.join(['AB']*55),fontsize=4)
+            pix=pymupdf.Pixmap(pymupdf.csGRAY,pymupdf.IRect(0,0,10,10),False)
+            pix.clear_with(240)
+            page.insert_image(pymupdf.Rect(20,1540,50,1560),pixmap=pix)
+            calls=[]
+            result=extract_local(doc.tobytes(),region_engine=lambda *a,**kw:calls.append(kw['clip']) or information_words(),retain_words=False)
+            self.assertEqual(len(calls),1)
+            self.assertLess(calls[0][1],150)
+            self.assertEqual(result['review_candidates'][0]['tag'],'HD-1')
+
+    def test_nested_column_rules_do_not_spend_duplicate_table_budget(self):
+        with ruled_pdf() as doc:
+            doc[0].draw_rect(pymupdf.Rect(200,190,540,250),width=1)
+            boxes,_,_=ruled_regions(doc[0])
+            self.assertEqual(len(boxes),1)
+            self.assertLess(boxes[0][0],70)
+
+    def test_literal_inch_quotes_do_not_swallow_tsv_rows(self):
+        with pymupdf.open() as doc:
+            page=doc.new_page()
+            def recognize(args,**kwargs):
+                output=Path(args[args.index('tesseract')+2]+'.tsv')
+                output.write_text('level\tleft\ttop\twidth\theight\tconf\ttext\n5\t10\t20\t30\t10\t99\t"\n5\t10\t40\t30\t10\t99\tEF-7\n5\t10\t60\t30\t10\t99\t12"\n',encoding='utf-8')
+                return subprocess.CompletedProcess(args,0)
+            with patch('abp_ocr.subprocess.run',side_effect=recognize):
+                words=tesseract_region_words(page,1_000_000,5)
+            self.assertEqual([w['text'] for w in words],['"','EF-7','12"'])
+
     def test_table_deduplicated_and_rotated(self):
         for rotation in (0,180):
             with ruled_pdf(rotation) as doc:

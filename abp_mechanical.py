@@ -53,7 +53,7 @@ def phrases(words, pattern):
             and other[0] <= box[0] and other[2] >= box[2] for other in found)]
 
 
-TAG = r'(?:PAHU|MSAH|MSHP|EUH|GUH|CUH|UH|KEF|EF|SF|RF|FS|PF|VRF|IU|IDU|DSS|DOAS|SSAU|AHU|RTU|MAU|OAU|FCU|SSCU|HVLS|EH|BCU)-\d+(?:\.\d+)*[A-Z]?(?:-\d+(?:\.\d+)*[A-Z]?)?'
+TAG = r'(?:PAHU|PU|MSAH|MSHP|EUH|GUH|CUH|UH|KEF|EF|SF|RF|FS|PF|VRF|IU|IDU|DSS|DOAS|SSAU|AHU|RTU|MAU|OAU|FCU|SSCU|HVLS|EH|BCU)-\d+(?:\.\d+)*[A-Z]?(?:-\d+(?:\.\d+)*[A-Z]?)?'
 MARK_HEADERS = {'MARK', 'TAG', 'ID', 'UNIT MARK', 'UNIT TAG'}
 
 
@@ -167,6 +167,7 @@ def schedule_candidates(words, page_number, name):
         family = tags[0].split('-')[0]
         values = {}
         text = {}
+        value_words = {}
 
         def take(pattern, field, scale=1):
             anchors = phrases(header, pattern)
@@ -185,6 +186,8 @@ def schedule_candidates(words, page_number, name):
             if len(choices) == 1:
                 value = choices[0][4].replace(',', '')
                 values[field] = (float(value.split('/')[0])/float(value.split('/')[1]) if '/' in value else float(value)) * scale
+                a=anchors[0]
+                value_words[field] = [tagword, choices[0]] + [w for w in header if a[0] <= w[0] and w[2] <= a[2] and abs(w[1]-a[1]) < 3]
 
         if family == 'EF':
             take(r'SCFM(?: @ \S+)?', 'design_cfm')
@@ -250,7 +253,9 @@ def schedule_candidates(words, page_number, name):
             choices = sorted(numeric, key=lambda w: abs(center(w)-center(anchor)))
             if choices and abs(center(choices[0])-center(anchor)) < 18:
                 if len(choices) == 1 or abs(center(choices[1])-center(anchor)) > abs(center(choices[0])-center(anchor))+5:
-                    values.setdefault(field, float(choices[0][4].replace(',', '')))
+                    if field not in values:
+                        values[field] = float(choices[0][4].replace(',', ''))
+                        value_words[field] = [tagword, choices[0]] + [w for w in header if abs(center(w)-center(anchor)) < 30 and 0 <= anchor[1]-w[1] < 38]
         for anchor in phrases(header, r'CFM|AIRFLOW|ESP|E\.S\.P\.|HP'):
             context = ' '.join(w[4].upper() for w in sorted(header,key=lambda w:(w[1],w[0]))
                                if abs(center(w)-center(anchor)) < 30 and 0 <= anchor[1]-w[1] < 38)
@@ -296,6 +301,7 @@ def schedule_candidates(words, page_number, name):
             text['unit_type'] = 'DOAS'
         evidence = ' '.join(w[4] for w in sorted(row, key=lambda w: w[0]))
         item = {'tag': tags[0], 'values': values, 'text': text,
+                'value_words': value_words,
                 'source': name, 'reference': f'page {page_number}',
                 'evidence': evidence[:240], 'basis': 'SUBMITTAL_SELECTION' if peak else 'PLAN_SCHEDULE'}
         if family == 'MSHP':
@@ -423,12 +429,21 @@ def keyed_outlets(words, page_number, name, legend):
 
 
 def packaged_submittals(doc, name):
-    """Explicit shared Unit Tag lists in packaged-unit selection sheets."""
+    """Explicit shared tags on a single packaged selection/product page.
+
+    Product identity remains useful when performance pages are raster-only.
+    Never carry the tags forward to an untagged page or assume heating type.
+    """
     result = []
     for page in doc:
         text = readable_text(page)
-        taglines = re.findall(r'Unit Tag:\s*([^\r\n]+)', text, re.I)
-        if len(taglines) != 1 or not re.fullmatch(r'\s*PAHU-\d+(?:\s*,\s*PAHU-\d+)*\s*', taglines[0], re.I):
+        if re.search(r'\b(?:ACTUAL|MEASURED|INITIAL|FINAL READING|TEST REPORT)\b',text,re.I):
+            continue
+        taglines = re.findall(r'(?:Unit Tag:|\bTag\(s\):)[ \t]*([^\r\n]+)', text, re.I)
+        if len(taglines) != 1 or not re.fullmatch(r'\s*(?:PAHU|PU)-\d+(?:\s*,\s*(?:PAHU|PU)-\d+)*\s*', taglines[0], re.I):
+            continue
+        tags = expand_marks(taglines[0])
+        if not tags or (tags[0].startswith('PU-') and not re.search(r'Packaged.*(?:Unit|Rooftop)', text, re.I)):
             continue
         values = {}
         patterns = {
@@ -444,11 +459,19 @@ def packaged_submittals(doc, name):
             matches = set(re.findall(pattern, text, re.I))
             if len(matches) == 1:
                 values[field] = float(next(iter(matches)).replace(',', ''))
-        if not values:
-            continue
-        for tag in re.findall(r'PAHU-\d+', taglines[0], re.I):
+        # Trane product-data wording labels supply motor HP explicitly. Fan
+        # drive RPM and whole-unit electrical values are deliberately ignored.
+        if 'motor_hp' not in values:
+            matches = set(re.findall(r'\b([\d.]+)\s+hp supply motor\b', text, re.I))
+            if len(matches) == 1: values['motor_hp'] = float(next(iter(matches)))
+        unit_text = {}
+        if re.search(r'\bDX Cooling,?\s+no heat\b', text, re.I):
+            unit_text['unit_type'] = 'PACKAGED / DX COOLING ONLY'
+        elif 'Electric Heat' in text:
+            unit_text['unit_type'] = 'PACKAGED / ELECTRIC HEAT'
+        for tag in tags:
             result.append({'tag': tag.upper(), 'values': values.copy(), 'source': name,
                            'reference': f'page {page.number + 1}', 'basis': 'SUBMITTAL_SELECTION',
-                           'evidence': f'Explicit shared Unit Tag: {taglines[0].strip()}; packaged selection; review approval/revision',
-                           'text': {'unit_type': 'PACKAGED / ELECTRIC HEAT'} if 'Electric Heat' in text else {}})
+                           'evidence': f'Explicit shared tags: {taglines[0].strip()}; packaged selection; review approval/revision',
+                           'text': unit_text.copy()})
     return result

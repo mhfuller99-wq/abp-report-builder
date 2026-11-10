@@ -13,10 +13,23 @@ function mergeSourceFiles(current,incoming){
 }
 function fieldLabel(key){return ({exhaust_cfm:'Hood exhaust CFM',supply_cfm:'Hood supply CFM (evidence only)',makeup_air_cfm:'Hood makeup CFM (evidence only)',heater_volts:'Heater design volts',heater_phase:'Heater phases (1 or 3)',heater_amps:'Heater design amps',heater_stages:'Heater stages',heating_type:'Heating type: ELECTRIC, GAS, or HOT WATER',heating_ewt:'Heating entering water temperature',heating_lwt:'Heating leaving water temperature',water_dp_ft:'Water pressure drop (ft)',cooling_edb:'Cooling entering dry bulb °F',cooling_ewb:'Cooling entering wet bulb °F',cooling_ldb:'Cooling leaving dry bulb °F',cooling_lwb:'Cooling leaving wet bulb °F',heating_edb:'Heating entering dry bulb °F',heating_ldb:'Heating leaving dry bulb °F',heating_cfm:'Heating CFM',heating_input_btu:'Heating input BTU/h',heating_output_btu:'Heating output BTU/h'})[key]||key.replaceAll('_',' ');}
 function reviewCoverage(records, outlets) {
+  if(!records.length&&!outlets.length)return 'No equipment or outlets extracted. This is an empty takeoff; review the source documents before building a job report.';
   const populated=records.filter(r=>r.status==='VERIFIED'&&r.template).length;
   const unresolved=records.filter(r=>r.status!=='VERIFIED'&&r.status!=='EXCLUDED').length;
   const included=outlets.filter(d=>d.include!==false).length;
   return `${populated} equipment entries ready; ${unresolved} unresolved. ${included} of ${outlets.length} outlet candidates included. Check source revisions and unresolved entries before field use.`;
+}
+function sourceReadiness(records,outlets,images,comparison){
+  const verified=records.filter(r=>r.status==='VERIFIED').length;
+  const unresolved=records.filter(r=>!['VERIFIED','EXCLUDED'].includes(r.status)).length;
+  const pendingImages=images.filter(c=>!c.accepted).length;
+  const problems=comparison?comparison.rows.filter(r=>r.status!=='match').length:0;
+  const empty=!records.length&&!outlets.length;
+  const title=empty?'No equipment or outlets extracted — source review required':verified+' equipment verified · '+unresolved+' equipment unresolved';
+  return {title,empty,pendingImages,problems};
+}
+function emptySourceReport(records,outlets,state){
+  return !!state?.source_checkpoints?.length&&!records.some(r=>r.status==='VERIFIED'&&r.template)&&!outlets.some(d=>d.include!==false);
 }
 // Shared browser helpers. Keep saved reviews validated before replacing UI state.
 function worksheetLabel(name) {
