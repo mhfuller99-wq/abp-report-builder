@@ -43,6 +43,7 @@ function officeDesignFromSheets(sheets){
   }
  }
  if(!units.size&&!outlets.length)throw Error('No supported ABP design panels found. This layout needs manual comparison; no values were imported.');
+ for(const unit of units.values())if(!Object.keys(unit.values).length)warnings.push(unit.tag+': office design cells could not be read; manual comparison is required.');
  return {units:[...units.values()],outlets,warnings};
 }
 function compareSize(value){return String(value??'').toUpperCase().replace(/["Øø\s]/g,'');}
@@ -51,6 +52,7 @@ function compareOfficeDesign(office,records,outlets){
  for(const unit of office.units){
   const record=current.get(unit.tag);
   if(!record){rows.push({item:unit.tag,field:'Equipment ID',office:'Present',builder:'Missing',status:'missing',reference:Object.values(unit.references)[0]||''});continue;}
+  if(!Object.keys(unit.values).length)rows.push({item:unit.tag,field:'Office design coverage',office:'No supported design values read',builder:record.status,status:'unresolved',reference:'Manual office comparison required'});
   for(const [field,value] of Object.entries(unit.values)){
    const raw=record[field],actual=raw===undefined||raw===null||raw===''?null:Number(raw);
    rows.push({item:unit.tag,field:fieldLabel(field),office:value,builder:actual??'Blank',status:actual===null?'missing':actual!==value?'different':record.status!=='VERIFIED'?'unverified':'match',reference:unit.references[field]});

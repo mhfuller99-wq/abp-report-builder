@@ -12,4 +12,5 @@ assert.equal(result.rows.filter(r=>r.field==='Neck size'&&r.status==='different'
 assert(result.rows.some(r=>r.item==='EF-2'&&r.status==='missing'));assert.equal(result.office_total,800);assert.equal(result.builder_total,800);
 const ids=ctx.compareOfficeDesign({units:[{tag:'MUA-1',values:{design_cfm:2000},references:{}}],outlets:[],warnings:[]},[{tag:'MAU-1',design_cfm:2000,status:'VERIFIED'}],[]);
 assert.equal(ids.rows.length,2);assert(ids.rows.some(r=>r.status==='missing'));assert(!/\bfetch\s*\(/.test(fs.readFileSync(__dirname+'/abp_compare.js','utf8')));
+const unsupported=ctx.compareOfficeDesign({units:[{tag:'EF-1',values:{},references:{}}],outlets:[],warnings:[]},[{tag:'EF-1',status:'VERIFIED'}],[]);assert.equal(unsupported.rows[0].status,'unresolved');
 console.log('Office comparison ignores actuals, preserves repeated outlets, finds size differences, and keeps MAU/MUA IDs distinct.');

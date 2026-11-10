@@ -237,6 +237,16 @@ function installWorkflow(){
  };
  document.addEventListener('input',workflowChanged);document.addEventListener('change',workflowChanged);
  const oldSourcesChanged=sourcesChanged;sourcesChanged=function(){workflowSourceRevision++;scanJobId=null;sourceManifest=[];oldSourcesChanged();workflowSave();};
+ const oldLoadProject=$('loadproject').onchange;
+ $('loadproject').onchange=async event=>{
+  if(workflowBusy)return;await oldLoadProject(event);
+  if($('status').textContent.startsWith('Saved review restored.')){
+   // A downloaded review has no authenticated link to this browser's old job.
+   // Common filenames from a different project must never show the wrong PDF.
+   workflowSourceRevision++;scanJobId=null;sourceManifest=[];completedBuild=null;
+   $('download-report').hidden=true;renderReadiness();workflowSave();
+  }
+ };
  const saved=localStorage.getItem(workflowDraftKey);
  if(saved){try{restoreWorkflow(JSON.parse(saved));if(workflowJob)followWorkflowJob();}catch(e){autosave.textContent='Saved review could not be restored: '+e.message;}}
  if(!workflowJob&&sessionStorage.getItem('abp-reference-job')){

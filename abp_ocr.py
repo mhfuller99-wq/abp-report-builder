@@ -455,7 +455,7 @@ def extract(data, source='source.pdf', timeout=65, *, path=None, page_numbers=No
                     report['interrupted']=True
                     for item in report['review_candidates']:item['source']=source
                     return report
-                return {'review_candidates':[],'coverage':[],'warnings':[source+': image time budget reached before any page completed. Retry selected pages.'],'failure_kind':'time_budget'}
+                return {'review_candidates':[],'coverage':[],'warnings':[source+': image stage failed to finish within its time budget; no page completed. Retry selected pages.'],'failure_kind':'time_budget'}
             finally:
                 # Clean up any descendant recognizer even if worker crashes.
                 try: os.killpg(child.pid, signal.SIGKILL)
