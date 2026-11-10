@@ -1,0 +1,19 @@
+const fs=require('fs'),vm=require('vm'),assert=require('assert');
+class Element{constructor(tag){this.tag=tag;this.children=[];this.checked=false}append(...items){this.children.push(...items)}replaceChildren(){this.children=[]}setAttribute(){}}
+const coverageBox=new Element('div'),reviewBox=new Element('div');
+const coverage=[{source:'<img onerror=alert(1)>.pdf',page:7,status:'partial_review_required',unexamined_content:'Outside selected regions requires review',regions:[{box:[100,200,700,320],status:'review_candidate'},{box:[1,2,3,4],status:'budget_skipped'}]}];
+const candidates=[{kind:'kitchen_hood',tag:'HD-1',source:'synthetic.pdf',page:7,status:'UNVERIFIED',include:false,review_values:{supply_cfm:1800},evidence_text:'EXH 2400 requires review; TOTAL SUPPLY 1800'}];
+const ctx=vm.createContext({document:{createElement:t=>new Element(t),createTextNode:t=>t,querySelectorAll:()=>[]},$:id=>id==='image-coverage'?coverageBox:reviewBox,imageCoverage:coverage,imageReview:candidates,records:[],diffusers:[],tags:[],savedTagPattern:/^(?:KH|HD)-\d+$/,renderReview(){},renderOutlets(){},updateWorkspace(){}});
+vm.runInContext(fs.readFileSync(__dirname+'/abp_ui.js','utf8'),ctx);
+const source=fs.readFileSync(__dirname+'/abp_server.py','utf8');vm.runInContext(source.slice(source.indexOf('function renderImageCoverage(){'),source.indexOf('function projectPayload(){')),ctx);
+ctx.renderImageCoverage();assert.equal(coverageBox.children.length,1);const text=coverageBox.children[0].children[2].textContent;assert.match(text,/Not examined: budget reached/);assert.match(text,/<img onerror=alert/);assert.equal(coverageBox.children[0].children[2].innerHTML,undefined);
+ctx.renderImageReview();const panel=reviewBox.children[2];panel.children[3].children[0].checked=true;panel.children[4].onclick();assert.equal(ctx.records.length,1);assert.equal(ctx.records[0].tag,'HD-1');assert.equal(ctx.records[0].design_cfm,null);assert.equal(ctx.records[0].osa_cfm,undefined);assert.equal(ctx.records[0].status,'UNVERIFIED');
+const saved={format:'ABP-PREFIELD-REVIEW',version:1,project:'Synthetic',location:'',standard:'Commercial',records:[],templates:[],image_review:candidates,image_coverage:coverage};
+assert.equal(ctx.validateSavedReview(saved,[],{},ctx.savedTagPattern).image_coverage[0].page,7);
+for(const bad of [{...coverage[0],page:0},{...coverage[0],regions:[{status:'x',box:[0,1,2,Infinity]}]},{...coverage[0],source:99},{...coverage[0],regions:Array(101).fill({status:'x'})}])assert.throws(()=>ctx.validateSavedReview({...saved,image_coverage:[bad]},[],{},ctx.savedTagPattern));
+ctx.imageCoverage=[];ctx.renderImageCoverage();assert.equal(coverageBox.children.length,0);
+console.log('Coverage: safe text, explicit omissions, reset, bounded save/restore; HD supply never becomes exhaust or outside air.');
+
+ctx.imageCoverageTruncated=true;ctx.imageCoverage=[];ctx.renderImageCoverage();assert.match(coverageBox.children[0].children[2].textContent,/truncated/);const truncatedSaved={...saved,image_coverage_truncated:true};assert.equal(ctx.validateSavedReview(truncatedSaved,[],{},ctx.savedTagPattern).image_coverage_truncated,true);assert.throws(()=>ctx.validateSavedReview({...saved,image_coverage_truncated:'yes'},[],{},ctx.savedTagPattern));
+
+ctx.imageCoverageTruncated=false;ctx.imageCoverage=[{...coverage[0],regions_omitted:3,image_regions_truncated:true,selection_truncated:true,selection_failed:'MemoryError'}];ctx.renderImageCoverage();const detail=coverageBox.children[0].children[2].textContent;assert.match(detail,/3 regions omitted/);assert.match(detail,/Image list truncated/);assert.match(detail,/selection incomplete/);assert.match(detail,/selection failed/);for(const bad of [{regions_omitted:-1},{selection_failed:42},{image_regions_truncated:'true'},{selection_truncated:1}])assert.throws(()=>ctx.validateSavedReview({...saved,image_coverage:[{...coverage[0],...bad}]},[],{},ctx.savedTagPattern));

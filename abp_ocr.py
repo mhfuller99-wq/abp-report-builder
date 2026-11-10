@@ -12,6 +12,7 @@ import tempfile
 import time
 from dataclasses import dataclass
 from pathlib import Path
+from abp_ocr_regions import render_geometry, raster_regions, ruled_regions, hood_information_candidates, information_parser_limited
 
 
 @dataclass(frozen=True)
@@ -24,26 +25,48 @@ class Budget:
     total_seconds: float = 60
     max_words: int = 30_000
     max_pdf_bytes: int = 40_000_000
+    max_preview_pixels: int = 6_000_000
+    max_region_pixels: int = 3_000_000
+    max_page_pixels: int = 16_000_000
+    max_regions: int = 24
+    max_regions_per_page: int = 6
+    max_detected_regions: int = 12
+    max_coverage_regions: int = 240
+    region_dpi: int = 216
 
 
 def word(x, y, x2, y2, text, confidence=None):
     return {'box': [x, y, x2, y2], 'text': text, 'confidence': confidence}
 
 
-def tesseract_words(page, pixels, timeout):
-    """Render displayed page orientation; map pixels back to displayed PDF points."""
+def tesseract_region_words(page, pixels, timeout, clip=None, psm=11, max_zoom=3.):
+    """OCR a displayed crop, retaining the pixmap's exact fractional origin."""
     import pymupdf
-    zoom = math.sqrt(pixels / (page.rect.width * page.rect.height))
-    pix = page.get_pixmap(matrix=pymupdf.Matrix(zoom, zoom), colorspace=pymupdf.csGRAY, alpha=False)
-    if pix.width * pix.height > pixels + 2 * (pix.width + pix.height):
-        raise ValueError('Raster budget exceeded')
+    started = time.monotonic()
+    rect = page.rect if clip is None else (pymupdf.Rect(clip) & page.rect)
+    zoom, estimate = render_geometry(rect, pixels, max_zoom)
+    pix = None
     with tempfile.TemporaryDirectory(prefix='abp-ocr-') as directory:
         source = Path(directory) / 'page.png'
         output = Path(directory) / 'recognized'
-        pix.save(str(source))
-        subprocess.run([sys.executable, str(Path(__file__).with_name('abp_limits.py')), '--exec-with-parent', str(os.getpid()), 'tesseract', str(source), str(output), '-l', 'eng', '--psm', '6', 'tsv'],
+        try:
+            pix = page.get_pixmap(matrix=pymupdf.Matrix(zoom, zoom), clip=rect,
+                                  colorspace=pymupdf.csGRAY, alpha=False)
+            if pix.width * pix.height > estimate:
+                raise ValueError('Raster budget exceeded')
+            ox, oy = pix.x, pix.y
+            pix.save(str(source))
+        finally:
+            # MuPDF's decoded image cache otherwise grows across previews/crops.
+            pix = None
+            pymupdf.TOOLS.store_shrink(100)
+        remaining = timeout - (time.monotonic() - started)
+        if remaining <= 0:
+            raise subprocess.TimeoutExpired('render', timeout)
+        subprocess.run([sys.executable, str(Path(__file__).with_name('abp_limits.py')), '--exec-with-parent',
+                        str(os.getpid()), 'tesseract', str(source), str(output), '-l', 'eng', '--psm', str(psm), 'tsv'],
                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                       timeout=timeout, check=True)
+                       timeout=remaining, check=True)
         tsv = output.with_suffix('.tsv')
         if tsv.stat().st_size > 8_000_000:
             raise ValueError('OCR text budget exceeded')
@@ -52,9 +75,20 @@ def tesseract_words(page, pixels, timeout):
             if row['level'] != '5' or not row['text'].strip():
                 continue
             x, y, w, h = (int(row[k]) for k in ('left', 'top', 'width', 'height'))
-            result.append(word(x / zoom, y / zoom, (x+w) / zoom, (y+h) / zoom,
-                               row['text'], float(row['conf'])))
+            confidence = float(row['conf'])
+            if not math.isfinite(confidence):
+                raise ValueError('Invalid OCR confidence')
+            result.append(word((ox+x) / zoom, (oy+y) / zoom, (ox+x+w) / zoom, (oy+y+h) / zoom,
+                               row['text'], confidence))
+            if len(result) > 30_000:
+                raise ValueError('OCR word budget exceeded')
         return result
+
+
+def tesseract_words(page, pixels, timeout):
+    """Compatibility full-page PSM6 fallback for small/unruled images and plans."""
+    return tesseract_region_words(page, pixels, timeout, psm=6,
+                                  max_zoom=math.sqrt(pixels / page.rect.get_area()))
 
 
 def lines(words):
@@ -130,67 +164,205 @@ def hood_candidates(words, source, page, method):
                        'coordinate_space': 'displayed_pdf_points',
                        'confidence_min': min(confidence) if confidence else None,
                        'evidence': relevant, 'review_reasons': reasons})
-    return result
+    return result + hood_information_candidates(words, source, page, method)
 
 
-def extract_local(data, source='synthetic.pdf', budget=Budget(), engine=tesseract_words, retain_words=True):
-    """Native and OCR streams stay separate; no conflict suppression or autoaccept.
+def extract_local(data, source='synthetic.pdf', budget=Budget(), engine=tesseract_words, retain_words=True,
+                  region_engine=None, selector=None):
+    """Native and OCR candidates remain separate and unverified.
 
-    Raster-containing pages get OCR even when native text is plentiful. Sparse
-    vector pages get OCR too. Full-page OCR is intentional for mixed content.
+    Inspect bounded previews for ruled raster tables, then OCR selected crops.
+    Preserve full-page PSM6 fallback for small/unruled content. Skipped images,
+    budgets, and all areas outside the crops stay explicit in compact coverage.
     """
     import pymupdf
+    region_engine = region_engine or tesseract_region_words
+    selector = selector or ruled_regions
     if len(data) > budget.max_pdf_bytes:
         raise ValueError('PDF byte budget exceeded')
-    if min(budget.max_pages, budget.max_pixels, budget.max_total_pixels, budget.dpi,
-           budget.per_page_seconds, budget.total_seconds, budget.max_words) <= 0:
-        raise ValueError('Budgets must be positive')
+    if any(not math.isfinite(value) or value <= 0 for value in vars(budget).values()):
+        raise ValueError('Budgets must be finite and positive')
     started = time.monotonic()
-    report = {'review_candidates': [], 'pages': [], 'warnings': [], 'complete_takeoff': False}
-    attempted = total_pixels = 0
+    report = {'review_candidates': [], 'pages': [], 'coverage': [], 'warnings': [], 'complete_takeoff': False}
+    attempted = total_pixels = regions_attempted = raster_pages = coverage_count = 0
+    coverage_warning = False
+
+    def record_region(coverage, region):
+        nonlocal coverage_count, coverage_warning
+        if coverage_count < budget.max_coverage_regions:
+            coverage.setdefault('regions', []).append(region)
+            coverage_count += 1
+        else:
+            coverage['regions_omitted'] = coverage.get('regions_omitted', 0) + 1
+            if not coverage_warning:
+                report['warnings'].append('Coverage region limit reached; omitted areas require manual review.')
+                coverage_warning = True
+
     with pymupdf.open(stream=data, filetype='pdf') as doc:
         if doc.needs_pass:
             raise ValueError('Encrypted PDF requires an unlocked copy')
         if len(doc) > 300:
             raise ValueError('PDF has more than 300 pages')
         for number, page in enumerate(doc, 1):
+            entry = {'page': number, 'ocr_status': 'not_needed'}
+            coverage = {'page': number, 'status': 'native_text_only',
+                        'unexamined_content': 'Native extraction is not a complete takeoff; verify source.'}
+            report['pages'].append(entry)
+            report['coverage'].append(coverage)
             native = [word(*w[:5]) for w in page.get_text('words')]
             if len(native) > budget.max_words:
+                entry['ocr_status'] = coverage['status'] = 'native_word_budget_skipped'
                 report['warnings'].append(f'Page {number}: native word budget exceeded; review manually.')
+                pymupdf.TOOLS.store_shrink(100)
                 continue
-            # Native coordinates are unrotated; transform to displayed orientation.
             for w in native:
                 w['box'] = list(pymupdf.Rect(w['box']) * page.rotation_matrix)
-            entry = {'page': number, 'ocr_status': 'not_needed'}
             if retain_words:
                 entry.update(native_words=native, ocr_words=[])
-            report['pages'].append(entry)
+            if information_parser_limited(native):
+                coverage['status'] = 'native_parser_limited'
+                report['warnings'].append(f'Page {number}: hood header-complexity budget exceeded; manual review required.')
             report['review_candidates'].extend(hood_candidates(native, source, number, 'native'))
-            needs_ocr = bool(page.get_image_info()) or sum(len(w['text']) for w in native) < 40
-            if not needs_ocr:
+            try:
+                images, image_overflow = raster_regions(page, len(native))
+            finally:
+                pymupdf.TOOLS.store_shrink(100)
+            eligible = [r for r in images if r['status'] == 'raster_unexamined']
+            for region in images:
+                record_region(coverage, region)
+            if image_overflow:
+                report['warnings'].append(f'Page {number}: image region limit reached; unlisted images require manual review.')
+                coverage['image_regions_truncated'] = True
+            sparse = sum(len(w['text']) for w in native) < 40
+            if not eligible and not image_overflow and not sparse:
+                if images:
+                    coverage['status'] = 'small_marginal_images_skipped'
+                    coverage['unexamined_content'] = 'Small marginal images were not OCR-read; verify manually.'
                 continue
-            remaining = budget.total_seconds - (time.monotonic() - started)
-            pixels = min(budget.max_pixels, math.ceil(page.rect.width * page.rect.height * (budget.dpi/72)**2))
-            if attempted >= budget.max_pages or total_pixels + pixels > budget.max_total_pixels or remaining <= 0:
-                entry['ocr_status'] = 'budget_skipped'
+            page_deadline = min(started + budget.total_seconds, time.monotonic() + budget.per_page_seconds)
+            page_pixels = page_regions = 0
+            page_attempted = False
+
+            def available(pixels):
+                return (time.monotonic() < page_deadline and total_pixels + pixels <= budget.max_total_pixels
+                        and page_pixels + pixels <= budget.max_page_pixels)
+
+            def consume(pixels):
+                nonlocal total_pixels, page_pixels
+                total_pixels += pixels
+                page_pixels += pixels
+
+            def recognize(rect, psm, full_page=False):
+                nonlocal attempted, regions_attempted, page_regions, page_attempted
+                max_pixels = budget.max_pixels if full_page else min(budget.max_pixels, budget.max_region_pixels)
+                _, pixels = render_geometry(rect, max_pixels, (budget.dpi if full_page else budget.region_dpi) / 72)
+                r = {'box': list(rect), 'status': 'budget_skipped', 'method': f'ocr_psm{psm}', 'pixels': pixels}
+                record_region(coverage, r)
+                if not available(pixels) or regions_attempted >= budget.max_regions or page_regions >= budget.max_regions_per_page:
+                    r['reason'] = 'Pixel, region or time budget exhausted; manual review required.'
+                    return None, r
+                consume(pixels)
+                regions_attempted += 1
+                page_regions += 1
+                if not page_attempted:
+                    page_attempted = True
+                    attempted += 1
+                try:
+                    remaining = max(.001, page_deadline - time.monotonic())
+                    ocr = (engine(page, pixels, remaining) if full_page else
+                           region_engine(page, pixels, remaining, clip=list(rect), psm=psm,
+                                         max_zoom=budget.region_dpi / 72))
+                    if len(ocr) > budget.max_words:
+                        raise ValueError('OCR word budget exceeded')
+                    if retain_words:
+                        entry['ocr_words'].extend(ocr)
+                    parser_limited = information_parser_limited(ocr)
+                    if parser_limited:
+                        report['warnings'].append(f'Page {number}: hood header-complexity budget exceeded; manual review required.')
+                    candidates = hood_candidates(ocr, source, number, 'ocr')
+                    if full_page:
+                        candidates = diffuser_candidates(ocr, source, number) + candidates
+                    for candidate in candidates:
+                        candidate['region'] = list(rect)
+                        candidate['region_coordinate_space'] = 'displayed_pdf_points'
+                    report['review_candidates'].extend(candidates)
+                    r['status'] = 'review_candidate' if candidates else ('no_supported_table_recognized' if ocr else 'no_text')
+                    if parser_limited:
+                        r['parser_limited'] = True
+                        r['reason'] = 'Hood header-complexity budget exceeded; manual review required.'
+                        if not candidates:
+                            r['status'] = 'parser_limited'
+                    r['candidate_count'] = len(candidates)
+                    return candidates, r
+                except (OSError, ValueError, RuntimeError, MemoryError, subprocess.SubprocessError) as exc:
+                    r['status'] = 'failed'
+                    r['reason'] = type(exc).__name__ + '; manual review required.'
+                    report['warnings'].append(f'Page {number}: OCR failed ({type(exc).__name__}); manual review required.')
+                    return None, r
+                finally:
+                    pymupdf.TOOLS.store_shrink(100)
+
+            if raster_pages >= budget.max_pages or not available(1):
+                entry['ocr_status'] = coverage['status'] = 'budget_skipped'
+                coverage['unexamined_content'] = 'Raster content not examined; manual review required.'
                 report['warnings'].append(f'Page {number}: OCR budget exhausted; manual review required.')
                 continue
-            attempted += 1
-            total_pixels += pixels
+            raster_pages += 1
+            boxes = []
+            preview_failed = False
             try:
-                ocr = engine(page, pixels, min(remaining, budget.per_page_seconds))
-                if len(ocr) > budget.max_words:
-                    raise ValueError('OCR word budget exceeded')
-                if retain_words:
-                    entry['ocr_words'] = ocr
-                report['review_candidates'].extend(diffuser_candidates(ocr, source, number))
-                entry['ocr_status'] = 'review_required' if ocr else 'no_text'
-                report['review_candidates'].extend(hood_candidates(ocr, source, number, 'ocr'))
+                _, preview_pixels = render_geometry(page.rect, min(budget.max_preview_pixels, budget.max_pixels), 1.)
+                if not available(preview_pixels):
+                    entry['ocr_status'] = coverage['status'] = 'budget_skipped'
+                    report['warnings'].append(f'Page {number}: preview pixel/time budget exhausted; manual review required.')
+                    coverage['unexamined_content'] = 'Raster content not examined; manual review required.'
+                    continue
+                consume(preview_pixels)
+                boxes, _, truncated = selector(page, max_pixels=min(budget.max_preview_pixels, budget.max_pixels),
+                                               max_regions=budget.max_detected_regions, deadline=page_deadline)
+                coverage['preview_pixels'] = preview_pixels
+                if truncated:
+                    coverage['selection_truncated'] = True
+                    report['warnings'].append(f'Page {number}: table-selection budget exhausted; undetected regions require manual review.')
+                boxes = [box for box in boxes if image_overflow or not images or
+                         any(pymupdf.Rect(box).intersects(pymupdf.Rect(r['box'])) for r in eligible)]
+            except (OSError, ValueError, RuntimeError, MemoryError) as exc:
+                preview_failed = True
+                coverage['selection_failed'] = type(exc).__name__
+                report['warnings'].append(f'Page {number}: table preview failed; bounded full-page fallback attempted if budget permits.')
+            finally:
+                pymupdf.TOOLS.store_shrink(100)
+            statuses = []
+            if boxes:
+                coverage['unexamined_content'] = 'All content outside selected table crops; manual review required.'
+                for box in boxes:
+                    candidates, r = recognize(pymupdf.Rect(box), 11)
+                    statuses.append(r['status'])
+                    # Different segmentation only when no supported candidate was
+                    # found. Never replace/suppress a low-confidence candidate.
+                    if candidates == []:
+                        _, fallback = recognize(pymupdf.Rect(box), 6)
+                        statuses.append(fallback['status'])
+            else:
+                coverage['unexamined_content'] = 'Full-page OCR may miss content and associations; manual review required.'
+                candidates, r = recognize(page.rect, 6, full_page=True)
+                statuses.append(r['status'])
+                coverage['fallback'] = 'preview_failed' if preview_failed else 'no_ruled_raster_table'
+            if statuses and all(s == 'budget_skipped' for s in statuses):
+                entry['ocr_status'] = coverage['status'] = 'budget_skipped'
+            elif statuses and all(s == 'failed' for s in statuses):
+                entry['ocr_status'] = coverage['status'] = 'failed'
+            else:
+                entry['ocr_status'] = 'review_required' if any(s not in {'no_text', 'failed', 'budget_skipped'} for s in statuses) else 'no_text'
+                coverage['status'] = 'partial_review_required'
+            if 'budget_skipped' in statuses:
+                report['warnings'].append(f'Page {number}: region OCR budget exhausted; skipped areas require manual review.')
+            if page_attempted:
                 report['warnings'].append(f'Page {number}: OCR is unverified and may miss or misread content; review the original.')
-            except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as exc:
-                entry['ocr_status'] = 'failed'
-                report['warnings'].append(f'Page {number}: OCR failed ({type(exc).__name__}); manual review required.')
-    report['ocr_attempted_pages'] = attempted
+            if len(report['review_candidates']) > 500:
+                raise ValueError('Too many OCR review candidates; split source documents')
+    report.update(ocr_attempted_pages=attempted, ocr_regions_attempted=regions_attempted,
+                  pixels_processed=total_pixels, raster_pages_attempted=raster_pages)
     if len(report['review_candidates']) > 500:
         raise ValueError('Too many OCR review candidates; split source documents')
     return report
@@ -293,7 +465,9 @@ def _worker(directory):
     root = Path(directory)
     report = extract_local((root / 'source.pdf').read_bytes(), source='uploaded PDF', retain_words=False)
     compact = {'review_candidates': report['review_candidates'], 'warnings': report['warnings'],
-               'ocr_attempted_pages': report['ocr_attempted_pages'], 'complete_takeoff': False}
+               'ocr_attempted_pages': report['ocr_attempted_pages'], 'complete_takeoff': False,
+               'coverage': report['coverage'], 'ocr_regions_attempted': report['ocr_regions_attempted'],
+               'pixels_processed': report['pixels_processed']}
     for item in compact['review_candidates']:
         if 'evidence' in item:
             item['evidence_text'] = ' '.join(w['text'] for w in item['evidence'])[:1000]

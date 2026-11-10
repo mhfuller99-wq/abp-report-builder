@@ -238,8 +238,11 @@ establish the cause of a past server restart.
 
 The source scan now runs image reading in a separate process with a 65-second
 shared scan budget, 256 MiB address-space limit, CPU limit and one concurrent
-OCR job. Each PDF permits 12 OCR page attempts, 8 million pixels per page and
-40 million total pixels. OCR PDFs larger than 40 MB are skipped with a warning;
+OCR job. Each PDF permits up to 12 raster pages, 8 million pixels per full-page
+render, 6 million per discovery preview, 3 million per table crop, and 16 million
+cumulative pixels per page. The PDF-wide cap remains 40 million pixels. Up to
+24 OCR regions (6 per page) can be attempted; coverage retains up to 240 region
+entries with explicit omission counts. OCR PDFs larger than 40 MB are skipped with a warning;
 normal source handling remains separate. Temporary image/job files are deleted.
 The Docker image installs Tesseract and English data. Missing OCR or an exhausted
 budget leaves a visible manual-review warning rather than claiming completeness.
@@ -273,3 +276,33 @@ the web server consume additional memory. Hosted aggregate-memory/load validatio
 is still required. OCR runs while the existing document-operation lock is held
 for up to the remaining 65-second scan budget; competing document requests can
 receive the existing busy response, while health requests remain responsive.
+
+## Targeted image reading and page coverage
+
+Image recognition remains a separate, unverified review queue. On native-rich
+pages, small marginal images can be skipped as likely branding; this is a
+heuristic, not a guarantee that the image is irrelevant. Check those images
+manually if necessary. Larger raster regions remain eligible for examination.
+
+The image reader can locate ruled raster tables and examine bounded crops rather
+than shrinking an entire large sheet. Supported multirow `HOOD INFORMATION`
+tables retain the exact `HD-…` identity and keep total exhaust CFM distinct from
+total supply CFM. Low-confidence fields remain blank with source evidence for
+review. Adding a checked hood candidate to the ordinary review can transfer only
+its reviewed exhaust candidate into design CFM. Supply and makeup air never
+populate exhaust or outside-air fields. The new record remains unverified.
+
+The image coverage panel reports pages, selected regions, skips, failures, and
+unsupported content. It is saved with the project review and cleared when source
+files change. Region coordinates are displayed PDF points. Page numbers refer
+to the uploaded file; if that file is a subset, retain its original-page mapping
+in the source name or review notes. Native text processing is separate. A page
+with a recognized table is not a complete takeoff, and areas outside selected
+regions still require review. If the coverage display reaches its 1,000-page
+limit, the scan warns that remaining pages require manual review.
+
+Resource budgets and the existing supervised worker remain mandatory. Temporary
+raster buffers and MuPDF cache entries are released between render operations;
+local measurements do not replace full-container memory validation. Private
+client drawing sets are not bundled with this repository, and
+customer PDFs must not be added to tests or published artifacts.
