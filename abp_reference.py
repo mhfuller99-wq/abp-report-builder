@@ -13,7 +13,8 @@ MAX_CELLS = 200_000
 SUPPORTED = ('AIR MOVING EQUIPMENT', 'MAU', 'COIL DX GAS', 'SUPPLY DIFFUSERS',
              'DUCT TRAVERSE RECT', 'KITCHEN HOOD', 'EXHAUST FANS SMALL',
              'PROJECT SUMMARY', 'INSTRUMENT', 'CHILLER', 'FAN COIL', 'EXHAUST FAN', 'EXHAUST GRILL', 'PUMP',
-             'UNIT HEATER', 'NOTES', 'PROJECT INFO', 'COVER', 'ABBREVIATION', 'PRE-TAB')
+             'UNIT HEATER', 'NOTES', 'PROJECT INFO', 'COVER', 'ABBREVIATION', 'PRE-TAB',
+             'DUCT TRAVERSE RND', 'DUCT TRAVERSE OVAL')
 
 
 def open_reference(data):
@@ -103,7 +104,7 @@ def reset_special_layout(ws):
     kind = family(ws)
     special = {'AIR MOVING EQUIPMENT', 'MAU', 'COIL DX GAS', 'SUPPLY DIFFUSERS',
                'DUCT TRAVERSE RECT', 'KITCHEN HOOD', 'EXHAUST FANS SMALL',
-               'PROJECT SUMMARY', 'INSTRUMENT', 'COVER', 'UNIT HEATER'}
+               'PROJECT SUMMARY', 'INSTRUMENT', 'COVER', 'UNIT HEATER', 'DUCT TRAVERSE RND', 'DUCT TRAVERSE OVAL'}
     if kind not in special:
         return False
 
@@ -165,6 +166,15 @@ def reset_special_layout(ws):
             for col,row in [('L',4),('N',7)]:
                 cell=ws[f'{col}{off+row}']
                 if cell.data_type=='f':blank(cell.coordinate)
+    elif kind in ('DUCT TRAVERSE RND','DUCT TRAVERSE OVAL'):
+        starts=[c.row-3 for row in ws for c in row if str(c.value or '').strip().upper()=='UNIT DESIGNATION']
+        for off in starts or [0]:
+            areas=(f'H{off+10}:H{off+22}',f'B{off+16}:N{off+16}') if kind=='DUCT TRAVERSE RND' else (f'H{off+14}:H{off+24}',f'C{off+19}:M{off+19}')
+            for area in areas+(f'N{off+3}:N{off+4}',f'D{off+7}',f'D{off+6}'):
+                cells=ws[area] if ':' in area else ((ws[area],),)
+                for row in cells:
+                    for cell in row:
+                        if not isinstance(cell,MergedCell) and cell.data_type!='f' and cell.value!='--':cell.value=None
     elif kind == 'KITCHEN HOOD':
         blank('D11:M13'); blank('D7'); blank('K7')
         # Row 12 is the selected instrument's conversion factor, not design CFM.
