@@ -6,7 +6,7 @@ class CoverageTests(unittest.TestCase):
   return {'status':'completed_native_stage','source':{'bytes':10,'sha256':'a'*64},'ocr':{'review_candidates':[],'warnings':[],'coverage':coverage},'warnings':[],'outlets':[],'chunks':[],'candidates':[]}
  def test_scan_keeps_source_coverage_and_bounds_overflow(self):
   coverage=[{'page':1,'status':'budget_skipped'}]*600
-  with patch.object(app,'bounded_pdf_scan',return_value=self.native(coverage)):
+  with patch.object(app,'bounded_pdf_scan',return_value=self.native(coverage)), patch('abp_resilient.deferred_ocr',return_value={'review_candidates':[],'warnings':[],'coverage':coverage}):
    result=app.read_sources([('a.pdf',b''),('b.pdf',b'')])
   self.assertEqual(len(result['image_coverage']),1000)
   self.assertTrue(result['image_coverage_truncated'])

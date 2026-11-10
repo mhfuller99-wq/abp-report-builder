@@ -16,6 +16,7 @@ from abp_design import extract_design_rows, UNIT_FORMS, TEXT_CELLS, HEATER_FORMS
 from abp_job import NUMERIC_FIELDS, TEXT_FIELDS, COIL_FORMS, canonical_tag, postal_match, performance_candidates, populate_identity, populate_support, prepare_documentation
 from abp_schedule import parse_pdf, annotate
 from abp_scan import scan as bounded_pdf_scan, ScanIncomplete
+from abp_review_gate import partial_review_allowed, partial_review_lines
 
 ROOT=Path(__file__).resolve().parent
 TEMPLATES=ROOT/'03_Workbooks_and_Master_Templates'
@@ -68,12 +69,25 @@ def read_sources(blobs):
     """Collect every occurrence and provenance. Do not invent values from surrounding text."""
     warnings=[];records={};sources=[];total_chars=0;preview=[];signals=set();diffusers=[];image_review=[];image_coverage=[];image_coverage_truncated=False
     import time
-    ocr_deadline=time.monotonic()+65
-    scan_deadline=time.monotonic()+100
+    from abp_resilient import deferred_ocr
+    blobs=list(blobs)
+    if len(blobs)>100:raise ValueError('Upload at most 100 sources at a time')
+    # Multipart sources are seekable disk files. Account for failed sources too.
+    input_bytes=0
+    for _,source in blobs:
+        if hasattr(source,'seek'):
+            offset=source.tell();source.seek(0,2);input_bytes+=source.tell();source.seek(offset)
+        else:input_bytes+=len(source)
+        if input_bytes>MAX_UPLOAD:raise ValueError('Total source size exceeds 200 MB')
+    scan_deadline=time.monotonic()+90
+    pdfs_left=sum(Path(name).suffix.lower()=='.pdf' for name,_ in blobs)
+    checkpoints=[];ocr_queue=[]
     total_size=0
     for name,source in blobs:
         name=Path(name).name[:160];ext=Path(name).suffix.lower();chunks=[];structured=[]
         data=None;source_digest=None
+        checkpoint={'name':name,'native_status':'pending','image_status':'not_applicable'}
+        checkpoints.append(checkpoint)
         if ext!='.pdf':
             data=source.read(MAX_UPLOAD+1) if hasattr(source,'read') else source
             total_size+=len(data)
@@ -81,28 +95,27 @@ def read_sources(blobs):
         try:
             if ext=='.pdf':
                 stream=source if hasattr(source,'read') else io.BytesIO(source)
-                if time.monotonic()>=scan_deadline:raise ScanIncomplete('Scan request time limit reached; split the source set. No partial scan accepted.')
-                native=bounded_pdf_scan(name,stream,timeout=min(30,scan_deadline-time.monotonic()),ocr_timeout=max(0,ocr_deadline-time.monotonic()),input_limit=MAX_UPLOAD-total_size)
+                remaining=max(0,scan_deadline-time.monotonic())
+                allowance=min(30,remaining/max(1,pdfs_left));pdfs_left-=1
+                if allowance<=0:
+                    checkpoint.update(native_status='incomplete',image_status='not_started',reason='request time limit')
+                    warnings.append(name+': native scan not started; request time limit. Review this source manually.')
+                    continue
+                native=bounded_pdf_scan(name,stream,timeout=allowance,ocr_timeout=0,input_limit=MAX_UPLOAD-total_size)
+                identity=native.get('source') or {}
+                total_size+=identity.get('bytes',0)
+                checkpoint.update(sha256=identity.get('sha256'),native_status=native['status'],image_status='not_started')
                 if native['status']!='completed_native_stage':
-                    raise ScanIncomplete(name+': '+native['warnings'][0])
-                total_size+=native['source']['bytes']
-                source_digest=native['source']['sha256']
-                image_result=native['ocr']
-                if len(image_review)+len(image_result['review_candidates'])<=500:
-                    image_review.extend(image_result['review_candidates'])
-                else:warnings.append(name+': image review queue limit reached; this file image candidates were not added; split the source set')
-                warnings.extend(image_result['warnings'])
-                coverage=image_result.get('coverage',[])
-                if not coverage and isinstance(native.get('pages'),int) and 0<native['pages']<=300:
-                    coverage=[{'page':page,'status':'image_reading_unavailable','unexamined_content':'Image reading was unavailable or incomplete; see scan warnings. Native text was handled separately.'} for page in range(1,native['pages']+1)]
-                if isinstance(coverage,list):
-                    room=max(0,1000-len(image_coverage))
-                    image_coverage.extend({**entry,'source':name} for entry in coverage[:room] if isinstance(entry,dict))
-                    if len(coverage)>room:
-                        image_coverage_truncated=True
-                        warnings.append(name+': image coverage display limit reached; remaining pages require manual review')
+                    checkpoint['reason']=native.get('reason','native scan failed')
+                    warnings.extend(name+': '+warning for warning in native['warnings'])
+                    continue
+                source_digest=identity['sha256']
+                ocr_queue.append((name,stream,identity,native.get('pages'),checkpoint))
                 warnings.extend(native['warnings'])
-                diffusers.extend(native['outlets'])
+                if len(diffusers)+len(native['outlets'])>500:
+                    checkpoint.update(native_status='incomplete',reason='outlet review capacity exceeded')
+                    warnings.append(name+': outlet review capacity exceeded; this source outlet candidates were not added. Review manually or rescan separately.')
+                else:diffusers.extend(native['outlets'])
                 if native['outlets']:signals.add('supply_outlets')
                 chunks=native['chunks']
                 for place,txt in chunks:
@@ -134,7 +147,10 @@ def read_sources(blobs):
                         if len(chunks)>MAX_OUTPUT_ROWS:raise ValueError('Workbook has too many nonempty rows')
                     structured.extend(extract_design_rows(source_rows,ws.title,TAGS))
                 wb.close()
-            else:warnings.append(name+': unsupported source type');continue
+            else:
+                checkpoint.update(native_status='incomplete',reason='unsupported source type')
+                warnings.append(name+': unsupported source type');continue
+            if checkpoint['native_status']=='pending':checkpoint['native_status']='completed_native_stage'
             sources.append({'name':name,'sections':len(chunks),'sha256':source_digest or hashlib.sha256(data).hexdigest()})
             for place,chunk in chunks:
                 total_chars+=len(chunk)
@@ -166,11 +182,41 @@ def read_sources(blobs):
                 if tag not in records:
                     records[tag]={'tag':tag,**evidence,'occurrences':[evidence],'design_cfm':None,'osa_cfm':None,'esp':None,'motor_hp':None,'design_gpm':None,'status':'UNVERIFIED','candidates':[]}
                 if len(records[tag]['candidates'])<30:records[tag]['candidates'].append({**candidate,'source':name})
-            if len(records)>MAX_RECORDS:warnings.append('More than 500 unique tags found; only first 500 will be shown')
-        except ScanIncomplete:raise
-        except Exception as e:warnings.append(name+': could not parse ('+str(e)[:120]+')')
+            if len(records)>MAX_RECORDS:
+                checkpoint.update(native_status='incomplete',reason='equipment review capacity exceeded')
+                warnings.append('More than 500 unique tags found; only first 500 will be shown')
+        except Exception as e:
+            checkpoint.update(native_status='incomplete',reason=str(e)[:120])
+            warnings.append(name+': could not parse ('+str(e)[:120]+')')
         finally:
             del data
+    # All native PDF, CSV and workbook sources finish before image work begins.
+    ocr_deadline=min(scan_deadline,time.monotonic()+65)
+    for index,(name,stream,identity,pages,checkpoint) in enumerate(ocr_queue):
+        allowance=max(0,ocr_deadline-time.monotonic())/max(1,len(ocr_queue)-index)
+        image_result=deferred_ocr(name,stream,identity,allowance)
+        coverage=image_result.get('coverage',[])
+        missed=not coverage or any(c.get('unexamined_content') or c.get('status') in {'budget_skipped','failed','image_reading_unavailable'} or c.get('regions_omitted') or c.get('selection_truncated') or c.get('selection_failed') or c.get('image_regions_truncated') or any(r.get('status') in {'budget_skipped','failed','parser_limited'} for r in c.get('regions',[])) for c in coverage)
+        checkpoint['image_status']='incomplete' if missed else 'review_required'
+        if len(image_review)+len(image_result['review_candidates'])<=500:
+            image_review.extend(image_result['review_candidates'])
+        else:
+            checkpoint['image_status']='incomplete'
+            warnings.append(name+': image review queue limit reached; this file image candidates were not added; split the source set')
+        warnings.extend(image_result['warnings'])
+        coverage=image_result.get('coverage',[])
+        if not coverage and isinstance(pages,int) and 0<pages<=300:
+            coverage=[{'page':page,'status':'image_reading_unavailable','unexamined_content':'Image reading was unavailable or incomplete; see scan warnings. Native text was handled separately.'} for page in range(1,pages+1)]
+        if isinstance(coverage,list):
+            room=max(0,1000-len(image_coverage))
+            image_coverage.extend({**entry,'source':name} for entry in coverage[:room] if isinstance(entry,dict))
+            if len(coverage)>room:
+                image_coverage_truncated=True
+                checkpoint.update(image_status='incomplete',reason='image coverage display capacity exceeded')
+                warnings.append(name+': image coverage display limit reached; remaining pages require manual review')
+    incomplete_sources=image_coverage_truncated or len(records)>MAX_RECORDS or any(c['native_status']!='completed_native_stage' or c['image_status']=='incomplete' for c in checkpoints)
+    if incomplete_sources:
+        warnings.insert(0,'SCAN INCOMPLETE: successful source results are preserved for review only. Missing sources and image content require manual review or a separate rescan; this is not a complete takeoff.')
     for record in records.values():
         annotate(record)
         form=inferred_form(record['tag'], record)
@@ -210,7 +256,7 @@ def read_sources(blobs):
     # Schedule headings mean the text was usable, even if another drawing was scanned.
     sparse=total_chars<SPARSE_TEXT_LIMIT or (image_only and not signals)
     if len(diffusers)>500:raise ValueError('More than 500 supply outlets were found. Split the source set; no partial outlet list was accepted.')
-    return {'tags':list(records)[:MAX_RECORDS],'records':list(records.values())[:MAX_RECORDS],'diffusers':diffusers[:500],'image_review':image_review,'image_coverage':image_coverage,'image_coverage_truncated':image_coverage_truncated,'warnings':warnings,'characters':total_chars,'sources':sources,'preview':'\n'.join(preview)[:1800],'signals':sorted(signals),'sparse':sparse}
+    return {'scan_status':'incomplete' if incomplete_sources else 'review_required','complete_takeoff':False,'source_checkpoints':checkpoints,'tags':list(records)[:MAX_RECORDS],'records':list(records.values())[:MAX_RECORDS],'diffusers':diffusers[:500],'image_review':image_review,'image_coverage':image_coverage,'image_coverage_truncated':image_coverage_truncated,'warnings':warnings,'characters':total_chars,'sources':sources,'preview':'\n'.join(preview)[:1800],'signals':sorted(signals),'sparse':sparse}
 
 # These labels only suggest which original ABP workbook to include.
 # They do not verify equipment quantities, schedules, or field measurements.
@@ -523,8 +569,40 @@ def add_template(wb,path):
                     if dxf.border is not None:dxf.border=bake_painted(dxf.border,source_palette)
     source.close()
 
+def validate_scan_state(state, acknowledgement=None):
+    if not isinstance(state,dict) or state.get('status') not in ('not_scanned','review_required','incomplete','stale','unknown'):
+        raise ValueError('Invalid source scan state')
+    if state.get('complete_takeoff') is not False:raise ValueError('Invalid takeoff completeness')
+    checkpoints=state.get('source_checkpoints')
+    if not isinstance(checkpoints,list) or len(checkpoints)>100:raise ValueError('Invalid source checkpoints')
+    for item in checkpoints:
+        if not isinstance(item,dict) or not isinstance(item.get('name'),str) or len(item['name'])>160:raise ValueError('Invalid source checkpoint')
+        if item.get('native_status') not in ('completed_native_stage','incomplete') or item.get('image_status') not in ('not_applicable','not_started','incomplete','review_required'):raise ValueError('Invalid source checkpoint status')
+        if item.get('sha256') is not None and (not isinstance(item['sha256'],str) or not re.fullmatch(r'[a-f0-9]{64}',item['sha256'])):raise ValueError('Invalid source identity')
+        if 'reason' in item and (not isinstance(item['reason'],str) or len(item['reason'])>1000):raise ValueError('Invalid source checkpoint reason')
+    warnings=state.get('warnings')
+    if not isinstance(warnings,list) or len(warnings)>1000 or any(not isinstance(w,str) or len(w)>2000 for w in warnings):raise ValueError('Invalid scan warnings')
+    if state['status'] in ('incomplete','stale','unknown') or any(c['native_status']!='completed_native_stage' or c['image_status'] in ('incomplete','not_started') for c in checkpoints):
+        if not partial_review_allowed(state, acknowledgement):
+            raise ValueError('Source review is incomplete or source files changed. Rescan, or explicitly acknowledge the displayed incomplete coverage with a manual review note; no partial report was built.')
+
+
+def validate_api_scan_state(payload):
+    # Unknown legacy coverage must never be upgraded to a successful scan.
+    if not isinstance(payload,dict) or 'scan_state' not in payload:
+        raise ValueError('Source scan history is required. Refresh the app and rescan the complete source set before building. Older API clients must send scan_state; no report was built.')
+    state=payload['scan_state']
+    validate_scan_state(state, payload.get('scan_acknowledgement'))
+    has_evidence=any(payload.get(key) for key in ('records','tags','diffusers','image_review','image_coverage'))
+    if state['status']=='not_scanned' and (has_evidence or state['source_checkpoints']):
+        raise ValueError('Unscanned state is only valid for a blank worksheet pack. Rescan source documents before building extracted equipment.')
+    if state['status']=='review_required' and has_evidence and not state['source_checkpoints']:
+        raise ValueError('Source checkpoints are required for extracted equipment. Rescan the complete source set before building.')
+
+
 def validate_payload(payload):
     if not isinstance(payload,dict):raise ValueError('Invalid request')
+    if 'scan_state' in payload:validate_scan_state(payload['scan_state'], payload.get('scan_acknowledgement'))
     if not str(payload.get('project','')).strip():raise ValueError('Project name is required')
     if len(str(payload.get('project','')))>180:raise ValueError('Project name too long')
     if len(str(payload.get('location','')))>180:raise ValueError('Location too long')
@@ -703,6 +781,20 @@ def build(payload):
     populate_equipment(wb,records,equipment)
     populate_diffusers(wb,payload.get('diffusers') or [])
     prepare_documentation(wb,excel_safe(project),excel_safe(str(payload.get('location',''))),support)
+    disclosure=partial_review_lines(payload.get('scan_state') or {},payload.get('scan_acknowledgement'))
+    if disclosure:
+        note_sheets=[ws for ws in wb if getattr(ws,'_template_file',None)=='Notes.xlsx']
+        if not note_sheets:raise ValueError('The original Notes form is required for partial-review disclosure')
+        for start in range(0,len(disclosure),36):
+            if start:
+                before=set(wb.sheetnames);add_template(wb,LOOKUP['Notes.xlsx'])
+                note=wb[next(n for n in wb.sheetnames if n not in before)]
+            else:note=note_sheets[0]
+            for row,line in enumerate(disclosure[start:start+36],4):
+                for col,value in [('B','SOURCE REVIEW'),('C',excel_safe(line)),('E','NOTED')]:
+                    if note[f'{col}{row}'].data_type=='f':raise ValueError('Notes input overlaps a template formula')
+                    note[f'{col}{row}']=value
+
     def copies(filename):return sum(1 for ws in wb.worksheets if getattr(ws,'_template_file',None)==filename)
     if RECT_TEMPLATE in LOOKUP:
         while copies(RECT_TEMPLATE)<BLANK_RECT_FORMS:add_fresh(RECT_TEMPLATE)
@@ -762,7 +854,7 @@ PAGE='''<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewpor
 #files::file-selector-button,#reference-file::file-selector-button{background:#1d3c56;border-color:#5f87a6;font-weight:650;padding:10px 14px;border-radius:7px}
 #files::file-selector-button:hover,#reference-file::file-selector-button:hover{background:#265072;border-color:#67d4c3;color:#fff}
 .outlet-table{width:100%;border-collapse:collapse;font-size:12px;margin-top:8px}.outlet-table th,.outlet-table td{padding:8px;border-bottom:1px solid var(--line);text-align:left;vertical-align:top}.outlet-table th{background:#25364b}#outlets h3{margin:18px 0 6px;font-size:15px}
-</style><body><a class="skip-link" href="#project-card">Skip to report builder</a><header><img src="/logo.png" alt="Air Balance Professionals company logo"><div><div class="brand-name">Air Balance Professionals</div><div class="brand-sub">Technical reporting workspace &nbsp;·&nbsp; NEBB #3861</div></div><form action="/logout" method="post" style="margin-left:auto"><button type="submit" style="background:#eff6ff;color:#16508c;border:1px solid #c8daef;min-height:38px;padding:8px 12px;white-space:nowrap">Sign out</button></form></header><main class="wrap"><section class="hero" aria-label="Report builder introduction"><div class="hero-row"><div><div class="eyebrow">ABP / Field engineering tools</div><h1>Build your TAB report</h1><p>Start with your job documents or an approved report. Review the design, choose your worksheets, and build a pre-field report in Excel.</p></div><span class="draft-pill">PRE-FIELD WORKSPACE</span></div></section><nav class="workspace-nav" aria-label="Report sections"><a href="#project-card">01 Project</a><a href="#basis-card">02 Report basis</a><a href="#template-panel" id="templates-nav">03 Worksheets</a><a href="#build-card">04 Build report</a></nav><div class="workspace-layout"><div><div class="card" id="project-card"><h2><span class="step">01</span> Project details</h2><div class="grid"><label>Project name<input id="project" type="text" placeholder="Project / facility name"></label><label>Location<input id="location" type="text" placeholder="City, State"></label></div><label>Standard<select id="standard"><option value="Commercial">Commercial · ±10% target</option><option value="USACE">USACE · ±5% target (DALT prerequisite)</option></select></label></div><div class="card" id="basis-card"><h2><span class="step">02</span> Choose your report source</h2><label>Build method<select id="buildmethod"><option value="sources">Build from source documents and master templates</option><option value="reference">Use an approved report as the design and layout reference</option></select></label><div id="reference-panel" hidden><p>Use a report for this same project whose design values and equipment list you have approved. This keeps its report pages, grouped Design/Actual columns, formulas and branding. Field measurements, serial numbers and signoffs are cleared. Source scans do not overwrite this report.</p><label>Approved reference workbook<input id="reference-file" type="file" accept=".xlsx"></label><button id="inspect-reference" type="button">Review reference report</button><div id="reference-summary" role="status" aria-live="polite"></div><label><input id="reference-approved" type="checkbox"> Use this reference’s equipment list and design values for this project, including differences from drawings.</label></div></div><div class="card" id="source-panel"><h2>Upload source documents</h2><div id="source-drop-zone"><label for="files">Add drawings, submittals, and schedules</label><input id="files" aria-label="Project source documents" type="file" accept=".pdf,.xlsx,.csv" multiple><p>Drop multiple files here, or choose files again to add more.</p></div><div id="source-file-list" aria-live="polite"></div><p class="muted">PDF mechanical sheets, approved submittals, Excel and CSV schedules. Native text plus bounded image reading. Image candidates require separate source confirmation; always review the M-sheet takeoff and latest revision.</p><button id="scan">Scan uploaded files</button><p id="scanstatus" role="status" aria-live="polite"></p><div id="tags"></div><div id="review"></div><div id="outlets"></div><div id="image-coverage"></div><div id="image-review"></div></div><div class="card" id="template-panel"><h2><span class="step">03</span> Choose report worksheets</h2><p class="muted">Select the actual ABP worksheets to include. Original layouts, formatting, print settings and formulas are preserved. Additional forms continue on the same applicable tab; only existing input cells are filled.</p><div class="template-toolbar"><input id="template-search" type="search" aria-label="Search report worksheets" placeholder="Find a worksheet…"><button id="selectall" type="button">Select all</button> <button id="clear" type="button">Clear</button></div><div id="template-recommendations" class="recommend-summary" aria-live="polite">A pre-field worksheet pack is checked to start. Scan source documents to match it to this job. You can change any selection before building.</div><p id="template-count" aria-live="polite"></p><div class="templates" id="templates"></div></div><div class="card" id="build-card"><h2><span class="step">04</span> Build report</h2><p class="muted" id="build-description">Build an Excel report with one tab per selected equipment form and verified design values. Additional equipment pages continue down the same tab. Equipment still needing review stays in the review log. Unsupported unit forms need an approved reference or manual preparation.</p><details class="restore-review" id="review-tools"><summary>Save or restore project progress</summary><p class="muted">Keep your reviewed tags and worksheet selections for next time.</p><button id="saveproject" type="button">Save project review (.json)</button> <label>Restore saved review<input id="loadproject" type="file" accept=".json,application/json"></label></details><div class="build-action"><button id="generate">Build report</button><div><strong>Excel report · .xlsx</strong><span>Downloads to your device when the build is complete.</span></div></div><p id="status" role="status" aria-live="polite"></p></div></div><aside class="summary" aria-label="Report summary"><h2>Your report</h2><div id="summary-project" class="summary-project">Untitled project</div><div id="summary-location" class="summary-location">Add a location to get started</div><dl><div><dt>Report basis</dt><dd id="summary-basis">Source documents</dd></div><div><dt id="summary-count-label">Worksheets</dt><dd id="summary-count">—</dd></div><div><dt>Equipment entries</dt><dd id="summary-equipment">0</dd></div><div><dt>Design review</dt><dd id="summary-review">No equipment yet</dd></div><div><dt>Report format</dt><dd>Excel · .xlsx</dd></div></dl><div class="summary-note"><strong>Built for pre-field preparation</strong>Design values stay separate from measurements. Add field readings and approvals after testing.</div></aside></div><p class="footer-note"><span aria-hidden="true">ⓘ</span> Pre-field draft only. All extracted values require review; final TAB reports require engineering verification and field signoff.</p></main><script>
+</style><body><a class="skip-link" href="#project-card">Skip to report builder</a><header><img src="/logo.png" alt="Air Balance Professionals company logo"><div><div class="brand-name">Air Balance Professionals</div><div class="brand-sub">Technical reporting workspace &nbsp;·&nbsp; NEBB #3861</div></div><form action="/logout" method="post" style="margin-left:auto"><button type="submit" style="background:#eff6ff;color:#16508c;border:1px solid #c8daef;min-height:38px;padding:8px 12px;white-space:nowrap">Sign out</button></form></header><main class="wrap"><section class="hero" aria-label="Report builder introduction"><div class="hero-row"><div><div class="eyebrow">ABP / Field engineering tools</div><h1>Build your TAB report</h1><p>Start with your job documents or an approved report. Review the design, choose your worksheets, and build a pre-field report in Excel.</p></div><span class="draft-pill">PRE-FIELD WORKSPACE</span></div></section><nav class="workspace-nav" aria-label="Report sections"><a href="#project-card">01 Project</a><a href="#basis-card">02 Report basis</a><a href="#template-panel" id="templates-nav">03 Worksheets</a><a href="#build-card">04 Build report</a></nav><div class="workspace-layout"><div><div class="card" id="project-card"><h2><span class="step">01</span> Project details</h2><div class="grid"><label>Project name<input id="project" type="text" placeholder="Project / facility name"></label><label>Location<input id="location" type="text" placeholder="City, State"></label></div><label>Standard<select id="standard"><option value="Commercial">Commercial · ±10% target</option><option value="USACE">USACE · ±5% target (DALT prerequisite)</option></select></label></div><div class="card" id="basis-card"><h2><span class="step">02</span> Choose your report source</h2><label>Build method<select id="buildmethod"><option value="sources">Build from source documents and master templates</option><option value="reference">Use an approved report as the design and layout reference</option></select></label><div id="reference-panel" hidden><p>Use a report for this same project whose design values and equipment list you have approved. This keeps its report pages, grouped Design/Actual columns, formulas and branding. Field measurements, serial numbers and signoffs are cleared. Source scans do not overwrite this report.</p><label>Approved reference workbook<input id="reference-file" type="file" accept=".xlsx"></label><button id="inspect-reference" type="button">Review reference report</button><div id="reference-summary" role="status" aria-live="polite"></div><label><input id="reference-approved" type="checkbox"> Use this reference’s equipment list and design values for this project, including differences from drawings.</label></div></div><div class="card" id="source-panel"><h2>Upload source documents</h2><div id="source-drop-zone"><label for="files">Add drawings, submittals, and schedules</label><input id="files" aria-label="Project source documents" type="file" accept=".pdf,.xlsx,.csv" multiple><p>Drop multiple files here, or choose files again to add more.</p></div><div id="source-file-list" aria-live="polite"></div><p class="muted">PDF mechanical sheets, approved submittals, Excel and CSV schedules. Native text plus bounded image reading. Image candidates require separate source confirmation; always review the M-sheet takeoff and latest revision.</p><button id="scan">Scan uploaded files</button><p id="scanstatus" role="status" aria-live="polite"></p><details id="partial-review-panel" hidden><summary>Review incomplete source coverage</summary><p>This scan has missing or unexamined content. Check every source and omission below. Equipment verification is still required.</p><pre id="partial-coverage" style="white-space:pre-wrap"></pre><label for="partial-review-note">Manual review note and remaining omissions</label><textarea id="partial-review-note" maxlength="1000" placeholder="Describe what you checked and what remains unresolved (at least 20 characters)."></textarea><label><input id="partial-review-ack" type="checkbox"> I reviewed the listed coverage and accept building a partial report with these omissions disclosed in its Notes sheet.</label><p>Changing sources or restoring a review requires a fresh acknowledgment. This does not mark the scan complete or approve the report for field use.</p></details><div id="tags"></div><div id="review"></div><div id="outlets"></div><div id="image-coverage"></div><div id="image-review"></div></div><div class="card" id="template-panel"><h2><span class="step">03</span> Choose report worksheets</h2><p class="muted">Select the actual ABP worksheets to include. Original layouts, formatting, print settings and formulas are preserved. Additional forms continue on the same applicable tab; only existing input cells are filled.</p><div class="template-toolbar"><input id="template-search" type="search" aria-label="Search report worksheets" placeholder="Find a worksheet…"><button id="selectall" type="button">Select all</button> <button id="clear" type="button">Clear</button></div><div id="template-recommendations" class="recommend-summary" aria-live="polite">A pre-field worksheet pack is checked to start. Scan source documents to match it to this job. You can change any selection before building.</div><p id="template-count" aria-live="polite"></p><div class="templates" id="templates"></div></div><div class="card" id="build-card"><h2><span class="step">04</span> Build report</h2><p class="muted" id="build-description">Build an Excel report with one tab per selected equipment form and verified design values. Additional equipment pages continue down the same tab. Equipment still needing review stays in the review log. Unsupported unit forms need an approved reference or manual preparation.</p><details class="restore-review" id="review-tools"><summary>Save or restore project progress</summary><p class="muted">Keep your reviewed tags and worksheet selections for next time.</p><button id="saveproject" type="button">Save project review (.json)</button> <label>Restore saved review<input id="loadproject" type="file" accept=".json,application/json"></label></details><div class="build-action"><button id="generate">Build report</button><div><strong>Excel report · .xlsx</strong><span>Downloads to your device when the build is complete.</span></div></div><p id="status" role="status" aria-live="polite"></p></div></div><aside class="summary" aria-label="Report summary"><h2>Your report</h2><div id="summary-project" class="summary-project">Untitled project</div><div id="summary-location" class="summary-location">Add a location to get started</div><dl><div><dt>Report basis</dt><dd id="summary-basis">Source documents</dd></div><div><dt id="summary-count-label">Worksheets</dt><dd id="summary-count">—</dd></div><div><dt>Equipment entries</dt><dd id="summary-equipment">0</dd></div><div><dt>Design review</dt><dd id="summary-review">No equipment yet</dd></div><div><dt>Report format</dt><dd>Excel · .xlsx</dd></div></dl><div class="summary-note"><strong>Built for pre-field preparation</strong>Design values stay separate from measurements. Add field readings and approvals after testing.</div></aside></div><p class="footer-note"><span aria-hidden="true">ⓘ</span> Pre-field draft only. All extracted values require review; final TAB reports require engineering verification and field signoff.</p></main><script>
 __UI_HELPERS__
 const savedTagPattern=new RegExp(__TAG_PATTERN__,'i');
 let templatesReady=false,templateError='';
@@ -788,14 +880,14 @@ function renderOutlets(){
  diffusers.forEach((outlet,index)=>{const row=document.createElement('tr');const includeCell=document.createElement('td'),include=document.createElement('input');include.type='checkbox';include.checked=outlet.include!==false;include.setAttribute('aria-label','Include outlet '+(index+1)+' in supply sheet');include.onchange=()=>{outlet.include=include.checked};includeCell.append(include);row.append(includeCell);for(const field of ['type','size','system','location','design_cfm']){const td=document.createElement('td'),input=document.createElement('input');input.type=field==='design_cfm'?'number':'text';input.setAttribute('aria-label','Outlet '+(index+1)+' '+field.replaceAll('_',' '));if(field==='design_cfm'){input.min='0';input.max='1000000';input.step='any'}else input.maxLength=120;input.value=outlet[field]??'';input.oninput=()=>{outlet[field]=field==='design_cfm'?(input.value===''?null:Number(input.value)):input.value};td.append(input);row.append(td)}const source=document.createElement('td');source.textContent=[outlet.source,outlet.reference,outlet.evidence].filter(Boolean).join(' · ');row.append(source);table.append(row)});wrap.append(table);box.append(wrap);
 }
 async function init(){let t=await readApiJson(await fetch('/api/templates'));if(!Array.isArray(t)||t.some(x=>typeof x!=='string'))throw Error('Invalid worksheet list. Refresh the page to try again.');$('templates').innerHTML=t.map(x=>`<label class="template"><input type="checkbox" value="${x.replaceAll('&','&amp;').replaceAll('"','&quot;')}">${worksheetLabel(x).replaceAll('&','&amp;').replaceAll('<','&lt;')}</label>`).join('');for(const box of document.querySelectorAll('.template input'))box.checked=defaultPack.has(box.value);templatesReady=true;updateWorkspace()}init().catch(e=>{templateError=e.message;updateWorkspace()});$('selectall').onclick=()=>document.querySelectorAll('.template input').forEach(x=>x.checked=true);$('clear').onclick=()=>document.querySelectorAll('.template input').forEach(x=>x.checked=false);
-function sourcesChanged(){tags=[];records=[];diffusers=[];imageReview=[];imageCoverage=[];imageCoverageTruncated=false;renderImageCoverage();renderImageReview();renderReview();renderOutlets();$('scanstatus').textContent='Source files changed. Scan the complete file list before building.';$('status').textContent='';updateWorkspace();renderSourceFiles()}
+function sourcesChanged(){scanState={...scanState,status:'stale',complete_takeoff:false};renderScanReview();$('scanstatus').textContent='Source files changed. Your current review is preserved. Scan the complete file list before building.';$('status').textContent='';updateWorkspace();renderSourceFiles()}
 function renderSourceFiles(){const box=$('source-file-list');box.replaceChildren();const summary=document.createElement('p');summary.textContent=sourceFiles.length+' documents · '+(sourceFiles.reduce((sum,f)=>sum+f.size,0)/1000000).toFixed(1)+' MB of 200 MB';box.append(summary);sourceFiles.forEach((file,index)=>{const row=document.createElement('div'),label=document.createElement('span'),remove=document.createElement('button');label.textContent=file.name+' ';remove.type='button';remove.textContent='Remove';remove.setAttribute('aria-label','Remove '+file.name);remove.onclick=()=>{if($('files').disabled)return;sourceFiles.splice(index,1);sourcesChanged()};row.append(label,remove);box.append(row)})}
 function addSources(files){if($('files').disabled)return;try{sourceFiles=mergeSourceFiles(sourceFiles,files);sourcesChanged()}catch(error){$('scanstatus').textContent=error.message}}
 $('files').onchange=()=>{addSources(Array.from($('files').files));$('files').value=''};
 for(const event of ['dragenter','dragover'])$('source-drop-zone').addEventListener(event,e=>{e.preventDefault();e.dataTransfer.dropEffect='copy'});
 $('source-drop-zone').addEventListener('drop',e=>{e.preventDefault();addSources(Array.from(e.dataTransfer.files))});
 renderSourceFiles();
-$('scan').onclick=async()=>{if(!templatesReady){$('scanstatus').textContent=templateError||'Wait for report worksheets to load.';return}let files=sourceFiles;if(!files.length){$('scanstatus').textContent='Choose files first';return}let form=new FormData();for(let f of files)form.append('files',f);$('scan').disabled=true;$('files').disabled=true;$('buildmethod').disabled=true;$('generate').disabled=true;$('loadproject').disabled=true;$('scanstatus').textContent='Reading files...';try{let r=await fetch('/api/scan',{method:'POST',body:form});let data=await readApiJson(r);tags=data.tags||[];records=(data.records||[]).map(row=>{const copy={...row};applyProposed(copy);return copy});diffusers=Array.isArray(data.diffusers)?data.diffusers:[];imageReview=Array.isArray(data.image_review)?data.image_review:[];imageCoverage=Array.isArray(data.image_coverage)?data.image_coverage:[];imageCoverageTruncated=data.image_coverage_truncated===true;renderImageCoverage();renderImageReview();$('scanstatus').textContent=`Found ${tags.length} equipment entries and ${diffusers.length} outlet candidates. Review the suggested design values and verify each unit before you build the report.`+(data.warnings.length?' Warnings: '+data.warnings.join(' | '):'');$('tags').innerHTML='';renderReview();renderOutlets();let recommendation=await readApiJson(await fetch('/api/suggest',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({tags,signals:data.signals||[],sparse:data.sparse===true})}));if(!Array.isArray(recommendation.recommended))throw Error('Template recommendations unavailable');let chosen=new Set(recommendation.recommended.map(x=>x.name));const assigned=new Set(records.map(r=>r.template).filter(Boolean));if(assigned.size){for(const name of Object.keys(unitForms))if(!assigned.has(name))chosen.delete(name)}for(const name of assigned)chosen.add(name);applyCompanionChoices(chosen,records);document.querySelectorAll('.template input').forEach(x=>x.checked=chosen.has(x.value));let safe=x=>String(x||'').replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('>','&gt;');$('template-recommendations').innerHTML='<strong>Recommended '+recommendation.recommended.length+' ABP templates</strong><p>Selected automatically based on the uploaded documents. Review and change any checked boxes before building your report.</p>'+recommendation.recommended.map(x=>'<div class="recommend-item"><span>'+safe(worksheetLabel(x.name))+(x.review?' <em>Review type</em>':'')+'</span><small>'+safe(x.reason)+'</small></div>').join('')+'<p class="muted">'+safe(recommendation.review_note)+'</p>'}catch(e){$('scanstatus').textContent=e.message}finally{$('scan').disabled=false;$('files').disabled=false;$('buildmethod').disabled=false;$('generate').disabled=false;$('loadproject').disabled=false;updateWorkspace()}};
+$('scan').onclick=async()=>{if(!templatesReady){$('scanstatus').textContent=templateError||'Wait for report worksheets to load.';return}let files=sourceFiles;if(!files.length){$('scanstatus').textContent='Choose files first';return}let form=new FormData();for(let f of files)form.append('files',f);$('scan').disabled=true;$('files').disabled=true;$('buildmethod').disabled=true;$('generate').disabled=true;$('loadproject').disabled=true;$('scanstatus').textContent='Reading files...';try{let r=await fetch('/api/scan',{method:'POST',body:form});let data=await readApiJson(r);if((records.length||diffusers.length||imageReview.length)&&!confirm((data.scan_status==='incomplete'?'This scan is incomplete. ':'')+'Replace your current review with these new scan results? Cancel keeps your current review.')){$('scanstatus').textContent=scanStateNotice()+'New scan '+(data.scan_status||'unknown')+'. Your current review was kept. '+(data.warnings||[]).join(' | ');return}scanState=validateScanState({status:data.scan_status||'unknown',complete_takeoff:false,source_checkpoints:data.source_checkpoints||[],warnings:data.warnings||[]});renderScanReview();tags=data.tags||[];records=(data.records||[]).map(row=>{const copy={...row};applyProposed(copy);return copy});diffusers=Array.isArray(data.diffusers)?data.diffusers:[];imageReview=Array.isArray(data.image_review)?data.image_review:[];imageCoverage=Array.isArray(data.image_coverage)?data.image_coverage:[];imageCoverageTruncated=data.image_coverage_truncated===true;renderImageCoverage();renderImageReview();$('scanstatus').textContent=(data.scan_status==='incomplete'?'SCAN INCOMPLETE. Successful source results preserved. ':'')+`Found ${tags.length} equipment entries and ${diffusers.length} outlet candidates. Review the suggested design values and verify each unit before you build the report.`+(data.warnings.length?' Warnings: '+data.warnings.join(' | '):'');$('tags').innerHTML='';renderReview();renderOutlets();let recommendation=await readApiJson(await fetch('/api/suggest',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({tags,signals:data.signals||[],sparse:data.sparse===true})}));if(!Array.isArray(recommendation.recommended))throw Error('Template recommendations unavailable');let chosen=new Set(recommendation.recommended.map(x=>x.name));const assigned=new Set(records.map(r=>r.template).filter(Boolean));if(assigned.size){for(const name of Object.keys(unitForms))if(!assigned.has(name))chosen.delete(name)}for(const name of assigned)chosen.add(name);applyCompanionChoices(chosen,records);document.querySelectorAll('.template input').forEach(x=>x.checked=chosen.has(x.value));let safe=x=>String(x||'').replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('>','&gt;');$('template-recommendations').innerHTML='<strong>Recommended '+recommendation.recommended.length+' ABP templates</strong><p>Selected automatically based on the uploaded documents. Review and change any checked boxes before building your report.</p>'+recommendation.recommended.map(x=>'<div class="recommend-item"><span>'+safe(worksheetLabel(x.name))+(x.review?' <em>Review type</em>':'')+'</span><small>'+safe(x.reason)+'</small></div>').join('')+'<p class="muted">'+safe(recommendation.review_note)+'</p>'}catch(e){$('scanstatus').textContent=scanStateNotice()+e.message}finally{$('scan').disabled=false;$('files').disabled=false;$('buildmethod').disabled=false;$('generate').disabled=false;$('loadproject').disabled=false;updateWorkspace()}};
 
 const unitForms=__UNIT_FORMS_JSON__;
 function defaultUnitForm(tag, record){if(/^EUH[- ]?[0-9]/.test(tag))return 'Unit Heater ELE.xlsx';if(/^GUH[- ]?[0-9]/.test(tag))return 'Unit Heater GAS.xlsx';if(/^(UH|CUH)[- ]?[0-9]/.test(tag)){const kind=String(record?.heating_type||record?.text_proposed?.heating_type||'').trim().toUpperCase();return ({ELECTRIC:'Unit Heater ELE.xlsx',GAS:'Unit Heater GAS.xlsx','HOT WATER':'Unit Heater WTR.xlsx'})[kind]||''}const heat=record&&(record.heating_input_btu??record.proposed?.heating_input_btu);if(/^(DOAS)[- ]?[0-9]/.test(tag))return (heat!==undefined&&heat!==null&&heat!=='')?'Fan Coil Units DX GAS.xlsx':'Fan Coil Units DX.xlsx';if(/^(PAHU|AHU|RTU|OAU|MAU|AC)[- ]?[0-9]/.test(tag))return 'Air Moving Equipment.xlsx';if(/^(EF|KEF|TEF|CEF|SEF)[- ]?[0-9]/.test(tag))return 'Exhaust Fans _Std._.xlsx';if(/^(VRF|SSAU|MSAH)[- ]?[0-9]/.test(tag))return 'Fan Coil Units DX.xlsx';if(/^(?:KH|HD)[- ]?[0-9]/.test(tag))return 'Kitchen Hood.xlsx';return ''}
@@ -856,10 +948,10 @@ function renderImageReview(){
   box.append(panel);
  });
 }
-function projectPayload(){return {project:$('project').value,location:$('location').value,standard:$('standard').value,layout:'individual',tags,records,diffusers,image_review:imageReview,image_coverage:imageCoverage,image_coverage_truncated:imageCoverageTruncated,templates:[...document.querySelectorAll('.template input:checked')].map(x=>x.value)}}
+function projectPayload(){return {scan_state:scanState,scan_acknowledgement:currentScanAcknowledgement(),project:$('project').value,location:$('location').value,standard:$('standard').value,layout:'individual',tags,records,diffusers,image_review:imageReview,image_coverage:imageCoverage,image_coverage_truncated:imageCoverageTruncated,templates:[...document.querySelectorAll('.template input:checked')].map(x=>x.value)}}
 $('saveproject').onclick=()=>{try{const data=serializeSavedReview({format:'ABP-PREFIELD-REVIEW',version:1,...projectPayload()});const url=URL.createObjectURL(new Blob([data],{type:'application/json'}));const a=document.createElement('a');a.href=url;a.download='ABP_Project_Review.json';a.click();setTimeout(()=>URL.revokeObjectURL(url),10000)}catch(error){$('status').textContent=error.message}};
-$('loadproject').onchange=async ev=>{try{const f=ev.target.files[0];if(!f)return;assertSavedReviewSize(f.size);if(!templatesReady)throw Error('Wait for report worksheets to load before restoring a review.');const data=validateSavedReview(await parseSavedReviewFile(f),[...document.querySelectorAll('.template input')].map(x=>x.value),unitForms,savedTagPattern);$('project').value=String(data.project||'');$('location').value=String(data.location||'');$('standard').value=data.standard==='USACE'?'USACE':'Commercial';records=data.records;tags=records.map(r=>r.tag);diffusers=Array.isArray(data.diffusers)?data.diffusers:[];imageReview=Array.isArray(data.image_review)?data.image_review:[];imageCoverage=Array.isArray(data.image_coverage)?data.image_coverage:[];imageCoverageTruncated=data.image_coverage_truncated===true;renderImageCoverage();renderImageReview();document.querySelectorAll('.template input').forEach(x=>x.checked=data.templates.includes(x.value));renderReview();renderOutlets();$('status').textContent='Saved review restored. Recheck verification and source revisions before building your report.'}catch(e){$('status').textContent=e.message}};
-$('generate').onclick=async()=>{if($('buildmethod').value==='reference'){await generateReference();return}if(!templatesReady){$('status').textContent=templateError||'Wait for report worksheets to load.';return}let payload=projectPayload();if(!payload.project.trim()){$('status').textContent='Add a project name before building your report.';$('project').focus();return}if(!payload.templates.length){$('status').textContent='Select at least one report worksheet.';$('template-panel').scrollIntoView();return}$('generate').disabled=true;$('generate').textContent='Building report…';$('generate').setAttribute('aria-busy','true');$('status').textContent='Building your report...';try{let r=await fetch('/api/build',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});if(!r.ok)await readApiJson(r);let blob=await r.blob(),url=URL.createObjectURL(blob),a=document.createElement('a');a.href=url;a.download=(payload.project.replace(/[^a-z0-9_-]+/gi,'_')||'ABP')+'_PreField_TAB.xlsx';a.click();setTimeout(()=>URL.revokeObjectURL(url),10000);$('status').textContent='Report built. '+reviewCoverage(payload.records,payload.diffusers)}catch(e){$('status').textContent=e.message}finally{$('generate').disabled=false;$('generate').textContent='Build report';$('generate').removeAttribute('aria-busy')}};
+$('loadproject').onchange=async ev=>{try{const f=ev.target.files[0];if(!f)return;assertSavedReviewSize(f.size);if(!templatesReady)throw Error('Wait for report worksheets to load before restoring a review.');const data=validateSavedReview(await parseSavedReviewFile(f),[...document.querySelectorAll('.template input')].map(x=>x.value),unitForms,savedTagPattern);scanState=validateScanState(data.scan_state);renderScanReview();$('scanstatus').textContent=scanStateNotice();$('project').value=String(data.project||'');$('location').value=String(data.location||'');$('standard').value=data.standard==='USACE'?'USACE':'Commercial';records=data.records;tags=records.map(r=>r.tag);diffusers=Array.isArray(data.diffusers)?data.diffusers:[];imageReview=Array.isArray(data.image_review)?data.image_review:[];imageCoverage=Array.isArray(data.image_coverage)?data.image_coverage:[];imageCoverageTruncated=data.image_coverage_truncated===true;renderImageCoverage();renderImageReview();document.querySelectorAll('.template input').forEach(x=>x.checked=data.templates.includes(x.value));renderReview();renderOutlets();$('status').textContent='Saved review restored. Recheck verification and source revisions before building your report.'}catch(e){$('status').textContent=e.message}};
+$('generate').onclick=async()=>{if($('buildmethod').value==='reference'){await generateReference();return}if(!templatesReady){$('status').textContent=templateError||'Wait for report worksheets to load.';return}let payload=projectPayload();if(scanBuildBlocked(scanState,payload.scan_acknowledgement)){$('status').textContent=scanStateNotice()+'Save your review and rescan changed sources, or review incomplete coverage and enter a note and acknowledgment below the scan results.';return}if(!payload.project.trim()){$('status').textContent='Add a project name before building your report.';$('project').focus();return}if(!payload.templates.length){$('status').textContent='Select at least one report worksheet.';$('template-panel').scrollIntoView();return}$('generate').disabled=true;$('generate').textContent='Building report…';$('generate').setAttribute('aria-busy','true');$('status').textContent='Building your report...';try{let r=await fetch('/api/build',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});if(!r.ok)await readApiJson(r);let blob=await r.blob(),url=URL.createObjectURL(blob),a=document.createElement('a');a.href=url;a.download=(payload.project.replace(/[^a-z0-9_-]+/gi,'_')||'ABP')+'_PreField_TAB.xlsx';a.click();setTimeout(()=>URL.revokeObjectURL(url),10000);$('status').textContent=(payload.scan_acknowledgement?'Reviewed partial report built. SOURCE SCAN REMAINS INCOMPLETE. See Notes for omissions. ':'Report built. ')+reviewCoverage(payload.records,payload.diffusers)}catch(e){$('status').textContent=e.message}finally{$('generate').disabled=false;$('generate').textContent='Build report';$('generate').removeAttribute('aria-busy')}};
 
 function updateWorkspace(){
  const reference=$('buildmethod').value==='reference';
@@ -1127,7 +1219,7 @@ class Handler(BaseHTTPRequestHandler):
                 self.respond(json.dumps(suggested_templates(request.get('tags',[]),request.get('signals',[]),sparse=request.get('sparse') is True)).encode());return
             if path=='/api/build':
                 if n>8_000_000:raise ValueError('Build request exceeds 8 MB')
-                payload=json.loads(self.rfile.read(n));out=build(payload);self.respond(out,'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',filename='ABP_PreField_TAB.xlsx');return
+                payload=json.loads(self.rfile.read(n));validate_api_scan_state(payload);out=build(payload);self.respond(out,'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',filename='ABP_PreField_TAB.xlsx');return
             if path in ('/api/reference/inspect','/api/reference/build'):
                 if n>8_100_000:raise ValueError('Reference workbook must be smaller than 8 MB')
                 with multipart(self.rfile,n,self.headers.get('Content-Type',''),8_000_000) as parts:

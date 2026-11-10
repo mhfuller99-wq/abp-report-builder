@@ -1,0 +1,29 @@
+name: Resilient scan validation
+on:
+  push:
+    branches: [validation/resilient-scan]
+  pull_request:
+    branches: [main]
+permissions:
+  contents: read
+jobs:
+  linux-regressions:
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: JavaScript regressions
+        run: |
+          set -e
+          for file in test*.cjs; do node "$file"; done
+      - name: Build the production container
+        run: docker build -t abp-validation .
+      - name: Run Python regressions with a hard 512 MiB aggregate limit
+        run: |
+          docker run --name abp-regressions --network none --memory 512m --memory-swap 512m --pids-limit 128 --cpus 1 --tmpfs /var/tmp/abp:rw,size=256m,mode=1777 -v "$PWD:/validation:ro" -w /validation abp-validation python ci_validation.py
+      - name: Container outcome
+        if: always()
+        run: |
+          docker inspect abp-regressions --format 'OOMKilled={{.State.OOMKilled}} ExitCode={{.State.ExitCode}} MemoryLimit={{.HostConfig.Memory}} SwapLimit={{.HostConfig.MemorySwap}}' || true

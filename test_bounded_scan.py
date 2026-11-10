@@ -39,11 +39,13 @@ class BoundedScanTests(unittest.TestCase):
         self.assertEqual(self.scan(b'x'*100,input_limit=50)['reason'],'input size limit')
     def test_tiny_wall_limit(self):
         self.assertEqual(self.scan(synthetic_schedule_pdf(),timeout=.000001)['status'],'incomplete')
-    def test_server_never_accepts_partial_scan(self):
+    def test_server_preserves_success_with_explicit_incomplete(self):
         report=abp_scan.incomplete('test budget exhausted')
         with patch.object(abp_server,'bounded_pdf_scan',return_value=report):
-            with self.assertRaises(abp_scan.ScanIncomplete):
-                abp_server.read_sources([('first.csv',b'TAG,CFM\nEF-1,400'),('bad.pdf',b'broken')])
+            result=abp_server.read_sources([('first.csv',b'TAG,CFM\nEF-1,400'),('bad.pdf',b'broken')])
+            self.assertEqual(result['scan_status'],'incomplete')
+            self.assertIn('EF-1',result['tags'])
+            self.assertFalse(result['complete_takeoff'])
     def test_ocr_sequential_and_path_based(self):
         calls=[]
         def ocr(data,source,timeout,path):
@@ -69,10 +71,10 @@ class BoundedScanTests(unittest.TestCase):
         try:
             conn=http.client.HTTPConnection('127.0.0.1',server.server_port,timeout=5)
             conn.request('POST','/api/scan',payload,{'Content-Type':'multipart/form-data; boundary=ABP-test'})
-            response=conn.getresponse();self.assertEqual(response.status,400)
+            response=conn.getresponse();self.assertEqual(response.status,200)
             report=json.loads(response.read());conn.close()
             self.assertEqual(report['scan_status'],'incomplete');self.assertFalse(report['complete_takeoff'])
-            self.assertNotIn('records',report)
+            self.assertEqual(report['records'],[])
             conn=http.client.HTTPConnection('127.0.0.1',server.server_port,timeout=5)
             conn.request('GET','/healthz');response=conn.getresponse();self.assertEqual(response.status,200);response.read();conn.close()
             self.assertTrue(abp_server.WORK_LOCK.acquire(timeout=2));abp_server.WORK_LOCK.release()

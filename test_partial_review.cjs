@@ -1,0 +1,17 @@
+const fs=require('fs'),vm=require('vm'),assert=require('assert');
+const elements=new Map(); const $=id=>{if(!elements.has(id))elements.set(id,{});return elements.get(id)};
+const ctx=vm.createContext({$,Blob});vm.runInContext(fs.readFileSync(__dirname+'/abp_ui.js','utf8'),ctx);
+const state={status:'incomplete',complete_takeoff:false,source_checkpoints:[{name:'<source.pdf>',native_status:'completed_native_stage',image_status:'incomplete',sha256:'a'.repeat(64)}],warnings:['Skipped image page']};
+ctx.state=state;vm.runInContext('scanState=state',ctx);
+assert(ctx.scanBuildBlocked(state,null));
+$('partial-review-ack').checked=true;$('partial-review-note').value='Manually checked the source; image omissions are unresolved.';
+const ack=ctx.currentScanAcknowledgement();assert(!ctx.scanBuildBlocked(state,ack));
+assert(ctx.scanBuildBlocked({...state,status:'stale'},ack));
+assert(ctx.scanBuildBlocked({...state,warnings:['New missing page']},ack));
+ctx.renderScanReview();assert.equal($('partial-review-ack').checked,false);assert.equal($('partial-review-note').value,'');
+assert.equal($('partial-review-panel').hidden,false);assert.match($('partial-coverage').textContent,/<source.pdf>/);
+assert(ctx.scanBuildBlocked(state,ctx.currentScanAcknowledgement()));
+const source=fs.readFileSync(__dirname+'/abp_server.py','utf8');
+assert(source.includes('renderScanReview();tags=data.tags'));assert(source.includes('scanState=validateScanState(data.scan_state);renderScanReview();'));
+assert(source.includes('SOURCE SCAN REMAINS INCOMPLETE'));
+console.log('Partial acknowledgment is explicit, invalidated by changed coverage and reset on restore/rescan; source names render as text.');

@@ -65,6 +65,7 @@ function validateSavedReview(data, templates, forms, tagPattern) {
   if(data.image_coverage_truncated!==undefined&&typeof data.image_coverage_truncated!=='boolean')invalid();
   if(data.image_coverage!==undefined&&(!Array.isArray(data.image_coverage)||data.image_coverage.length>1000||data.image_coverage.some(p=>!object(p)||typeof p.source!=='string'||p.source.length>160||!Number.isInteger(p.page)||p.page<1||p.page>300||typeof (p.status||p.ocr_status)!=='string'||(p.status||p.ocr_status).length>100||p.regions_omitted!==undefined&&(!Number.isInteger(p.regions_omitted)||p.regions_omitted<0||p.regions_omitted>100000)||['image_regions_truncated','selection_truncated'].some(k=>p[k]!==undefined&&typeof p[k]!=='boolean')||p.selection_failed!==undefined&&(typeof p.selection_failed!=='string'||p.selection_failed.length>100)||p.unexamined_content!==undefined&&(typeof p.unexamined_content!=='string'||p.unexamined_content.length>1000)||p.regions!==undefined&&(!Array.isArray(p.regions)||p.regions.length>100||p.regions.some(r=>!object(r)||typeof r.status!=='string'||r.status.length>100||r.box!==undefined&&(!Array.isArray(r.box)||r.box.length!==4||r.box.some(x=>typeof x!=='number'||!Number.isFinite(x)||Math.abs(x)>100000))||r.reason!==undefined&&(typeof r.reason!=='string'||r.reason.length>1000)||r.method!==undefined&&(typeof r.method!=='string'||r.method.length>100)||r.pixels!==undefined&&(!Number.isInteger(r.pixels)||r.pixels<0||r.pixels>100000000))))))invalid();
   if(data.image_review!==undefined&&(!Array.isArray(data.image_review)||data.image_review.length>500||data.image_review.some(c=>!object(c)||!['kitchen_hood','diffuser'].includes(c.kind)||typeof c.tag!=='string'||c.tag.length>80||typeof c.source!=='string'||c.source.length>160||!Number.isInteger(c.page)||c.page<1||c.page>300||!object(c.review_values)||Object.entries(c.review_values).some(([k,v])=>!['exhaust_cfm','supply_cfm','makeup_air_cfm','design_cfm'].includes(k)||!numeric(v))||c.evidence_text!==undefined&&(typeof c.evidence_text!=='string'||c.evidence_text.length>4000)||c.review_reasons!==undefined&&(!Array.isArray(c.review_reasons)||c.review_reasons.length>20||c.review_reasons.some(x=>typeof x!=='string'||x.length>1000))||['type','size'].some(k=>c[k]!==undefined&&(typeof c[k]!=='string'||c[k].length>120))||c.accepted!==undefined&&typeof c.accepted!=='boolean')))invalid();
+  validateScanState(data.scan_state);
   return {...data,records:data.records.map(r=>({...r,tag:r.tag.toUpperCase()}))};
 }
 
@@ -88,4 +89,34 @@ async function parseSavedReviewFile(file){
 function coverageStatusLabel(status){
  const labels={image_reading_unavailable:'Image reading unavailable or incomplete; review manually',not_needed:'No OCR needed',native_text_preserved_small_images_skipped:'Native text preserved; small marginal images skipped',native_text_present:'Native text present',budget_skipped:'Not examined: budget reached',failed:'OCR failed; review manually',ocr_failed:'OCR failed; review manually',no_text:'No readable OCR text',review_required:'OCR requires source review',partial_review_required:'Partial image review only',review_candidate:'Unverified candidate found',no_supported_table_recognized:'No supported table recognized; review manually',no_ruled_regions_detected_manual_review:'No ruled table detected; review images manually',outside_raster:'Outside detected raster content'};
  return labels[status]||String(status||'Coverage unknown').replaceAll('_',' ');
+}
+
+// Scan completeness is review state, not a transient status message.
+let scanState={status:'not_scanned',complete_takeoff:false,source_checkpoints:[],warnings:[]};
+function validateScanState(state){
+ if(state===undefined)return {status:'unknown',complete_takeoff:false,source_checkpoints:[],warnings:['This older saved review has no source scan history. Rescan before building.']};
+ const obj=x=>x!==null&&typeof x==='object'&&!Array.isArray(x);
+ const invalid=()=>{throw Error('Invalid source scan history. Current review was not changed.');};
+ if(!obj(state)||!['not_scanned','review_required','incomplete','stale','unknown'].includes(state.status)||state.complete_takeoff!==false||!Array.isArray(state.source_checkpoints)||state.source_checkpoints.length>100||!Array.isArray(state.warnings)||state.warnings.length>1000||state.warnings.some(w=>typeof w!=='string'||w.length>2000))invalid();
+ for(const c of state.source_checkpoints){
+  if(!obj(c)||typeof c.name!=='string'||c.name.length>160||!['completed_native_stage','incomplete'].includes(c.native_status)||!['not_applicable','not_started','incomplete','review_required'].includes(c.image_status)||c.sha256!=null&&(typeof c.sha256!=='string'||! /^[a-f0-9]{64}$/.test(c.sha256))||c.reason!==undefined&&(typeof c.reason!=='string'||c.reason.length>1000))invalid();
+ }
+ return state;
+}
+function scanStateBlocked(state){return ['incomplete','stale','unknown'].includes(state.status)||state.source_checkpoints.some(c=>c.native_status!=='completed_native_stage'||['incomplete','not_started'].includes(c.image_status));}
+function scanStateNotice(){return scanStateBlocked(scanState)?'SOURCE SCAN INCOMPLETE OR OUTDATED. Review is required before building. '+scanState.warnings.join(' | ')+' ':'';}
+
+function scanBuildBlocked(state,ack){
+ if(!scanStateBlocked(state))return false;
+ return !(state.status==='incomplete'&&state.source_checkpoints.some(c=>c.native_status==='completed_native_stage')&&ack&&ack.acknowledged===true&&typeof ack.note==='string'&&ack.note.trim().length>=20&&ack.note.trim().length<=1000&&JSON.stringify(ack.scan_state)===JSON.stringify(state));
+}
+function currentScanAcknowledgement(){
+ const checked=$('partial-review-ack');const note=$('partial-review-note');
+ return checked&&checked.checked?{acknowledged:true,note:String(note?.value||'').trim(),scan_state:JSON.parse(JSON.stringify(scanState))}:null;
+}
+function renderScanReview(){
+ const box=$('partial-review-panel');if(!box)return;
+ box.hidden=!scanStateBlocked(scanState);
+ $('partial-coverage').textContent=scanState.source_checkpoints.map(c=>c.name+': native '+c.native_status+'; image '+c.image_status+(c.reason?' — '+c.reason:'')).concat(scanState.warnings).join('\n');
+ $('partial-review-ack').checked=false;$('partial-review-note').value='';
 }

@@ -220,11 +220,21 @@ class SchedulePdfTests(unittest.TestCase):
                 if row.get('template') and row.get('design_cfm') not in (None, ''):
                     row['status'] = 'VERIFIED'
                 reviewed.append(row)
-            status, raw = post(server, '/api/build', json.dumps({
+            payload = {
                 'project': 'Synthetic schedule', 'location': 'Lab', 'templates': chosen,
-                'records': reviewed, 'diffusers': outlets
-            }).encode(), 'application/json')
-            self.assertEqual(status, 200, raw[:400])
+                'records': reviewed, 'diffusers': outlets,
+                'scan_state': {'status': scanned['scan_status'], 'complete_takeoff': False,
+                               'source_checkpoints': scanned['source_checkpoints'], 'warnings': scanned['warnings']}
+            }
+            status, raw = post(server, '/api/build', json.dumps(payload).encode(), 'application/json')
+            if scanned['scan_status'] == 'incomplete':
+                self.assertEqual(status, 400, raw[:400])
+                self.assertIn('no partial report', json.loads(raw)['error'])
+                # Assembly fidelity is tested separately from the public API guard.
+                # This internal call is not a client compatibility path.
+                raw = abp_server.build({k:v for k,v in payload.items() if k != 'scan_state'})
+            else:
+                self.assertEqual(status, 200, raw[:400])
             book = load_workbook(io.BytesIO(raw))
             self.assertEqual(book.sheetnames[0], 'PROJECT INFO')
             self.assertEqual(book.sheetnames[1], 'NOTES')
