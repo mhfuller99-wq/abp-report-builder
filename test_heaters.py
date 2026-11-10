@@ -29,7 +29,7 @@ class HeaterTests(unittest.TestCase):
                                     'heater_volts':240,'heater_phase':1,'heater_amps':8.3,'heater_stages':2,
                                     'heater_kw':2,'heating_output_btu':6800,
                                     'heating_ewt':180,'heating_lwt':160,'design_gpm':2.5,'water_dp_ft':4})
-        with patch.object(app,'BLANK_RECT_FORMS',0),patch.object(app,'BLANK_RND_FORMS',0):
+        with patch.object(app,'BLANK_RECT_FORMS',1),patch.object(app,'BLANK_RND_FORMS',1):
             cls.output=app.build({'project':'Synthetic heater integration','templates':list(HEATER_FORMS.values()),'records':cls.records})
         cls.wb=load_workbook(io.BytesIO(cls.output))
 

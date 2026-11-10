@@ -1,6 +1,7 @@
 // Job recovery, source review, and local-only office comparisons.
 let workflowJob=null,scanJobId=null,sourceManifest=[],officeComparison=null,workflowBusy=false,workflowSourceRevision=0,completedBuild=null;
 const workflowOriginalOutlets=renderOutlets,workflowOriginalReview=renderReview;
+const workflowOriginalImageReview=renderImageReview;
 const workflowOriginalPayload=projectPayload;
 const workflowId=sessionStorage.getItem('abp-workspace-id')||crypto.randomUUID();
 sessionStorage.setItem('abp-workspace-id',workflowId);
@@ -63,6 +64,7 @@ renderOutlets=function(){
  for(const row of originalRows)table.append(row);renderOutletTotals();
 };
 renderReview=function(){workflowOriginalReview();renderReadiness();};
+renderImageReview=function(){workflowOriginalImageReview();$('image-review').querySelectorAll('fieldset').forEach((panel,index)=>{const c=imageReview[index];if(c)panel.append(workflowButton('View image candidate '+(index+1)+' source',()=>viewSource(c.source,c.page)));});};
 function renderReadiness(){
  const box=$('readiness');if(!box)return;box.replaceChildren();
  const verified=records.filter(r=>r.status==='VERIFIED').length,unresolved=records.filter(r=>!['VERIFIED','EXCLUDED'].includes(r.status));

@@ -39,6 +39,36 @@ def word(x, y, x2, y2, text, confidence=None):
     return {'box': [x, y, x2, y2], 'text': text, 'confidence': confidence}
 
 
+def equipment_candidates(words,source,page,method):
+    """Raster schedule values enter only the separate, unverified image queue.
+
+    Keep the native parser's coordinate/header constraints. Any low-confidence
+    crop leaves values blank. Measurement/report crops are never design input.
+    No image value is fed into native resolution or automatically verified.
+    """
+    from abp_schedule import parse_page,UNIT_TOTALS
+    from abp_design import inferred_form
+    text=' '.join(w['text'] for w in words)
+    if not re.search(r'\b(?:SCHEDULE|DESIGN|REQUESTED)\b',text,re.I):return []
+    if re.search(r'\b(?:ACTUAL|MEASURED|INITIAL|AS FOUND|TEST REPORT|FINAL READING)\b',text,re.I):return []
+    if len(words)>30000:return []
+    tuples=[(*w['box'],w['text']) for w in words]
+    confident=all(w.get('confidence') is not None and w['confidence']>=80 for w in words)
+    found=[];seen=set()
+    for item in parse_page(tuples,page,source):
+        values={k:v for k,v in item.get('values',{}).items() if k in UNIT_TOTALS}
+        if not values or item.get('tag') in seen:continue
+        seen.add(item['tag'])
+        found.append({'kind':'equipment','tag':item['tag'],'source':source,'page':page,
+            'method':method,'status':'UNVERIFIED','include':False,
+            'review_values':values if confident else {},'values':{},
+            'review_reasons':['Image schedule candidate: compare every value, equipment ID, column heading and source revision.'
+                if confident else 'Low OCR confidence in this crop; values left blank for manual source review.'],
+            'template':inferred_form(item['tag']), 'evidence':words[:300],
+            'confidence_min':min((w.get('confidence') or 0 for w in words),default=0)})
+    return found
+
+
 def tesseract_region_words(page, pixels, timeout, clip=None, psm=11, max_zoom=3.):
     """OCR a displayed crop, retaining the pixmap's exact fractional origin."""
     import pymupdf
@@ -281,7 +311,7 @@ def extract_local(data, source='synthetic.pdf', budget=Budget(), engine=tesserac
                     parser_limited = information_parser_limited(ocr)
                     if parser_limited:
                         report['warnings'].append(f'Page {number}: hood header-complexity budget exceeded; manual review required.')
-                    candidates = hood_candidates(ocr, source, number, 'ocr')
+                    candidates = hood_candidates(ocr, source, number, 'ocr') + equipment_candidates(ocr,source,number,'ocr')
                     if full_page:
                         candidates = diffuser_candidates(ocr, source, number) + candidates
                     for candidate in candidates:

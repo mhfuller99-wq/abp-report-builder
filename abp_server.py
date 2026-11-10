@@ -932,19 +932,29 @@ function renderImageCoverage(){
 function renderImageReview(){
  const box=$('image-review');box.replaceChildren();
  if(!imageReview.length)return;
- const heading=document.createElement('h3');heading.textContent='Image and hood candidates: source confirmation required';box.append(heading);
+ const heading=document.createElement('h3');heading.textContent='Image schedule and hood candidates: source confirmation required';box.append(heading);
  const note=document.createElement('p');note.textContent='Check the original page and revision. OCR can misread labels and numbers. Exhaust, supply, and makeup air are separate. Supply and makeup air remain evidence only and are never written as outside air. Added records remain unverified. Repeated native/image readings may refer to the same physical item.';box.append(note);
  imageReview.forEach((candidate,index)=>{
   const panel=document.createElement('fieldset');const title=document.createElement('legend');title.textContent=(candidate.tag||'Diffuser candidate')+' · '+candidate.source+' · page '+candidate.page;panel.append(title);
   const evidence=document.createElement('p');evidence.textContent=(candidate.evidence_text||'')+' '+(candidate.review_reasons||[]).join(' ');panel.append(evidence);
-  const values=document.createElement('p');values.textContent=Object.entries(candidate.review_values||{}).map(([k,v])=>fieldLabel(k)+': '+v).join(' · ')||'No reliable airflow value. Enter it manually after checking the source.';panel.append(values);
+  const values=document.createElement('p');values.textContent=Object.entries(candidate.review_values||{}).map(([k,v])=>fieldLabel(k)+': '+v).join(' · ')||'No reliable design value. Enter it manually after checking the source.';panel.append(values);
   const label=document.createElement('label'),confirmation=document.createElement('input');confirmation.type='checkbox';label.append(confirmation,document.createTextNode(' I checked this candidate against the original source and reviewed duplicates.'));panel.append(label);
   const add=document.createElement('button');add.type='button';add.textContent=candidate.accepted?'Added to review':'Add checked candidate to review';add.disabled=!!candidate.accepted;panel.append(add);
   if(candidate.kind==='kitchen_hood'&&!savedTagPattern.test(candidate.tag)){add.disabled=true;add.textContent='Manual preparation needed for this tag format';}
   const status=document.createElement('p');status.setAttribute('role','status');panel.append(status);
   add.onclick=()=>{try{
    if(!confirmation.checked)throw Error('Check the original source and confirm it first.');
-   if(candidate.kind==='kitchen_hood'){
+   if(candidate.kind==='equipment'){
+    if(!savedTagPattern.test(candidate.tag))throw Error('Unsupported equipment ID; prepare this record manually. No tag was renamed.');
+    let row=records.find(r=>r.tag===candidate.tag);
+    if(!row){if(records.length>=500)throw Error('Equipment review limit reached.');row={tag:candidate.tag,template:defaultUnitForm(candidate.tag),source:candidate.source,reference:'page '+candidate.page,status:'UNVERIFIED',candidates:[]};records.push(row);}
+    const values={};for(const [key,value] of Object.entries(candidate.review_values||{}))if(reviewNumericFields.includes(key))values[key]=value;
+    row.candidates??=[];if(row.candidates.length>=30)throw Error('Source candidate limit reached; compare this page manually.');
+    row.candidates.push({source:candidate.source,reference:'page '+candidate.page,evidence:'Source-confirmed image schedule; still requires equipment verification.',basis:'MANUAL_IMAGE_REVIEW',values});
+    for(const [key,value] of Object.entries(values))if(row[key]===undefined||row[key]===null||row[key]==='')row[key]=value;
+    row.status='UNVERIFIED';row.flags??=[];row.flags.push('Checked image candidate added. Existing nonblank inputs were retained; resolve any conflicts before verification.');
+    tags=records.map(r=>r.tag);document.querySelectorAll('.template input').forEach(el=>{if(el.value===row.template)el.checked=true});
+   }else if(candidate.kind==='kitchen_hood'){
     if(!savedTagPattern.test(candidate.tag))throw Error('This hood tag format needs manual preparation; no tag was renamed.');
     if(records.some(r=>r.tag===candidate.tag))throw Error('This tag already exists. Compare the source and enter the reviewed exhaust CFM in its existing row; supply and makeup stay evidence only.');
     if(records.length>=500)throw Error('Equipment review limit reached.');
@@ -1065,7 +1075,7 @@ p{margin:0 0 28px;color:var(--muted);max-width:460px}
 </html>'''
 NOT_FOUND_BYTES=NOT_FOUND_HTML.encode('utf-8')
 from abp_jobs import Jobs
-JOBS=Jobs(WORK_LOCK,read_sources,build,build_reference)
+JOBS=Jobs(WORK_LOCK,read_sources,build,build_reference,janitor=True)
 class Handler(BaseHTTPRequestHandler):
     def secure_request(self):
         return self.headers.get('X-Forwarded-Proto','').split(',')[0].strip().lower()=='https'

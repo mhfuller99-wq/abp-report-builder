@@ -98,7 +98,7 @@ class MechanicalTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError,'choose a companion'):
             app.validate_payload(payload)
         records[0]['coil_template']=templates[1];records[1]['coil_template']=templates[2]
-        with patch.object(app,'BLANK_RECT_FORMS',0),patch.object(app,'BLANK_RND_FORMS',0):
+        with patch.object(app,'BLANK_RECT_FORMS',1),patch.object(app,'BLANK_RND_FORMS',1):
             wb=load_workbook(io.BytesIO(app.build(payload)))
         self.assertEqual(wb['COIL DX GAS HT']['D4'].value,'RTU-1')
         self.assertIsNone(wb['COIL DX GAS HT']['F4'].value)
@@ -119,7 +119,7 @@ class MechanicalTests(unittest.TestCase):
              'electric_heating_edb':70,'electric_heating_ldb':88}
         payload={'project':'Synthetic packaged','templates':['Air Moving Equipment.xlsx',
                  'COIL DX HP ELE.xlsx'],'records':[rec]}
-        with patch.object(app,'BLANK_RECT_FORMS',0),patch.object(app,'BLANK_RND_FORMS',0):
+        with patch.object(app,'BLANK_RECT_FORMS',1),patch.object(app,'BLANK_RND_FORMS',1):
             data=app.build(payload)
         wb=load_workbook(io.BytesIO(data));ws=wb['COIL DX HP ELE']
         self.assertEqual(ws['D4'].value,'PAHU-1');self.assertEqual(ws['D8'].value,3000)

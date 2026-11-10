@@ -59,7 +59,7 @@ class ScheduleVariants(unittest.TestCase):
         row={'tag':'OAU-7','status':'VERIFIED','template':'Air Moving Equipment.xlsx',
              'coil_template':name,'design_cfm':950,'cooling_edb':82,'cooling_ewb':68,
              'cooling_ldb':54,'cooling_lwb':53,'heating_edb':54,'heating_ldb':72}
-        with patch.object(app,'BLANK_RECT_FORMS',0),patch.object(app,'BLANK_RND_FORMS',0):
+        with patch.object(app,'BLANK_RECT_FORMS',1),patch.object(app,'BLANK_RND_FORMS',1):
             raw=app.build({'project':'Synthetic water coil','templates':['Air Moving Equipment.xlsx',name],'records':[row]})
         book=load_workbook(io.BytesIO(raw))
         sheet=next(s for s in book if s['D3'].value=='OAU-7')

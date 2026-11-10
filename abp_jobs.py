@@ -97,10 +97,17 @@ class SourceRunner:
         write_json(self.cache(index,'images'),result);return result
 
 class Jobs:
-    def __init__(self,work_lock,read_sources,build,reference_build=None):
+    def __init__(self,work_lock,read_sources,build,reference_build=None,*,janitor=False):
         self.work_lock=work_lock;self.read_sources=read_sources;self.build=build;self.reference_build=reference_build
         self.lock=threading.RLock();self.jobs={};self.worker=None
         self.directory=None
+        if janitor:threading.Thread(target=self.expire,daemon=True).start()
+    def expire(self):
+        while True:
+            time.sleep(60)
+            with self.lock:
+                try:self.prune()
+                except OSError:pass
     def root(self):
         if self.directory is None:
             self.directory=Path(tempfile.mkdtemp(prefix='native-jobs-',dir=os.environ.get('ABP_SCAN_TMPDIR')))
