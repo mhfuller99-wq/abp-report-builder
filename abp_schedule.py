@@ -627,7 +627,7 @@ def parse_supply_outlets(words, page_number, name):
     return outlets
 
 
-def parse_pdf(name, data=None, *, path=None):
+def parse_pdf(name, data=None, *, path=None, page_numbers=None, checkpoint=None):
     import pymupdf
     warnings = []
     found = []
@@ -635,8 +635,25 @@ def parse_pdf(name, data=None, *, path=None):
     with (pymupdf.open(filename=path) if path is not None else pymupdf.open(stream=data, filetype='pdf')) as doc:
         if doc.page_count > 300:
             raise ValueError('PDF has more than 300 pages')
-        legend = diffuser_legend(doc)
-        for index, page in enumerate(doc):
+        class CachedPage:
+            # MuPDF text extraction on drawing pages is expensive. All readers
+            # share one bounded native word list instead of decoding each pass.
+            def __init__(self,page):
+                self.page=page; self.words=page.get_text('words') or []
+                if len(self.words)>30000:raise ValueError('native page word limit')
+            def __getattr__(self,key):return getattr(self.page,key)
+            def get_text(self,kind,*args,**kwargs):
+                return self.words if kind=='words' else self.page.get_text(kind,*args,**kwargs)
+        pages=[]; count=0
+        for page in doc:
+            cached=CachedPage(page);count+=len(cached.words)
+            if count>200000:raise ValueError('native document word limit')
+            pages.append(cached)
+        legend = diffuser_legend(pages)
+        selected=[p for p in pages if page_numbers is None or p.number+1 in page_numbers]
+        completed=[]
+        for page in selected:
+            index=page.number
             words = page_words(page)
             if len(words)<100 and any('PLAN' in w[4].upper() for w in words):
                 warnings.append(f'{name}: page {index + 1} is a plan with little readable text; graphic or outlined labels may be missing. Compare the visible drawing manually before accepting coverage')
@@ -650,16 +667,19 @@ def parse_pdf(name, data=None, *, path=None):
             found.extend(parse_page(words, index + 1, name))
             outlets.extend(parse_supply_outlets(words, index + 1, name))
             outlets.extend(keyed_outlets(words, index + 1, name, legend))
-        found.extend(parse_doas_submittal(doc, name))
-        for page in doc:
+            completed.append(index+1)
+            if checkpoint:checkpoint(found,warnings,outlets,completed,False)
+        found.extend(parse_doas_submittal(selected, name))
+        for page in selected:
             page_text = readable_text(page)
             if 'DOAS' in page_text.upper() and (re.search(r'Supply Air:\s*[\d,]+', page_text, re.I)
                                                or selection_airflows(page_words(page))):
                 if not any(is_submittal(item.get('basis')) and item.get('reference') == f'page {page.number + 1}'
                            and item.get('values', {}).get('design_cfm') for item in found):
                     warnings.append(f'{name}: page {page.number + 1} DOAS selection could not be uniquely associated with a unit mark; review manually')
-        found.extend(parse_fan_submittal(doc, name))
-        found.extend(packaged_submittals(doc, name))
+        found.extend(parse_fan_submittal(selected, name))
+        found.extend(packaged_submittals(selected, name))
+        if checkpoint:checkpoint(found,warnings,outlets,completed,True)
     for item in found:
         item.setdefault('source', name)
     return found, warnings, outlets

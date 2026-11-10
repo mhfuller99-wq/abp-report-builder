@@ -65,7 +65,7 @@ def excel_safe(value):
     return '\''+value if value.lstrip().startswith(('=', '+', '-', '@')) else value
 
 
-def read_sources(blobs):
+def read_sources(blobs, *, runner=None):
     """Collect every occurrence and provenance. Do not invent values from surrounding text."""
     warnings=[];records={};sources=[];total_chars=0;preview=[];signals=set();diffusers=[];image_review=[];image_coverage=[];image_coverage_truncated=False
     import time
@@ -97,18 +97,23 @@ def read_sources(blobs):
                 stream=source if hasattr(source,'read') else io.BytesIO(source)
                 remaining=max(0,scan_deadline-time.monotonic())
                 allowance=min(30,remaining/max(1,pdfs_left));pdfs_left-=1
+                if runner:allowance=90
                 if allowance<=0:
                     checkpoint.update(native_status='incomplete',image_status='not_started',reason='request time limit')
                     warnings.append(name+': native scan not started; request time limit. Review this source manually.')
                     continue
-                native=bounded_pdf_scan(name,stream,timeout=allowance,ocr_timeout=0,input_limit=MAX_UPLOAD-total_size)
+                native=(runner.native if runner else bounded_pdf_scan)(name,stream,timeout=allowance,ocr_timeout=0,input_limit=MAX_UPLOAD-total_size)
                 identity=native.get('source') or {}
                 total_size+=identity.get('bytes',0)
                 checkpoint.update(sha256=identity.get('sha256'),native_status=native['status'],image_status='not_started')
+                if native.get('pages'):checkpoint['pages']=native['pages']
+                if native.get('completed_pages') is not None:checkpoint['completed_pages']=native['completed_pages']
                 if native['status']!='completed_native_stage':
                     checkpoint['reason']=native.get('reason','native scan failed')
                     warnings.extend(name+': '+warning for warning in native['warnings'])
-                    continue
+                    if not native.get('partial_native'):
+                        if runner and identity.get('sha256'):ocr_queue.append((name,stream,identity,native.get('pages'),checkpoint))
+                        continue
                 source_digest=identity['sha256']
                 ocr_queue.append((name,stream,identity,native.get('pages'),checkpoint))
                 warnings.extend(native['warnings'])
@@ -194,7 +199,7 @@ def read_sources(blobs):
     ocr_deadline=min(scan_deadline,time.monotonic()+65)
     for index,(name,stream,identity,pages,checkpoint) in enumerate(ocr_queue):
         allowance=max(0,ocr_deadline-time.monotonic())/max(1,len(ocr_queue)-index)
-        image_result=deferred_ocr(name,stream,identity,allowance)
+        image_result=(runner.image if runner else deferred_ocr)(name,stream,identity,allowance)
         coverage=image_result.get('coverage',[])
         missed=not coverage or any(c.get('unexamined_content') or c.get('status') in {'budget_skipped','failed','image_reading_unavailable'} or c.get('regions_omitted') or c.get('selection_truncated') or c.get('selection_failed') or c.get('image_regions_truncated') or any(r.get('status') in {'budget_skipped','failed','parser_limited'} for r in c.get('regions',[])) for c in coverage)
         checkpoint['image_status']='incomplete' if missed else 'review_required'
@@ -576,6 +581,8 @@ def validate_scan_state(state, acknowledgement=None):
     checkpoints=state.get('source_checkpoints')
     if not isinstance(checkpoints,list) or len(checkpoints)>100:raise ValueError('Invalid source checkpoints')
     for item in checkpoints:
+        if 'pages' in item and (type(item['pages'])!=int or not 1<=item['pages']<=300):raise ValueError('Invalid checkpoint page count')
+        if 'completed_pages' in item and (not isinstance(item['completed_pages'],list) or len(item['completed_pages'])>300 or any(type(p)!=int or not 1<=p<=300 for p in item['completed_pages'])):raise ValueError('Invalid completed page list')
         if not isinstance(item,dict) or not isinstance(item.get('name'),str) or len(item['name'])>160:raise ValueError('Invalid source checkpoint')
         if item.get('native_status') not in ('completed_native_stage','incomplete') or item.get('image_status') not in ('not_applicable','not_started','incomplete','review_required'):raise ValueError('Invalid source checkpoint status')
         if item.get('sha256') is not None and (not isinstance(item['sha256'],str) or not re.fullmatch(r'[a-f0-9]{64}',item['sha256'])):raise ValueError('Invalid source identity')
@@ -820,7 +827,11 @@ def build(payload):
         if hasattr(ws,'_template_formulas') and ws._template_formulas!={c.coordinate:c.value for row in ws for c in row if c.data_type=='f'}:
             raise ValueError('Build stopped: a template formula changed on '+ws.title)
     out=io.BytesIO();wb.save(out)
-    return group_template_sheets(preserve_template_parts(out.getvalue(),origins),origins)
+    result=group_template_sheets(preserve_template_parts(out.getvalue(),origins),origins)
+    from abp_audit import audit_report
+    checked=audit_report(result,origins)
+    print('Template integrity passed: '+json.dumps(checked),flush=True)
+    return result
 
 PAGE='''<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>ABP TAB Report Builder</title><link rel="icon" type="image/png" sizes="32x32" href="/favicon.png"><link rel="icon" href="/favicon.ico" sizes="any"><style>
 :root{color-scheme:dark;--bg:#0b1422;--panel:#131f30;--line:#304259;--ink:#edf3fc;--muted:#a9bad0;--accent:#67d4c3;--blue:#77b8f8;font-family:Inter,system-ui,-apple-system,"Segoe UI",sans-serif}
@@ -985,6 +996,7 @@ updateWorkspace();
 # These resources are immutable during a running deployment; encode once per process.
 DEFAULT_PACK=[item['name'] for item in suggested_templates([],sparse=True)['recommended']]
 PAGE=PAGE.replace('__UNIT_FORMS_JSON__',json.dumps(UNIT_FORMS)).replace('__UI_HELPERS__',(ROOT/'abp_ui.js').read_text(encoding='utf-8')).replace('__TAG_PATTERN__',json.dumps('^(?:'+REVIEW_TAGS.pattern+')$')).replace('__DEFAULT_PACK_JSON__',json.dumps(DEFAULT_PACK))
+PAGE=PAGE.replace('</script></body>','</script><script>'+ (ROOT/'abp_compare.js').read_text(encoding='utf-8') +'\n'+ (ROOT/'abp_workflow.js').read_text(encoding='utf-8') +'</script></body>')
 PAGE_BYTES=PAGE.encode('utf-8')
 TEMPLATE_LIST_BYTES=json.dumps(list(LOOKUP)).encode('utf-8')
 # LAN mode is explicitly opt-in. Authenticated session cookies protect the app and API routes.
@@ -1052,6 +1064,8 @@ p{margin:0 0 28px;color:var(--muted);max-width:460px}
 </body>
 </html>'''
 NOT_FOUND_BYTES=NOT_FOUND_HTML.encode('utf-8')
+from abp_jobs import Jobs
+JOBS=Jobs(WORK_LOCK,read_sources,build,build_reference)
 class Handler(BaseHTTPRequestHandler):
     def secure_request(self):
         return self.headers.get('X-Forwarded-Proto','').split(',')[0].strip().lower()=='https'
@@ -1159,6 +1173,27 @@ class Handler(BaseHTTPRequestHandler):
             else:self.login_page()
             return
         if self.gate():return
+        if path.startswith('/api/jobs/'):
+            try:
+                parts=path.strip('/').split('/');job=JOBS.get(parts[2])
+                action=parts[3] if len(parts)>3 else 'status'
+                if action=='status':self.respond(json.dumps(JOBS.public(job)).encode())
+                elif action=='result' and job['status']=='done':
+                    if job['kind']=='scan':self.respond((job['root']/'result.json').read_bytes())
+                    else:self.respond((job['root']/'report.xlsx').read_bytes(),'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',filename='ABP_PreField_TAB.xlsx',extra_headers=[('X-ABP-Template-Integrity','passed')])
+                elif action=='preview':
+                    query=parse_qs(urlsplit(self.path).query);index=int(query.get('source',['-1'])[0]);page=int(query.get('page',['1'])[0])
+                    if not 0<=index<len(job['sources']) or Path(job['sources'][index]['file']).suffix!='.pdf':raise ValueError('Select a PDF source')
+                    if not WORK_LOCK.acquire(timeout=1):raise ValueError('Document processing is running. Preview this page when it finishes.')
+                    try:
+                        from abp_preview import render
+                        image=render(job['root']/job['sources'][index]['file'],page)
+                    finally:WORK_LOCK.release()
+                    self.respond(image,'image/png')
+                else:self.respond(b'{"error":"Job result is not ready"}',code=409)
+            except KeyError:self.respond(b'{"error":"Job expired or server restarted. Your saved browser review is retained; reattach sources to scan again."}',code=404)
+            except (ValueError,IndexError) as exc:self.respond(json.dumps({'error':str(exc)}).encode(),code=400)
+            return
         if path=='/':self.respond(PAGE_BYTES,'text/html; charset=utf-8')
         elif path=='/api/templates':self.respond(TEMPLATE_LIST_BYTES)
         elif path.startswith('/api/'):self.respond(b'Not found','text/plain',404)
@@ -1202,6 +1237,39 @@ class Handler(BaseHTTPRequestHandler):
             except (ValueError,IndexError):
                 self.login_page(error='session');return
         if self.gate():return
+        if path in ('/api/jobs/scan','/api/jobs/build','/api/jobs/reference') or re.fullmatch(r'/api/jobs/[a-f0-9]{48}/retry',path):
+            try:
+                self.connection.settimeout(30);n=int(self.headers.get('Content-Length','0'))
+                if not 0<n<=MAX_UPLOAD:raise ValueError('Upload limit is 200 MB')
+                if path=='/api/jobs/reference':
+                    if n>8_100_000:raise ValueError('Reference workbook must be smaller than 8 MB')
+                    with multipart(self.rfile,n,self.headers.get('Content-Type',''),8_000_000) as parts:
+                        fields={name:file.read(4096) for name,filename,file in parts if not filename}
+                        sources=[p for p in parts if p[1]]
+                        project=fields.get('project',b'').decode('utf-8');location=fields.get('location',b'').decode('utf-8')
+                        if fields.get('approved')!=b'true' or not project.strip() or len(project)>180 or len(location)>180:raise ValueError('Approve the reference and enter valid project details')
+                        if len(sources)!=1 or Path(sources[0][1]).suffix.lower()!='.xlsx':raise ValueError('Choose one XLSX reference')
+                        job=JOBS.create('reference',parts=sources,payload={'project':project,'location':location})
+                elif path=='/api/jobs/scan':
+                    with multipart(self.rfile,n,self.headers.get('Content-Type',''),MAX_UPLOAD) as parts:
+                        job=JOBS.create('scan',parts=parts)
+                else:
+                    if n>8_000_000:raise ValueError('Job request exceeds 8 MB')
+                    payload=json.loads(self.rfile.read(n))
+                    if path=='/api/jobs/build':
+                        validate_api_scan_state(payload);validate_payload(payload)
+                        job=JOBS.create('build',payload=payload)
+                    else:
+                        token=path.split('/')[3];previous=JOBS.get(token)
+                        index=payload.get('source_index');pages=payload.get('page_numbers');stage=payload.get('stage')
+                        if type(index)!=int or not 0<=index<len(previous['sources']) or stage not in ('native','images','both'):raise ValueError('Select a valid source and retry stage')
+                        if pages is not None and (not isinstance(pages,list) or not pages or len(pages)>300 or any(type(p)!=int or not 1<=p<=300 for p in pages)):raise ValueError('Select valid page numbers')
+                        job=JOBS.create('scan',parent=token,retry={'source_index':index,'page_numbers':pages,'stage':stage})
+                self.respond(json.dumps(job).encode(),code=202)
+            except KeyError:self.respond(b'{"error":"Previous job expired. Reattach sources; your current review is preserved."}',code=404)
+            except Exception as exc:
+                self.close_connection=True;self.respond(json.dumps({'error':str(exc)}).encode(),code=400)
+            return
         # Allow the previous response's brief cleanup to finish before reporting
         # busy; do not read or retain a waiting request body.
         if not WORK_LOCK.acquire(timeout=2):

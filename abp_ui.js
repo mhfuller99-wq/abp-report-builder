@@ -99,6 +99,8 @@ function validateScanState(state){
  const invalid=()=>{throw Error('Invalid source scan history. Current review was not changed.');};
  if(!obj(state)||!['not_scanned','review_required','incomplete','stale','unknown'].includes(state.status)||state.complete_takeoff!==false||!Array.isArray(state.source_checkpoints)||state.source_checkpoints.length>100||!Array.isArray(state.warnings)||state.warnings.length>1000||state.warnings.some(w=>typeof w!=='string'||w.length>2000))invalid();
  for(const c of state.source_checkpoints){
+  if(c.pages!==undefined&&(!Number.isInteger(c.pages)||c.pages<1||c.pages>300))invalid();
+  if(c.completed_pages!==undefined&&(!Array.isArray(c.completed_pages)||c.completed_pages.length>300||c.completed_pages.some(p=>!Number.isInteger(p)||p<1||p>300)))invalid();
   if(!obj(c)||typeof c.name!=='string'||c.name.length>160||!['completed_native_stage','incomplete'].includes(c.native_status)||!['not_applicable','not_started','incomplete','review_required'].includes(c.image_status)||c.sha256!=null&&(typeof c.sha256!=='string'||! /^[a-f0-9]{64}$/.test(c.sha256))||c.reason!==undefined&&(typeof c.reason!=='string'||c.reason.length>1000))invalid();
  }
  return state;

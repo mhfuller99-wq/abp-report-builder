@@ -168,7 +168,7 @@ def hood_candidates(words, source, page, method):
 
 
 def extract_local(data, source='synthetic.pdf', budget=Budget(), engine=tesseract_words, retain_words=True,
-                  region_engine=None, selector=None):
+                  region_engine=None, selector=None, page_numbers=None, checkpoint=None):
     """Native and OCR candidates remain separate and unverified.
 
     Inspect bounded previews for ruled raster tables, then OCR selected crops.
@@ -204,6 +204,8 @@ def extract_local(data, source='synthetic.pdf', budget=Budget(), engine=tesserac
         if len(doc) > 300:
             raise ValueError('PDF has more than 300 pages')
         for number, page in enumerate(doc, 1):
+            if checkpoint:checkpoint(report)
+            if page_numbers is not None and number not in page_numbers:continue
             entry = {'page': number, 'ocr_status': 'not_needed'}
             coverage = {'page': number, 'status': 'native_text_only',
                         'unexamined_content': 'Native extraction is not a complete takeoff; verify source.'}
@@ -363,6 +365,7 @@ def extract_local(data, source='synthetic.pdf', budget=Budget(), engine=tesserac
                 raise ValueError('Too many OCR review candidates; split source documents')
     report.update(ocr_attempted_pages=attempted, ocr_regions_attempted=regions_attempted,
                   pixels_processed=total_pixels, raster_pages_attempted=raster_pages)
+    if checkpoint:checkpoint(report)
     if len(report['review_candidates']) > 500:
         raise ValueError('Too many OCR review candidates; split source documents')
     return report
@@ -396,7 +399,7 @@ import threading
 _OCR_SLOT = threading.BoundedSemaphore(1)
 
 
-def extract(data, source='source.pdf', timeout=65, *, path=None):
+def extract(data, source='source.pdf', timeout=65, *, path=None, page_numbers=None, progress=None):
     """Run all OCR parsing/rendering in a memory/CPU/wall-clock bounded process.
 
     Return a compact review-only queue, never native/OCR words to normal parsers.
@@ -415,6 +418,9 @@ def extract(data, source='source.pdf', timeout=65, *, path=None):
             root = Path(directory)
             from abp_limits import mark_staging
             mark_staging(root)
+            if page_numbers is not None and (not page_numbers or len(page_numbers)>300 or any(type(p)!=int or not 1<=p<=300 for p in page_numbers)):
+                raise ValueError('Invalid OCR page selection')
+            (root/'request.json').write_text(json.dumps({'timeout':max(1,timeout-2),'page_numbers':page_numbers}),encoding='utf-8')
             if path is not None:
                 import shutil
                 shutil.copyfile(path, root / 'source.pdf')
@@ -429,11 +435,27 @@ def extract(data, source='source.pdf', timeout=65, *, path=None):
                                           'ABP_PARENT_PID':str(os.getpid()), 'OMP_THREAD_LIMIT': '1',
                                           'TMPDIR': directory, 'TEMP': directory, 'TMP': directory})
             try:
-                child.wait(timeout=timeout)
+                started=time.monotonic(); last=None
+                while child.poll() is None:
+                    remaining=timeout-(time.monotonic()-started)
+                    if remaining<=0:raise subprocess.TimeoutExpired('image reading',timeout)
+                    try:child.wait(timeout=min(.5,remaining))
+                    except subprocess.TimeoutExpired:pass
+                    saved=root/'checkpoint.json'
+                    if progress and saved.exists():
+                        state=json.loads(saved.read_text(encoding='utf-8')); marker=len(state.get('coverage',[]))
+                        if marker!=last:progress({'stage':'images','pages_completed':marker});last=marker
             except subprocess.TimeoutExpired:
                 os.killpg(child.pid, signal.SIGKILL)
                 child.wait()
-                raise ValueError('OCR time limit reached')
+                saved=root/'checkpoint.json'
+                if saved.exists() and saved.stat().st_size<=2_000_000:
+                    report=json.loads(saved.read_text(encoding='utf-8'))
+                    report['warnings'].append('Image time budget reached; completed page results preserved. Remaining pages require retry or manual review.')
+                    report['interrupted']=True
+                    for item in report['review_candidates']:item['source']=source
+                    return report
+                return {'review_candidates':[],'coverage':[],'warnings':[source+': image time budget reached before any page completed. Retry selected pages.'],'failure_kind':'time_budget'}
             finally:
                 # Clean up any descendant recognizer even if worker crashes.
                 try: os.killpg(child.pid, signal.SIGKILL)
@@ -446,8 +468,8 @@ def extract(data, source='source.pdf', timeout=65, *, path=None):
                 item['source'] = source
             report['warnings'] = [source + ': ' + message for message in report['warnings']]
             return report
-    except (OSError, ValueError, subprocess.SubprocessError):
-        return {'review_candidates': [], 'warnings': [source + ': bounded OCR failed; review images manually.']}
+    except (OSError, ValueError, subprocess.SubprocessError) as exc:
+        return {'review_candidates': [], 'coverage':[], 'warnings': [source + ': image worker failed ('+type(exc).__name__+'); retry selected pages or review manually.'], 'failure_kind':'worker_failure'}
     finally:
         _OCR_SLOT.release()
 
@@ -459,11 +481,23 @@ def _worker(directory):
     bind_to_parent(os.environ['ABP_PARENT_PID'])
     resource.setrlimit(resource.RLIMIT_CORE,(0,0))
     resource.setrlimit(resource.RLIMIT_AS, (256 * 1024**2, 256 * 1024**2))
-    resource.setrlimit(resource.RLIMIT_CPU, (60, 60))
+    resource.setrlimit(resource.RLIMIT_CPU, (120, 120))
     resource.setrlimit(resource.RLIMIT_FSIZE, (48 * 1024**2, 48 * 1024**2))
     resource.setrlimit(resource.RLIMIT_NOFILE, (64, 64))
     root = Path(directory)
-    report = extract_local((root / 'source.pdf').read_bytes(), source='uploaded PDF', retain_words=False)
+    request=json.loads((root/'request.json').read_text(encoding='utf-8')) if (root/'request.json').exists() else {}
+    def checkpoint(report):
+        compact={'review_candidates':[], 'warnings':report['warnings'][-200:],'coverage':report['coverage'], 'complete_takeoff':False}
+        for candidate in report['review_candidates']:
+            item=dict(candidate)
+            if 'evidence' in item:
+                item['evidence_text']=' '.join(w['text'] for w in item.pop('evidence'))[:1000]
+            compact['review_candidates'].append(item)
+        encoded=json.dumps(compact,allow_nan=False).encode()
+        if len(encoded)>2_000_000:raise ValueError('Checkpoint response exceeds budget')
+        tmp=root/'checkpoint.tmp';tmp.write_bytes(encoded);os.replace(tmp,root/'checkpoint.json')
+    report = extract_local((root / 'source.pdf').read_bytes(), source='uploaded PDF', retain_words=False,
+                          budget=Budget(total_seconds=request.get('timeout',60)),page_numbers=request.get('page_numbers'),checkpoint=checkpoint)
     compact = {'review_candidates': report['review_candidates'], 'warnings': report['warnings'],
                'ocr_attempted_pages': report['ocr_attempted_pages'], 'complete_takeoff': False,
                'coverage': report['coverage'], 'ocr_regions_attempted': report['ocr_regions_attempted'],

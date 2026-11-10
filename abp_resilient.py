@@ -7,7 +7,7 @@ from pathlib import Path
 from abp_limits import mark_staging
 
 
-def deferred_ocr(name, source, identity, timeout):
+def deferred_ocr(name, source, identity, timeout, **options):
     """Re-stage a seekable upload; verify identity before using its image evidence."""
     from abp_ocr import Budget, extract
     empty={'review_candidates':[], 'warnings':[name+': image reading incomplete; review original images manually.'], 'coverage':[]}
@@ -30,6 +30,6 @@ def deferred_ocr(name, source, identity, timeout):
             if total!=identity['bytes'] or digest.hexdigest()!=identity['sha256']:return empty
             remaining=timeout-(time.monotonic()-start)
             if remaining<=0:return empty
-            return extract(None,name,timeout=remaining,path=path)
+            return extract(None,name,timeout=remaining,path=path,**options)
     except Exception:
         return empty

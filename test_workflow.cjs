@@ -1,0 +1,10 @@
+const fs=require('fs'),vm=require('vm'),assert=require('assert');
+let code=fs.readFileSync(__dirname+'/abp_workflow.js','utf8');
+const begin=code.indexOf('function parseRetryPages('),end=code.indexOf('function workflowControls(',begin);
+const ctx=vm.createContext({});vm.runInContext(code.slice(begin,end),ctx);
+assert.deepEqual([...ctx.parseRetryPages('1, 3-5,3')],[1,3,4,5]);assert.equal(ctx.parseRetryPages(''),null);
+for(const value of ['0','5-1','301','1,foo','1-999999'])assert.throws(()=>ctx.parseRetryPages(value));
+assert(code.includes('delete review.scan_acknowledgement'));
+assert(code.includes("$('partial-review-ack').checked=false"));
+assert(code.includes("sourceManifest=data.source_manifest||[]"));
+console.log('Retry selections are bounded; restored reviews require fresh partial acknowledgment.');

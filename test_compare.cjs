@@ -1,0 +1,15 @@
+const fs=require('fs'),vm=require('vm'),assert=require('assert');
+const ctx=vm.createContext({fieldLabel:x=>x});vm.runInContext(fs.readFileSync(__dirname+'/abp_compare.js','utf8'),ctx);
+const rows=Array.from({length:25},()=>[]);
+rows[2]=['UNIT DESIGNATION',null,'EF-1',null,'EF-2'];rows[8]=['TEST DATA',null,'DESIGN','ACTUAL','DESIGN','ACTUAL'];
+rows[9]=['TOTAL CFM',null,75,999,75,888];rows[10]=['EXTERNAL S.P.',null,.5,8,.5,9];
+const supply=Array.from({length:15},()=>[]);supply[4]=['RTU-1'];supply[5]=['Dining',null,1,'A',12,999,400,777];supply[6]=['Dining',null,2,'A',12,999,400,777];
+const office=ctx.officeDesignFromSheets([{name:'EXHAUST FANS SMALL',rows},{name:'SUPPLY DIFFUSERS',rows:supply}]);
+assert.equal(office.units.length,2);assert.equal(office.units[0].values.design_cfm,75);assert.equal(office.units[1].values.esp,.5);
+assert.equal(office.outlets.length,2);assert.equal(office.outlets[0].design_cfm,400);assert(!JSON.stringify(office).includes('999'));
+const result=ctx.compareOfficeDesign(office,[{tag:'EF-1',design_cfm:75,esp:.5,status:'VERIFIED'}],[{system:'RTU-1',type:'A',size:'10"Ø',design_cfm:400,include:true},{system:'RTU-1',type:'A',size:'10"Ø',design_cfm:400,include:true}]);
+assert.equal(result.rows.filter(r=>r.field==='Neck size'&&r.status==='different').length,2);
+assert(result.rows.some(r=>r.item==='EF-2'&&r.status==='missing'));assert.equal(result.office_total,800);assert.equal(result.builder_total,800);
+const ids=ctx.compareOfficeDesign({units:[{tag:'MUA-1',values:{design_cfm:2000},references:{}}],outlets:[],warnings:[]},[{tag:'MAU-1',design_cfm:2000,status:'VERIFIED'}],[]);
+assert.equal(ids.rows.length,2);assert(ids.rows.some(r=>r.status==='missing'));assert(!/\bfetch\s*\(/.test(fs.readFileSync(__dirname+'/abp_compare.js','utf8')));
+console.log('Office comparison ignores actuals, preserves repeated outlets, finds size differences, and keeps MAU/MUA IDs distinct.');

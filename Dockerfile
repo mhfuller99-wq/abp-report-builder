@@ -7,7 +7,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends tesseract-ocr t
 RUN pip install --no-cache-dir -r requirements.txt && useradd -r -u 10001 abp
 # Process start imports every abp_*.py module. Copy the set so a new module is not left out.
 COPY abp_*.py .
-COPY abp_ui.js .
+COPY abp_*.js .
 COPY 03_Workbooks_and_Master_Templates/ 03_Workbooks_and_Master_Templates/
 COPY 04_Company_Branding/ 04_Company_Branding/
 RUN mkdir -p /var/tmp/abp && chown abp /var/tmp/abp && chmod 700 /var/tmp/abp
