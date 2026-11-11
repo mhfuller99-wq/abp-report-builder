@@ -38,7 +38,7 @@ Gas Heating Values(btuh) - Input: 400,000 Output: 324,000'''
             self.assertEqual(s[f'G{18+off}'].value,750)
             self.assertEqual(s[f'G{19+off}'].value,f'=G{17+off}-G{18+off}')
             self.assertEqual(s[f'G{21+off}'].value,1)
-            self.assertIsNone(s[f'G{6+off}'].value)
+            self.assertEqual(s[f'G{6+off}'].value,'EXAMPLE')
             self.assertIsNone(s[f'G{5+off}'].value)
             self.assertIsNone(s[f'J{17+off}'].value)
             t=wb['DUCT TRAVERSE RECT.']

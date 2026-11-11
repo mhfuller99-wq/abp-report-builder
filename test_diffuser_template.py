@@ -36,7 +36,7 @@ class DiffuserTemplateTests(unittest.TestCase):
         self.assertEqual(values,list(range(1,117)))
         self.assertEqual(len([x for x in w.sheetnames if x.startswith('SUPPLY DIFFUSERS')]),1)
         self.assertEqual(s['A5'].value,'DOAS-1')
-        self.assertEqual(s['A6'].value,'Room 1')
+        self.assertEqual(s['A6'].value,'ROOM 1')
         self.assertEqual(s['E6'].value,6)
         self.assertEqual(s['G27'].value,'=SUM(G6:G26)')
         self.assertEqual(s['I6'].value,'=IF(H6=0,"",H6/G6)')

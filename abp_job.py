@@ -71,9 +71,9 @@ def performance_candidates(text, tag_pattern):
     return [{'tag':tag,'values':values.copy(),'evidence':'Tagged performance summary; review submittal approval and revision.','basis':'TAGGED_PERFORMANCE'} for tag in dict.fromkeys(tags)]
 
 def populate_identity(ws, record, safe):
-    # Manufacturer and model stay blank on a pre-field export. Nameplate identity
-    # is reviewed in the app; the workbook is not a catalog cut sheet.
-    for field,address in {'unit_type':'G9','service':'G10','area_served':'G11','equipment_location':'G12'}.items():
+    # Called for VERIFIED records only. Reviewed source identity belongs on the
+    # form; serial numbers and actual field readings remain blank.
+    for field,address in {'manufacturer':'G5','model':'G6','unit_type':'G9','service':'G10','area_served':'G11','equipment_location':'G12'}.items():
         if record.get(field) and ws[address].data_type!='f':ws[address]=safe(record[field])
 
 def populate_support(wb, records, selected, lookup, add, reset, sheet_name):

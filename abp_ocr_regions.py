@@ -43,6 +43,45 @@ def raster_regions(page, native_count, limit=48):
     return out, len(images) > limit
 
 
+def complete_raster_tables(boxes, images, page_rect):
+    """A ruled header inside one embedded table must not cut off its data rows."""
+    out=[]
+    for box in boxes:
+        parents=[r['box'] for r in images if r.get('status')=='raster_unexamined'
+                 and r['box'][2]-r['box'][0] >= 250
+                 and (r['box'][2]-r['box'][0])*(r['box'][3]-r['box'][1]) < page_rect.get_area()*.45
+                 and r['box'][0]-10<=box[0] and r['box'][1]-35<=box[1]
+                 and r['box'][2]+10>=box[2] and r['box'][3]+10>=box[3]]
+        if len(parents)==1:
+            p=parents[0]
+            box=[max(page_rect.x0,min(box[0],p[0]-5)),max(page_rect.y0,min(box[1],p[1]-5)),
+                 min(page_rect.x1,max(box[2],p[2]+5)),min(page_rect.y1,max(box[3],p[3]+5))]
+        if not any(all(abs(a-b)<10 for a,b in zip(box,old)) for old in out):out.append(box)
+    return out
+
+
+def circle_regions(page, deadline=None, max_paths=20000, max_regions=32):
+    """Bounded vector-circle witnesses for printed type-over-flow callouts.
+
+    Only geometry is selected here. Text still requires OCR and source review.
+    The caller runs inside the existing memory/CPU-limited image worker.
+    """
+    import pymupdf
+    paths=page.get_cdrawings()
+    if len(paths)>max_paths:return [],True
+    out=[]
+    for path in paths:
+        if deadline is not None and time.monotonic()>=deadline:return out,True
+        items=path.get('items',[])
+        if path.get('fill') is not None or len(items)!=4 or any(i[0]!='c' for i in items):continue
+        box=pymupdf.Rect(path['rect'])*page.rotation_matrix
+        if not 8<=box.width<=30 or not .95<=box.width/max(.1,box.height)<=1.05:continue
+        if any(all(abs(a-b)<1 for a,b in zip(box,old)) for old in out):continue
+        if len(out)>=max_regions:return out,True
+        out.append(list(box))
+    return sorted(out,key=lambda b:(b[1],b[0])),False
+
+
 def ruled_regions(page, max_pixels=6_000_000, max_regions=12, deadline=None):
     """Find bounded ruled rectangles from a grayscale preview in displayed points.
 

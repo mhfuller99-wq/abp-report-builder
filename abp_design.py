@@ -180,7 +180,7 @@ def inferred_form(tag, record=None):
         heat=((record or {}).get('text_proposed') or {}).get('heating_type')
         if heat=='HOT WATER':return 'Fan Coil Units WTR.xlsx'
         if tag.startswith('BCU-'):return None
-    if re.match(r'^(VRF|SSAU|MSAH|IU|IDU|DSS|FCU)[- ]?\d',tag):return 'Fan Coil Units DX.xlsx'
+    if re.match(r'^(VRF|SSAU|MSAH|MS|IU|IDU|DSS|FCU)[- ]?\d',tag):return 'Fan Coil Units DX.xlsx'
     if re.match(r'^KH[- ]?\d',tag):return 'Kitchen Hood.xlsx'
     return None
 

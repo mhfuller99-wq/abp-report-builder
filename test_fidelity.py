@@ -39,7 +39,12 @@ class FidelityTests(unittest.TestCase):
                                 self.assertEqual(copy(getattr(c,attr)),copy(getattr(d[c.coordinate],attr)),(name,c.coordinate,attr))
                     if traverse:continue
                     for attr in ('page_setup','page_margins','print_options','HeaderFooter','row_breaks','col_breaks','sheet_format','protection','data_validations'):
-                        self.assertEqual(ET.tostring(getattr(s,attr).to_tree()),ET.tostring(getattr(d,attr).to_tree()),(name,attr))
+                        expected=getattr(s,attr).to_tree()
+                        if attr=='HeaderFooter':
+                            from abp_presentation import header_text
+                            for node in expected:
+                                if node.text:node.text=header_text(node.text,'Template fidelity','')
+                        self.assertEqual(ET.tostring(expected),ET.tostring(getattr(d,attr).to_tree()),(name,attr))
                     self.assertEqual(str(s.print_area),str(d.print_area))
                     for key,dim in s.row_dimensions.items():
                         self.assertEqual({k:v for k,v in dict(dim).items() if k!='s'},{k:v for k,v in dict(d.row_dimensions[key]).items() if k!='s'},(name,'row',key))

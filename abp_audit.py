@@ -81,9 +81,12 @@ def audit_report(data,origins):
         blank=measurement_cells(master,original)
         for page in range(pages):
             off=height*page;stats['forms']+=1
-            for r,dim in master.row_dimensions.items():
+            outlets=[r for r in range(6,27) if ws.cell(r+off,3).value is not None] if original=='SUPPLY DIFFUSERS' else []
+            compact=set(range(max(outlets)+1,27)) if outlets else set()
+            for r in range(1,height+1):
+                dim=master.row_dimensions[r]
                 actual=ws.row_dimensions[r+off]
-                if (actual.height,actual.hidden)!=(dim.height,dim.hidden):fail(title+' row dimensions changed')
+                if (actual.height,actual.hidden)!=(dim.height,True if r in compact else dim.hidden):fail(title+' row dimensions changed')
             for area in master.merged_cells.ranges:
                 c1,r1,c2,r2=range_boundaries(str(area));merges.add(f'{get_column_letter(c1)}{r1+off}:{get_column_letter(c2)}{r2+off}')
             for row in master:

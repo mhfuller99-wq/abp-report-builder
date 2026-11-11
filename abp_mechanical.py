@@ -53,7 +53,7 @@ def phrases(words, pattern):
             and other[0] <= box[0] and other[2] >= box[2] for other in found)]
 
 
-TAG = r'(?:PAHU|PU|MSAH|MSHP|EUH|GUH|CUH|UH|KEF|EF|SF|RF|FS|PF|VRF|IU|IDU|DSS|DOAS|SSAU|AHU|RTU|MAU|OAU|FCU|SSCU|HVLS|EH|BCU)-\d+(?:\.\d+)*[A-Z]?(?:-\d+(?:\.\d+)*[A-Z]?)?'
+TAG = r'(?:PAHU|PU|MSAH|MSHP|MS|EUH|GUH|CUH|UH|KEF|EF|SF|RF|FS|PF|VRF|IU|IDU|DSS|DOAS|SSAU|AHU|RTU|MAU|OAU|FCU|SSCU|HVLS|EH|BCU)-\d+(?:\.\d+)*[A-Z]?(?:-\d+(?:\.\d+)*[A-Z]?)?'
 MARK_HEADERS = {'MARK', 'TAG', 'ID', 'UNIT MARK', 'UNIT TAG'}
 
 
@@ -266,6 +266,7 @@ def schedule_candidates(words, page_number, name):
         take(r'(?:DESIGN |TOTAL |SUPPLY |SUPPLY AIR |SA )?(?:CFM|AIRFLOW)(?: \(CFM\))?|SCFM(?: @ \S+)?', 'design_cfm')
         take(r'(?:OUTSIDE AIR|OUTDOOR AIR|OA|OSA)(?: CFM| \(CFM\))?', 'osa_cfm')
         take(r'(?:ESP|E\.S\.P\.)(?: \(.*\))?', 'esp')
+        take(r'EXT\.? S\.?P\.?(?: IN\.? WG)?', 'esp')
         take(r'MOTOR HP', 'motor_hp')
         take(r'MOTOR FLA', 'motor_fla')
         take(r'MOTOR VOLTS|VOLTAGE \(V\)', 'motor_volts')

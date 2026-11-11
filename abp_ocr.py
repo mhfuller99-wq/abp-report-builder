@@ -12,7 +12,7 @@ import tempfile
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from abp_ocr_regions import render_geometry, raster_regions, ruled_regions, hood_information_candidates, information_parser_limited
+from abp_ocr_regions import render_geometry, raster_regions, ruled_regions, hood_information_candidates, information_parser_limited, complete_raster_tables, circle_regions
 
 
 @dataclass(frozen=True)
@@ -28,8 +28,8 @@ class Budget:
     max_preview_pixels: int = 6_000_000
     max_region_pixels: int = 2_000_000
     max_page_pixels: int = 16_000_000
-    max_regions: int = 24
-    max_regions_per_page: int = 6
+    max_regions: int = 32
+    max_regions_per_page: int = 16
     max_detected_regions: int = 12
     max_coverage_regions: int = 240
     region_dpi: int = 216
@@ -60,6 +60,8 @@ def equipment_candidates(words,source,page,method):
     confident=all(w.get('confidence') is not None and w['confidence']>=80 for w in words)
     found=[];seen=set()
     for item in parse_page(tuples,page,source):
+        # SERVES references in another unit's schedule are not equipment rows.
+        if item.get('basis')=='PLAN_TAG':continue
         values={k:v for k,v in item.get('values',{}).items() if k in UNIT_TOTALS}
         if item.get('tag') in seen:continue
         seen.add(item['tag'])
@@ -324,7 +326,7 @@ def extract_local(data, source='synthetic.pdf', budget=Budget(), engine=tesserac
                 total_pixels += pixels
                 page_pixels += pixels
 
-            def recognize(rect, psm, full_page=False):
+            def recognize(rect, psm, full_page=False, word_sink=None, table=False):
                 nonlocal attempted, regions_attempted, page_regions, page_attempted
                 max_pixels = budget.max_pixels if full_page else min(budget.max_pixels, budget.max_region_pixels)
                 # Use the remaining pixel allowance for the next table instead
@@ -355,8 +357,22 @@ def extract_local(data, source='synthetic.pdf', budget=Budget(), engine=tesserac
                                          max_zoom=budget.region_dpi / 72))
                     if len(ocr) > budget.max_words:
                         raise ValueError('OCR word budget exceeded')
+                    if table and psm==11:
+                        # Re-read uncertain printed IDs in isolation. Only an
+                        # exact repeat can strengthen confidence; no digit repair.
+                        from abp_mechanical import TAG
+                        targets=[w for w in ocr if re.fullmatch(TAG,w['text'],re.I)
+                                 and (w.get('confidence') or 0)<80][:2]
+                        for original in targets:
+                            refined=[]
+                            recognize(pymupdf.Rect(original['box'])+(-1,-1,1,1),7,word_sink=refined)
+                            if len(refined)==1 and refined[0]['text'].upper()==original['text'].upper() and (refined[0].get('confidence') or 0)>=80:
+                                original['original_confidence']=original.get('confidence')
+                                original['confidence']=refined[0]['confidence']
+                                original['confidence_method']='exact_token_reread'
                     if retain_words:
                         entry['ocr_words'].extend(ocr)
+                    if word_sink is not None:word_sink.extend(ocr)
                     parser_limited = information_parser_limited(ocr)
                     if parser_limited:
                         report['warnings'].append(f'Page {number}: hood header-complexity budget exceeded; manual review required.')
@@ -372,6 +388,11 @@ def extract_local(data, source='synthetic.pdf', budget=Budget(), engine=tesserac
                             old.get('kind')=='diffuser' and old.get('page')==number and old.get('source')==source
                             and old.get('type')==candidate.get('type') and old.get('review_values')==candidate.get('review_values')
                             and old.get('position') and math.dist(old['position'],candidate['position'])<6
+                            for old in report['review_candidates']):continue
+                        if candidate.get('kind')=='equipment' and any(
+                            old.get('kind')=='equipment' and old.get('page')==number and old.get('source')==source
+                            and old.get('tag')==candidate.get('tag') and old.get('region')==candidate.get('region')
+                            and old.get('review_values')==candidate.get('review_values')
                             for old in report['review_candidates']):continue
                         report['review_candidates'].append(candidate)
                     r['status'] = 'review_candidate' if candidates else ('no_supported_table_recognized' if ocr else 'no_text')
@@ -414,6 +435,7 @@ def extract_local(data, source='synthetic.pdf', budget=Budget(), engine=tesserac
                 consume(preview_pixels)
                 boxes, _, truncated = selector(page, max_pixels=min(budget.max_preview_pixels, budget.max_pixels),
                                                max_regions=budget.max_detected_regions, deadline=page_deadline)
+                boxes=complete_raster_tables(boxes,images,page.rect)
                 coverage['preview_pixels'] = preview_pixels
                 if truncated:
                     coverage['selection_truncated'] = True
@@ -429,6 +451,32 @@ def extract_local(data, source='synthetic.pdf', budget=Budget(), engine=tesserac
                 pymupdf.TOOLS.store_shrink(100)
             statuses = []
             if plan_tiles:
+                # Read the inside of a printed circle separately from its flow.
+                # Large plan tiles often turn circled A/B marks into @ or omit
+                # them. Every recognition still uses the same shared budgets.
+                try:
+                    circles,limited=circle_regions(page,page_deadline)
+                except (OSError, ValueError, RuntimeError, MemoryError) as exc:
+                    circles,limited=[],True
+                    coverage['circle_selection_failed']=type(exc).__name__
+                if limited:
+                    coverage['circle_selection_truncated']=True
+                    report['warnings'].append(f'Page {number}: symbol selection incomplete; review remaining callouts.')
+                for box in circles:
+                    rect=pymupdf.Rect(box);inset=rect.width*.20
+                    letters=[]
+                    _,r=recognize(rect+(inset,inset,-inset,-inset),10,word_sink=letters)
+                    statuses.append(r['status'])
+                    if len(letters)!=1 or not re.fullmatch(r'[A-Z]',letters[0]['text']) or (letters[0].get('confidence') or 0)<80:continue
+                    cx=(rect.x0+rect.x1)/2;flows=[]
+                    flow_rect=pymupdf.Rect(cx-rect.width*.70,rect.y1+rect.height*.03,
+                                          cx+rect.width*.70,rect.y1+rect.height*.72)&page.rect
+                    _,r=recognize(flow_rect,7,word_sink=flows);statuses.append(r['status'])
+                    candidate=circle_outlet(letters,flows,source,number,box)
+                    if candidate:
+                        candidate['region']=list(rect | flow_rect)
+                        report['review_candidates'].append(candidate)
+                        r['status']='review_candidate';r['candidate_count']=1
                 # Floor plans contain scattered symbols, not just ruled tables.
                 # Overlapping tiles retain legible callouts under the SAME pixel,
                 # region and time limits; skipped tiles remain in coverage.
@@ -447,15 +495,15 @@ def extract_local(data, source='synthetic.pdf', budget=Budget(), engine=tesserac
                 # a large table to consume the whole page allowance. Every
                 # selected crop remains queued and skipped areas stay visible.
                 for box in sorted(boxes,key=lambda b:(pymupdf.Rect(b).get_area(),b[1],b[0])):
-                    candidates, r = recognize(pymupdf.Rect(box), 11)
+                    candidates, r = recognize(pymupdf.Rect(box), 11,table=True)
                     statuses.append(r['status'])
                     # Different segmentation only when no supported candidate was
                     # found. Never replace/suppress a low-confidence candidate.
-                    if candidates == []: retries.append(box)
+                    if candidates is not None and not any(c.get('review_values') for c in candidates):retries.append((0 if candidates else 1,box))
                 # Give every distinct table a first pass before spending the
                 # same bounded page budget on alternate segmentation.
-                for box in retries:
-                    _, fallback = recognize(pymupdf.Rect(box), 6)
+                for _,box in sorted(retries,key=lambda item:item[0])[:2]:
+                    _, fallback = recognize(pymupdf.Rect(box), 6,table=True)
                     statuses.append(fallback['status'])
             else:
                 coverage['unexamined_content'] = 'Full-page OCR may miss content and associations; manual review required.'
@@ -481,6 +529,24 @@ def extract_local(data, source='synthetic.pdf', budget=Budget(), engine=tesserac
     if len(report['review_candidates']) > 500:
         raise ValueError('Too many OCR review candidates; split source documents')
     return report
+
+
+def circle_outlet(letters, flows, source, page, box):
+    """Unverified source-linked candidate; ambiguous digits remain blank."""
+    if len(letters)!=1 or len(flows)!=1:return None
+    letter,flow=letters[0],flows[0]
+    if not re.fullmatch(r'[A-Z]',letter['text']) or (letter.get('confidence') or 0)<80:return None
+    raw=flow['text']
+    match=re.fullmatch(r'[|iIjJ{(]?(\d{2,4}|\d{1,2},\d{3})[|})]?',raw)
+    if not match or not 10<=int(match[1].replace(',',''))<=10000:return None
+    values={}
+    if raw==match[1] and (flow.get('confidence') or 0)>=80:values['design_cfm']=int(raw.replace(',',''))
+    return {'kind':'diffuser','tag':'','values':{},'review_values':values,
+            'status':'UNVERIFIED','include':False,'source':source,'page':page,'method':'ocr',
+            'type':letter['text'],'size':'','position':[round(box[0],2),round(box[1],2)],
+            'region':list(box),'region_coordinate_space':'displayed_pdf_points',
+            'evidence_text':letter['text']+' / '+raw+'; printed circle and adjacent airflow; confirm in source',
+            'review_reasons':['Confirm supply service, design airflow, neck size, room, system and revision.']}
 
 
 def diffuser_candidates(words, source, page, *, plan_confirmed=False):
