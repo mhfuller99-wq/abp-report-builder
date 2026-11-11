@@ -18,3 +18,6 @@ const heaterOffice=ctx.officeDesignFromSheets([{name:'UNIT HEATER GAS',rows:heat
 assert.equal(heaterOffice.units[0].values.heating_cfm,1250);assert.equal(heaterOffice.units[0].values.design_cfm,undefined);
 assert.equal(ctx.compareOfficeDesign(heaterOffice,[{tag:'UH-7',heating_cfm:1250,status:'VERIFIED'}],[]).rows[0].status,'match');
 console.log('Office comparison ignores actuals, preserves repeated outlets, finds size differences, and keeps MAU/MUA IDs distinct.');
+const numberedRooms=[['RTU-1'],['LOBBY 101',null,1,'A',12,999,460,888],['OFFICE 102',null,2,'A',12,999,420,888],['RTU-2'],['ROOM 103',null,1,'A',6,999,75,888]];
+const roomOffice=ctx.officeDesignFromSheets([{name:'SUPPLY DIFFUSERS',rows:numberedRooms}]);
+assert.equal(roomOffice.outlets.length,3);assert.equal(roomOffice.outlets[0].system,'RTU-1');assert.equal(roomOffice.outlets[1].system,'RTU-1');assert.equal(roomOffice.outlets[2].system,'RTU-2');assert.equal(roomOffice.outlets.reduce((n,o)=>n+o.design_cfm,0),955);

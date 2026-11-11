@@ -347,7 +347,8 @@ def keyed_outlets(words, page_number, name, legend):
     # Avoid schedules, details and their rated maximum flows.
     title_rows=[' '.join(w[4] for w in row) for row in rows(words)]
     plan_title=any(re.match(r'^(?:HVAC|MECHANICAL)(?: FLOOR| CEILING)? PLAN\b',line,re.I) for line in title_rows)
-    if not plan_title and not phrases(words, r'(?:FLOOR )?PLAN - HVAC|(?:MECHANICAL|HVAC)(?: FLOOR| CEILING)? PLAN|(?:FIRST|SECOND|GROUND) FLOOR HVAC PLAN'):
+    from abp_outlets import plan_context
+    if not plan_title and not plan_context(words) and not phrases(words, r'(?:FLOOR )?PLAN - HVAC|(?:MECHANICAL|HVAC)(?: FLOOR| CEILING)? PLAN|(?:FIRST|SECOND|GROUND) FLOOR HVAC PLAN'):
         return []
     notes = set()
     for row in rows(words):

@@ -279,6 +279,11 @@ def extract_local(data, source='synthetic.pdf', budget=Budget(), engine=tesserac
                 report['warnings'].append(f'Page {number}: native word budget exceeded; review manually.')
                 pymupdf.TOOLS.store_shrink(100)
                 continue
+            from abp_outlets import plan_context, centered_outlets
+            from abp_mechanical import page_words
+            displayed_words=page_words(page)
+            plan_page=plan_context(displayed_words) or bool(re.search(r'(?:FLOOR|CEILING)[ _-]+PLAN',source,re.I))
+            plan_tiles=plan_page and not centered_outlets(displayed_words,number,source,plan_confirmed=True)
             for w in native:
                 w['box'] = list(pymupdf.Rect(w['box']) * page.rotation_matrix)
             if retain_words:
@@ -301,7 +306,7 @@ def extract_local(data, source='synthetic.pdf', budget=Budget(), engine=tesserac
             # the actual schedules use outlined glyphs, not extractable text.
             native_characters = sum(len(w['text']) for w in native)
             sparse = native_characters < 40 or (page.rect.get_area() > 1_000_000 and native_characters < 500)
-            if not eligible and not image_overflow and not sparse:
+            if not eligible and not image_overflow and not sparse and not plan_tiles:
                 if images:
                     coverage['status'] = 'small_marginal_images_skipped'
                     coverage['unexamined_content'] = 'Small marginal images were not OCR-read; verify manually.'
@@ -356,12 +361,19 @@ def extract_local(data, source='synthetic.pdf', budget=Budget(), engine=tesserac
                     if parser_limited:
                         report['warnings'].append(f'Page {number}: hood header-complexity budget exceeded; manual review required.')
                     candidates = hood_candidates(ocr, source, number, 'ocr') + equipment_candidates(ocr,source,number,'ocr')
-                    if full_page:
-                        candidates = diffuser_candidates(ocr, source, number) + candidates
+                    if full_page or plan_tiles:
+                        candidates = diffuser_candidates(ocr, source, number, plan_confirmed=plan_page) + candidates
                     for candidate in candidates:
                         candidate['region'] = list(rect)
                         candidate['region_coordinate_space'] = 'displayed_pdf_points'
-                    report['review_candidates'].extend(candidates)
+                    for candidate in candidates:
+                        # Overlapping plan tiles must not create duplicate physical outlets.
+                        if candidate.get('kind')=='diffuser' and candidate.get('position') and any(
+                            old.get('kind')=='diffuser' and old.get('page')==number and old.get('source')==source
+                            and old.get('type')==candidate.get('type') and old.get('review_values')==candidate.get('review_values')
+                            and old.get('position') and math.dist(old['position'],candidate['position'])<6
+                            for old in report['review_candidates']):continue
+                        report['review_candidates'].append(candidate)
                     r['status'] = 'review_candidate' if candidates else ('no_supported_table_recognized' if ocr else 'no_text')
                     if parser_limited:
                         r['parser_limited'] = True
@@ -416,7 +428,19 @@ def extract_local(data, source='synthetic.pdf', budget=Budget(), engine=tesserac
             finally:
                 pymupdf.TOOLS.store_shrink(100)
             statuses = []
-            if boxes:
+            if plan_tiles:
+                # Floor plans contain scattered symbols, not just ruled tables.
+                # Overlapping tiles retain legible callouts under the SAME pixel,
+                # region and time limits; skipped tiles remain in coverage.
+                coverage['unexamined_content']='Plan tiles may omit symbols, rooms and duct connections; review every source page.'
+                coverage['selection']='plan_tiles'
+                rect=page.rect; nx,ny=(3,2) if rect.width>=rect.height else (2,3)
+                for y in range(ny):
+                    for x in range(nx):
+                        tile=pymupdf.Rect(max(rect.x0,rect.x0+x*rect.width/nx-24),max(rect.y0,rect.y0+y*rect.height/ny-24),
+                                          min(rect.x1,rect.x0+(x+1)*rect.width/nx+24),min(rect.y1,rect.y0+(y+1)*rect.height/ny+24))
+                        _,r=recognize(tile,11);statuses.append(r['status'])
+            elif boxes:
                 coverage['unexamined_content'] = 'All content outside selected table crops; manual review required.'
                 retries = []
                 # Short tables (often fan/unit schedules) should not wait for
@@ -459,19 +483,24 @@ def extract_local(data, source='synthetic.pdf', budget=Budget(), engine=tesserac
     return report
 
 
-def diffuser_candidates(words, source, page):
+def diffuser_candidates(words, source, page, *, plan_confirmed=False):
     """Use existing conservative geometry readers, without guessing associations."""
     from abp_schedule import parse_supply_outlets
     from abp_mechanical import keyed_outlets
+    from abp_outlets import centered_outlets, distinct_outlets
     if not words:
         return []
-    tuples = [(*w['box'], w['text'], 0, 0, 0) for w in words]
-    found = parse_supply_outlets(tuples, page, source) + keyed_outlets(tuples, page, source, {})
+    tuples = [(*w['box'], w['text']) for w in words]
+    found = distinct_outlets(parse_supply_outlets(tuples, page, source) + keyed_outlets(tuples, page, source, {})
+                            + centered_outlets(tuples,page,source,plan_confirmed=plan_confirmed))
     result = []
     for item in found:
         values = {'design_cfm': item['design_cfm']} if item.get('design_cfm') is not None else {}
-        # Page-wide threshold is intentionally conservative until per-symbol linkage exists.
-        if any(w['confidence'] is None or w['confidence'] < 80 for w in words):
+        # Only a geometrically linked callout can use local confidence. Other
+        # readers retain the conservative whole-crop rule until linked evidence exists.
+        box=item.get('evidence_box')
+        relevant=[w for w in words if not box or (w['box'][0]>=box[0]-.1 and w['box'][1]>=box[1]-.1 and w['box'][2]<=box[2]+.1 and w['box'][3]<=box[3]+.1)]
+        if not relevant or any(w['confidence'] is None or w['confidence'] < 80 for w in relevant):
             values = {}
         result.append({'kind': 'diffuser', 'tag': '', 'values': {}, 'review_values': values,
                        'status': 'UNVERIFIED', 'include': False, 'source': source, 'page': page,
