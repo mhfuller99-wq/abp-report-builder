@@ -36,7 +36,10 @@ function officeDesignFromSheets(sheets){
   let system='';
   for(let r=0;r<rows.length;r++){
    const row=rows[r]||[];
-   if(compareIsTag(row[0])){system=compareTag(row[0]);continue;}
+   // Room labels (LOBBY 101) can look like unit tags. A numbered outlet row
+   // takes precedence; only a standalone header can change the system.
+   const outletRow=compareNumber(row[2])!==null&&typeof row[3]==='string'&&compareNumber(row[6])!==null;
+   if(!outletRow&&compareIsTag(row[0])&&row.slice(1).every(v=>v==null||String(v).trim()==='')){system=compareTag(row[0]);continue;}
    // Original ABP supply form: outlet number C, type D, neck E, DESIGN G.
    // F/H are never inspected: those are initial/actual readings.
    if(compareNumber(row[2])===null||typeof row[3]!=='string'||compareNumber(row[6])===null)continue;
