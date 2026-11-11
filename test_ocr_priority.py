@@ -7,6 +7,17 @@ from abp_ocr import Budget,extract_local,prioritized_pages
 
 
 class PriorityTests(unittest.TestCase):
+    def test_small_table_gets_first_pass_when_only_one_region_fits(self):
+        calls=[]
+        with pymupdf.open() as doc:
+            doc.new_page()
+            result=extract_local(doc.tobytes(),region_engine=lambda *a,**kw:calls.append(kw['clip']) or [],
+                selector=lambda *a,**kw:([[20,200,540,450],[20,20,540,100]],10,False),
+                budget=Budget(max_regions=1),retain_words=False)
+        self.assertEqual(calls,[[20,20,540,100]])
+        self.assertTrue(any(r['status']=='budget_skipped' for r in result['coverage'][0]['regions']))
+        self.assertFalse(result['complete_takeoff'])
+
     def test_source_allowance_respects_the_remaining_job_deadline(self):
         from abp_jobs import SourceRunner,write_json
         with tempfile.TemporaryDirectory() as directory:

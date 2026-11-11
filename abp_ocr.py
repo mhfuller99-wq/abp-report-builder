@@ -419,7 +419,10 @@ def extract_local(data, source='synthetic.pdf', budget=Budget(), engine=tesserac
             if boxes:
                 coverage['unexamined_content'] = 'All content outside selected table crops; manual review required.'
                 retries = []
-                for box in boxes:
+                # Short tables (often fan/unit schedules) should not wait for
+                # a large table to consume the whole page allowance. Every
+                # selected crop remains queued and skipped areas stay visible.
+                for box in sorted(boxes,key=lambda b:(pymupdf.Rect(b).get_area(),b[1],b[0])):
                     candidates, r = recognize(pymupdf.Rect(box), 11)
                     statuses.append(r['status'])
                     # Different segmentation only when no supported candidate was
