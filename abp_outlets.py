@@ -12,7 +12,7 @@ def plan_context(words):
     for w in words:
         rows[round(w[1] / 4)].append(w)
     lines = [' '.join(w[4] for w in sorted(row, key=lambda w:w[0])) for row in rows.values()]
-    pattern = r'(?:MECHANICAL|HVAC)(?:\s+(?:FLOOR|CEILING|NEW WORK))*\s+PLAN|(?:FLOOR|CEILING)\s+PLAN\s*[-:]?\s*(?:MECHANICAL|HVAC)|PLAN\s*[-:]\s*HVAC'
+    pattern = r'\b(?:(?:MECHANICAL|HVAC)(?:\s+(?:FLOOR|CEILING|NEW WORK))*\s+PLAN|(?:FLOOR|CEILING)\s+PLAN\s*[-:]?\s*(?:MECHANICAL|HVAC)|PLAN\s*[-:]\s*HVAC)\b'
     return any(re.search(pattern, line, re.I) for line in lines)
 
 def centered_outlets(words, page_number, source, legend=None, *, plan_confirmed=False):

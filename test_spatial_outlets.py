@@ -21,6 +21,8 @@ class SpatialOutletTests(unittest.TestCase):
     def test_notes_schedules_and_competing_flow_are_not_outlets(self):
         w=sample();w[0]=(*w[0][:4],'MECHANICAL SCHEDULE',99)
         self.assertEqual(centered_outlets(w,1,'schedules.pdf'),[])
+        w[0]=(*w[0][:4],'MECHANICAL PLANS WITH THEIR QUOTE REQUEST',99)
+        self.assertEqual(centered_outlets(w,1,'notes.pdf'),[])
         w=sample();w.append((96,116,114,126,'350',55))
         self.assertEqual(len(centered_outlets(w,1,'plan.pdf')),2)
         w=sample();w.append((90,101,130,111,'NOTE',56))
