@@ -377,6 +377,12 @@ def extract_local(data, source='synthetic.pdf', budget=Budget(), engine=tesserac
                     return None, r
                 finally:
                     pymupdf.TOOLS.store_shrink(100)
+                    # A wide schedule may outlast the source allowance. Save
+                    # each completed region atomically rather than losing its
+                    # candidates while waiting for the whole page to finish.
+                    if page_attempted:
+                        coverage['status'] = 'partial_review_required'
+                        if checkpoint:checkpoint(report)
 
             if raster_pages >= budget.max_pages or not available(1):
                 entry['ocr_status'] = coverage['status'] = 'budget_skipped'
@@ -413,7 +419,10 @@ def extract_local(data, source='synthetic.pdf', budget=Budget(), engine=tesserac
             if boxes:
                 coverage['unexamined_content'] = 'All content outside selected table crops; manual review required.'
                 retries = []
-                for box in boxes:
+                # Short tables (often fan/unit schedules) should not wait for
+                # a large table to consume the whole page allowance. Every
+                # selected crop remains queued and skipped areas stay visible.
+                for box in sorted(boxes,key=lambda b:(pymupdf.Rect(b).get_area(),b[1],b[0])):
                     candidates, r = recognize(pymupdf.Rect(box), 11)
                     statuses.append(r['status'])
                     # Different segmentation only when no supported candidate was
@@ -530,7 +539,7 @@ def extract(data, source='source.pdf', timeout=65, *, path=None, page_numbers=No
                 saved=root/'checkpoint.json'
                 if saved.exists() and saved.stat().st_size<=2_000_000:
                     report=json.loads(saved.read_text(encoding='utf-8'))
-                    report['warnings'].append('Image time budget reached; completed page results preserved. Remaining pages require retry or manual review.')
+                    report['warnings'].append('Image time budget reached; completed image-region results preserved. Unfinished regions and pages require retry or manual review.')
                     report['interrupted']=True
                     for item in report['review_candidates']:item['source']=source
                     return report

@@ -84,7 +84,7 @@ class SourceRunner:
         if not run:return {'review_candidates':[],'warnings':['Image stage not examined'],'coverage':[]}
         if time.monotonic()>=self.deadline:return old or {'review_candidates':[],'warnings':['Job time budget reached; retry image pages'],'coverage':[]}
         native=self.load(index,'native') or {};count=native.get('pages') or 12
-        allowance=min(120,max(35,(len(pages) if pages else count)*12),self.deadline-time.monotonic())
+        allowance=min(120,max(60,(len(pages) if pages else count)*12),self.deadline-time.monotonic())
         self.update(source=name,stage='images',source_index=index,message='Reading bounded image regions')
         result=deferred_ocr(name,stream,identity,allowance,page_numbers=pages,
             progress=lambda p:self.update(source=name,source_index=index,**p))
