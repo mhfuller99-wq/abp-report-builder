@@ -110,13 +110,38 @@ def selection_airflows(words):
     return result
 
 
+def joined_schedule_tags(words):
+    """Join horizontal CAD tag tokens only inside an explicit ID column.
+
+    An explicit hyphen and unique adjacent number are required. Do not turn a
+    nearby schedule value or a prose equipment reference into a new tag.
+    """
+    added=[];consumed=set()
+    family=re.compile(TAG.split(')-',1)[0]+')',re.I)
+    for row in rows(words):
+        for i,w in enumerate(row):
+            if not family.fullmatch(w[4]):continue
+            if not any(m[4].upper() in MARK_HEADERS and 0<w[1]-m[1]<600
+                       and abs(center(m)-center(w))<30 for m in words):continue
+            parts=[w]
+            for other in row[i+1:i+3]:
+                if other[0]-parts[-1][2]>6 or other[0]<parts[-1][2]-1:break
+                if other[4] not in {'-','–','−'} and not re.fullmatch(r'-?\d+(?:\.\d+)*[A-Z]?',other[4],re.I):break
+                parts.append(other)
+                token=''.join(p[4] for p in parts).replace('–','-').replace('−','-')
+                if re.fullmatch(TAG,token,re.I):
+                    added.append((w[0],w[1],other[2],w[3],token,*w[5:]))
+                    consumed.update(id(p) for p in parts);break
+    return [w for w in words if id(w) not in consumed]+added
+
+
 def schedule_candidates(words, page_number, name):
     """Read supported families beneath explicit MARK and design column headers.
 
     Column positions, not a fixed numeric order, determine the field. Repeated
     MARK columns bound adjacent schedules. Unlabeled numbers are never imported.
     """
-    words = list(words)
+    words = joined_schedule_tags(list(words))
     # Stacked family/number tags are accepted only beneath a matching tag column.
     for word in list(words):
         if not re.fullmatch(TAG.split(')-', 1)[0] + ')', word[4], re.I):
@@ -263,8 +288,25 @@ def schedule_candidates(words, page_number, name):
             if label in {'ESP','E.S.P.'}:below(anchor,'esp')
             elif label == 'HP' and 'MOTOR' in context:below(anchor,'motor_hp')
             elif label in {'CFM','AIRFLOW'}:
-                if any(x in context for x in ('OUTDOOR','OUTSIDE','OA ')):below(anchor,'osa_cfm')
+                if re.search(r'\b(?:OUTDOOR|OUTSIDE|O/?A|OSA)\b',context):below(anchor,'osa_cfm')
                 elif 'SUPPLY' in context or (label == 'AIRFLOW' and family == 'BCU'):below(anchor,'design_cfm')
+        # A SUPPLY FAN heading can span CFM, ESP and HP subcolumns. Bind the
+        # single nearby CFM column after rejecting outside/return/exhaust air.
+        supply_groups=phrases(header,r'SUPPLY FAN')
+        supply_flows=[]
+        for anchor in phrases(header,r'CFM|AIRFLOW'):
+            context=' '.join(w[4].upper() for w in header if abs(center(w)-center(anchor))<30 and 0<=anchor[1]-w[1]<38)
+            if re.search(r'\b(?:OUTDOOR|OUTSIDE|O/?A|OSA|RETURN|EXHAUST)\b',context):continue
+            if any(abs(center(g)-center(anchor))<75 and 0<anchor[1]-g[1]<45 for g in supply_groups):supply_flows.append(anchor)
+        if len(supply_flows)==1:below(supply_flows[0],'design_cfm')
+        # Fan schedules often spell static pressure S.P. IN / INCHES / IN H2O.
+        # Keep this abbreviation confined to fan equipment and labeled units.
+        if family in {'EF','KEF','SF','RF','PF'}:
+            anchors=phrases(header,r'S\.P\.(?: IN)?')
+            if len(anchors)==1:
+                anchor=anchors[0]
+                context=' '.join(w[4].upper() for w in header if abs(center(w)-center(anchor))<25 and -20<w[1]-anchor[1]<40)
+                if re.search(r'\b(?:INCHES|H2O|H20)\b',context):below(anchor,'esp')
         for anchor in phrases(header, r'EXTERNAL'):
             nearby = ' '.join(w[4].upper() for w in header if abs(center(w)-center(anchor)) < 22 and 0 < w[1]-anchor[1] < 40)
             if 'STATIC' in nearby and 'PRESSURE' in nearby:below(anchor,'esp')
@@ -345,10 +387,8 @@ def diffuser_legend(doc):
 def keyed_outlets(words, page_number, name, legend):
     """Read stacked symbol/airflow callouts, preserving unconfirmed associations."""
     # Avoid schedules, details and their rated maximum flows.
-    title_rows=[' '.join(w[4] for w in row) for row in rows(words)]
-    plan_title=any(re.match(r'^(?:HVAC|MECHANICAL)(?: FLOOR| CEILING)? PLAN\b',line,re.I) for line in title_rows)
-    from abp_outlets import plan_context
-    if not plan_title and not plan_context(words) and not phrases(words, r'(?:FLOOR )?PLAN - HVAC|(?:MECHANICAL|HVAC)(?: FLOOR| CEILING)? PLAN|(?:FIRST|SECOND|GROUND) FLOOR HVAC PLAN'):
+    from abp_outlets import plan_context, EQUIPMENT_MARKS
+    if not plan_context(words):
         return []
     notes = set()
     for row in rows(words):
@@ -363,6 +403,7 @@ def keyed_outlets(words, page_number, name, legend):
             continue  # A symbol-key example is not a physical outlet.
         size = None
         kind = word[4].rstrip(',')
+        if kind in EQUIPMENT_MARKS:continue
         if kind in legend:
             size = legend[kind]
         elif re.fullmatch(r'[A-Z]',kind):
@@ -411,6 +452,7 @@ def keyed_outlets(words, page_number, name, legend):
         if len(numbers) != 1:
             continue
         flow = int(numbers[0][4])
+        if not 10 <= flow <= 10000:continue
         result.append({'include': False, 'type': kind, 'size': size,
                        'shape': ('rectangular' if 'x' in size.lower() else 'round') if size else 'unknown',
                        'system': '', 'location': '', 'design_cfm': flow,

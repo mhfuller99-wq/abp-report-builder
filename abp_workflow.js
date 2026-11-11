@@ -240,6 +240,7 @@ function installWorkflow(){
    if(emptySourceReport(payload.records,payload.diffusers,scanState))throw Error('No reviewed equipment or included outlets. The source takeoff is empty; retry the schedules or add source-reviewed equipment before building a job report.');
    if(scanBuildBlocked(scanState,payload.scan_acknowledgement))throw Error(scanStateNotice()+'Review source omissions and enter a fresh partial-report acknowledgment.');
    if(!payload.project.trim())throw Error('Enter a project name.');if(!payload.templates.length)throw Error('Select at least one worksheet.');
+   $('status').textContent='Submitting report build…';
    workflowJob={...(await readApiJson(await fetch('/api/jobs/build',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)}))),project:payload.project,partial:!!payload.scan_acknowledgement};
    workflowSave();await followWorkflowJob();
   }catch(e){$('status').textContent=e.message;workflowControls(false);}
