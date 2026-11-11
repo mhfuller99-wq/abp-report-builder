@@ -3,6 +3,7 @@ const compareNormalize=x=>String(x??'').toUpperCase().replace(/[^A-Z0-9]+/g,' ')
 const compareTag=x=>String(x??'').trim().toUpperCase().replace(/\s*-\s*|\s+/g,'-');
 const compareIsTag=x=>/^[A-Z]{1,10}-\d+[A-Z0-9.-]*$/.test(compareTag(x));
 const compareNumber=x=>typeof x==='number'&&Number.isFinite(x)&&x>=0&&x<=1000000?x:null;
+const compareOutletType=x=>typeof x==='string'&&x.trim()?x.trim().toUpperCase():compareNumber(x)!==null?String(x):null;
 function compareField(label){
  const key=compareNormalize(label);
  if(/\b(ACTUAL|MEASURED|INITIAL|FINAL|TEST)\b/.test(key))return null;
@@ -38,12 +39,13 @@ function officeDesignFromSheets(sheets){
    const row=rows[r]||[];
    // Room labels (LOBBY 101) can look like unit tags. A numbered outlet row
    // takes precedence; only a standalone header can change the system.
-   const outletRow=compareNumber(row[2])!==null&&typeof row[3]==='string'&&compareNumber(row[6])!==null;
+   const type=compareOutletType(row[3]);
+   const outletRow=compareNumber(row[2])!==null&&type!==null&&compareNumber(row[6])!==null;
    if(!outletRow&&compareIsTag(row[0])&&row.slice(1).every(v=>v==null||String(v).trim()==='')){system=compareTag(row[0]);continue;}
    // Original ABP supply form: outlet number C, type D, neck E, DESIGN G.
    // F/H are never inspected: those are initial/actual readings.
-   if(compareNumber(row[2])===null||typeof row[3]!=='string'||compareNumber(row[6])===null)continue;
-   outlets.push({system,type:row[3].trim().toUpperCase(),size:String(row[4]??''),location:String(row[0]??''),design_cfm:row[6],reference:sheet.name+' · row '+(r+1)});
+   if(!outletRow)continue;
+   outlets.push({system,type,size:String(row[4]??''),location:String(row[0]??''),design_cfm:row[6],reference:sheet.name+' · row '+(r+1)});
   }
  }
  if(!units.size&&!outlets.length)throw Error('No supported ABP design panels found. This layout needs manual comparison; no values were imported.');

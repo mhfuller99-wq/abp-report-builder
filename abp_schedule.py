@@ -671,6 +671,8 @@ def parse_pdf(name, data=None, *, path=None, page_numbers=None, checkpoint=None)
             outlets.extend(keyed_outlets(words, index + 1, name, legend))
             outlets.extend(centered_outlets(words, index + 1, name, legend))
             outlets.extend(necked_outlets(words, index + 1, name))
+            from abp_outlets import coded_outlets
+            outlets.extend(coded_outlets(words,index+1,name))
             outlets=distinct_outlets(outlets)
             completed.append(index+1)
             if checkpoint:checkpoint(found,warnings,outlets,completed,False)

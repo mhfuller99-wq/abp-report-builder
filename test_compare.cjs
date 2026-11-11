@@ -21,3 +21,8 @@ console.log('Office comparison ignores actuals, preserves repeated outlets, find
 const numberedRooms=[['RTU-1'],['LOBBY 101',null,1,'A',12,999,460,888],['OFFICE 102',null,2,'A',12,999,420,888],['RTU-2'],['ROOM 103',null,1,'A',6,999,75,888]];
 const roomOffice=ctx.officeDesignFromSheets([{name:'SUPPLY DIFFUSERS',rows:numberedRooms}]);
 assert.equal(roomOffice.outlets.length,3);assert.equal(roomOffice.outlets[0].system,'RTU-1');assert.equal(roomOffice.outlets[1].system,'RTU-1');assert.equal(roomOffice.outlets[2].system,'RTU-2');assert.equal(roomOffice.outlets.reduce((n,o)=>n+o.design_cfm,0),955);
+const numericTypes=[['AHU-7'],['LOBBY 101',null,1,6020,8,999,300,888],['LOBBY 101',null,2,6020,8,999,300,888],['AHU-8'],['ROOM',null,1,'6020',6,999,150,888],['TOTAL',null,null,null,null,999,750,888],['IGNORED',null,3,null,8,999,100,888]];
+const typeOffice=ctx.officeDesignFromSheets([{name:'SUPPLY DIFFUSERS',rows:numericTypes}]);
+assert.equal(typeOffice.outlets.length,3);assert.equal(typeOffice.outlets[0].type,'6020');assert.equal(typeOffice.outlets[1].system,'AHU-7');assert.equal(typeOffice.outlets[2].system,'AHU-8');
+assert.equal(ctx.compareOfficeDesign(typeOffice,[],[]).office_total,750);
+assert(!JSON.stringify(typeOffice).includes('999'));assert(!JSON.stringify(typeOffice).includes('888'));

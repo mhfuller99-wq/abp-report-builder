@@ -13,6 +13,34 @@ from test_mechanical import word as native_word
 
 
 class SourceReviewTests(unittest.TestCase):
+    def test_literal_cd_cfm_callouts_keep_repeated_outlets_and_omit_ambiguous_pairs(self):
+        from abp_outlets import coded_outlets
+        from abp_ocr import diffuser_candidates
+        pairs=[(10,20,40,28,'914CD'),(10,30,45,38,'310CFM'),
+               (100,20,130,28,'914CD'),(100,30,135,38,'310CFM')]
+        found=coded_outlets(pairs,1,'synthetic.pdf',plan_confirmed=True)
+        self.assertEqual(len(found),2);self.assertEqual(sum(c['design_cfm'] for c in found),620)
+        self.assertTrue(all(not c['include'] and not c['size'] and not c['system'] for c in found))
+        self.assertEqual(coded_outlets(pairs,1,'notes.pdf'),[])
+        ambiguous=pairs[:2]+[(10,32,45,40,'320CFM')]
+        self.assertEqual(coded_outlets(ambiguous,1,'x',plan_confirmed=True),[])
+        self.assertEqual(coded_outlets([(10,20,40,28,'914RAG'),pairs[1]],1,'x',plan_confirmed=True),[])
+        words=[word(*p,confidence=95) for p in pairs]
+        self.assertEqual(len(diffuser_candidates(words,'x',1,plan_confirmed=True)),2)
+        words[1]['confidence']=45
+        self.assertEqual(diffuser_candidates(words,'x',1,plan_confirmed=True)[0]['review_values'],{})
+
+    def test_decorative_circles_cannot_consume_the_plan_tile_allowance(self):
+        with pymupdf.open() as doc:
+            p=doc.new_page(width=600,height=800);p.insert_text((20,30),'HVAC PLAN')
+            for i in range(24):p.draw_circle((30+(i%6)*60,80+(i//6)*60),9)
+            calls=[]
+            def engine(*args,psm,**kwargs):calls.append(psm);return []
+            result=extract_local(doc.tobytes(),region_engine=engine,retain_words=False)
+            self.assertEqual(calls.count(11),6)
+            self.assertLessEqual(result['ocr_regions_attempted'],Budget().max_regions_per_page)
+            self.assertFalse(result['complete_takeoff'])
+
     def test_uncertain_tag_reread_requires_exact_repeat_and_budget(self):
         from test_mechanical import fan_words
         from test_targeted_ocr import ruled_pdf

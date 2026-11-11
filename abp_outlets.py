@@ -124,6 +124,34 @@ def necked_outlets(words, page_number, source, *, plan_confirmed=False):
         result.append(item)
     return result
 
+def coded_outlets(words,page_number,source,*,plan_confirmed=False):
+    """Explicit CD model above a literal CFM value; no neck/system inference."""
+    if not plan_confirmed and not plan_context(words):return []
+    grid=defaultdict(list)
+    for i,w in enumerate(words):grid[(int(w[0]//48),int(w[1]//48))].append(i)
+    pairs=[];used=defaultdict(int)
+    for w in words:
+        if not re.fullmatch(r'\d{3,4}CD',w[4],re.I):continue
+        h=w[3]-w[1]
+        if not 3<=h<=30:continue
+        x,y=int(w[0]//48),int(w[1]//48)
+        nearby=[i for dx in (-1,0,1) for dy in (-1,0,1) for i in grid.get((x+dx,y+dy),[])]
+        matches=[]
+        for i in nearby:
+            flow=words[i];m=re.fullmatch(r'(\d{2,4}|\d{1,2},\d{3})CFM',flow[4],re.I)
+            if (m and 10<=int(m[1].replace(',',''))<=10000
+                and .3*h<=flow[1]-w[1]<=2*h
+                and .6*h<=flow[3]-flow[1]<=1.5*h
+                and abs((w[0]+w[2]-flow[0]-flow[2])/2)<h):matches.append((i,int(m[1].replace(',',''))))
+        if len(matches)==1:pairs.append((w,*matches[0]));used[matches[0][0]]+=1
+    return [{'include':False,'type':w[4].upper(),'size':'','system':'','location':'',
+             'design_cfm':value,'source':source,'reference':f'page {page_number}',
+             'position':[round(w[0],2),round(w[1],2)],
+             'evidence_box':[min(w[0],words[i][0]),w[1],max(w[2],words[i][2]),words[i][3]],
+             'evidence':f'{w[4]} / {words[i][4]}; printed CD/CFM callout; confirm legend, supply service, neck, room and system'}
+            for w,i,value in pairs if used[i]==1]
+
+
 def distinct_outlets(items):
     """Collapse overlapping parser readings, never distinct equal-flow devices."""
     result=[]

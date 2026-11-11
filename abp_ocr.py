@@ -29,7 +29,7 @@ class Budget:
     max_region_pixels: int = 2_000_000
     max_page_pixels: int = 16_000_000
     max_regions: int = 32
-    max_regions_per_page: int = 16
+    max_regions_per_page: int = 20
     max_detected_regions: int = 12
     max_coverage_regions: int = 240
     region_dpi: int = 216
@@ -326,7 +326,7 @@ def extract_local(data, source='synthetic.pdf', budget=Budget(), engine=tesserac
                 total_pixels += pixels
                 page_pixels += pixels
 
-            def recognize(rect, psm, full_page=False, word_sink=None, table=False):
+            def recognize(rect, psm, full_page=False, word_sink=None, table=False, reserve_regions=0):
                 nonlocal attempted, regions_attempted, page_regions, page_attempted
                 max_pixels = budget.max_pixels if full_page else min(budget.max_pixels, budget.max_region_pixels)
                 # Use the remaining pixel allowance for the next table instead
@@ -341,7 +341,7 @@ def extract_local(data, source='synthetic.pdf', budget=Budget(), engine=tesserac
                 _, pixels = render_geometry(rect, max_pixels, (budget.dpi if full_page else budget.region_dpi) / 72)
                 r = {'box': list(rect), 'status': 'budget_skipped', 'method': f'ocr_psm{psm}', 'pixels': pixels}
                 record_region(coverage, r)
-                if not available(pixels) or regions_attempted >= budget.max_regions or page_regions >= budget.max_regions_per_page:
+                if not available(pixels) or regions_attempted >= budget.max_regions-reserve_regions or page_regions >= budget.max_regions_per_page-reserve_regions:
                     r['reason'] = 'Pixel, region or time budget exhausted; manual review required.'
                     return None, r
                 consume(pixels)
@@ -465,13 +465,13 @@ def extract_local(data, source='synthetic.pdf', budget=Budget(), engine=tesserac
                 for box in circles:
                     rect=pymupdf.Rect(box);inset=rect.width*.20
                     letters=[]
-                    _,r=recognize(rect+(inset,inset,-inset,-inset),10,word_sink=letters)
+                    _,r=recognize(rect+(inset,inset,-inset,-inset),10,word_sink=letters,reserve_regions=6)
                     statuses.append(r['status'])
                     if len(letters)!=1 or not re.fullmatch(r'[A-Z]',letters[0]['text']) or (letters[0].get('confidence') or 0)<80:continue
                     cx=(rect.x0+rect.x1)/2;flows=[]
                     flow_rect=pymupdf.Rect(cx-rect.width*.70,rect.y1+rect.height*.03,
                                           cx+rect.width*.70,rect.y1+rect.height*.72)&page.rect
-                    _,r=recognize(flow_rect,7,word_sink=flows);statuses.append(r['status'])
+                    _,r=recognize(flow_rect,7,word_sink=flows,reserve_regions=6);statuses.append(r['status'])
                     candidate=circle_outlet(letters,flows,source,number,box)
                     if candidate:
                         candidate['region']=list(rect | flow_rect)
@@ -553,13 +553,14 @@ def diffuser_candidates(words, source, page, *, plan_confirmed=False):
     """Use existing conservative geometry readers, without guessing associations."""
     from abp_schedule import parse_supply_outlets
     from abp_mechanical import keyed_outlets
-    from abp_outlets import centered_outlets, necked_outlets, distinct_outlets
+    from abp_outlets import centered_outlets, necked_outlets, coded_outlets, distinct_outlets
     if not words:
         return []
     tuples = [(*w['box'], w['text']) for w in words]
     found = distinct_outlets(parse_supply_outlets(tuples, page, source) + keyed_outlets(tuples, page, source, {})
                             + centered_outlets(tuples,page,source,plan_confirmed=plan_confirmed)
-                            + necked_outlets(tuples,page,source,plan_confirmed=plan_confirmed))
+                            + necked_outlets(tuples,page,source,plan_confirmed=plan_confirmed)
+                            + coded_outlets(tuples,page,source,plan_confirmed=plan_confirmed))
     result = []
     for item in found:
         values = {'design_cfm': item['design_cfm']} if item.get('design_cfm') is not None else {}

@@ -61,7 +61,7 @@ class HeaterTests(unittest.TestCase):
                 off=(n-1)//len(slots)*height;col=slots[(n-1)%len(slots)]
                 self.assertEqual(ws.cell(off+3,col).value,f'{prefix}-{n}')
                 self.assertEqual(ws.cell(off+10,col).value,200+n)
-                self.assertEqual(ws.cell(off+4,col).value,f'Test room {n}')
+                self.assertEqual(ws.cell(off+4,col).value,f'TEST ROOM {n}')
                 self.assertEqual(ws.cell(off+9,col).value,{'ELE':'ELECTRIC','GAS':'GAS','WTR':'HOT WATER'}[kind])
             self.assertEqual(sum(s.title.startswith('UNIT HEATER '+kind) for s in self.wb),1)
         self.assertEqual(self.wb['UNIT HEATER ELE']['C18'].value,240)
