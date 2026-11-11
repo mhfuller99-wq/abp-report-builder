@@ -10,7 +10,7 @@ never stored as motor FLA.
 """
 import re
 from abp_mechanical import schedule_candidates, diffuser_legend, keyed_outlets, packaged_submittals, TAG, expand_marks, page_words, selection_airflows, readable_text
-from abp_outlets import centered_outlets, distinct_outlets
+from abp_outlets import centered_outlets, necked_outlets, distinct_outlets
 
 LEAD = re.compile(
     r'^(' + TAG.split('(?:', 1)[1].split(')', 1)[0] + r')-\d+(?:\.\d+)*[A-Z]?(?:-\d+(?:\.\d+)*[A-Z]?)?\b', re.I)
@@ -670,6 +670,7 @@ def parse_pdf(name, data=None, *, path=None, page_numbers=None, checkpoint=None)
             outlets.extend(parse_supply_outlets(words, index + 1, name))
             outlets.extend(keyed_outlets(words, index + 1, name, legend))
             outlets.extend(centered_outlets(words, index + 1, name, legend))
+            outlets.extend(necked_outlets(words, index + 1, name))
             outlets=distinct_outlets(outlets)
             completed.append(index+1)
             if checkpoint:checkpoint(found,warnings,outlets,completed,False)
