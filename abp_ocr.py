@@ -16,6 +16,7 @@ from abp_ocr_regions import render_geometry, raster_regions, ruled_regions, hood
 from abp_ocr_candidates import merge_diffuser_candidate
 from abp_plan_regions import paired_text_regions
 from abp_keynotes import keynote_regions, keynote_candidates
+from abp_ocr_batch import tesseract_batch_words
 
 
 @dataclass(frozen=True)
@@ -235,7 +236,7 @@ def hood_candidates(words, source, page, method):
 
 
 def extract_local(data, source='synthetic.pdf', budget=Budget(), engine=tesseract_words, retain_words=True,
-                  region_engine=None, selector=None, page_numbers=None, checkpoint=None):
+                  region_engine=None, selector=None, page_numbers=None, checkpoint=None, batch_engine=None):
     """Native and OCR candidates remain separate and unverified.
 
     Inspect bounded previews for ruled raster tables, then OCR selected crops.
@@ -244,6 +245,7 @@ def extract_local(data, source='synthetic.pdf', budget=Budget(), engine=tesserac
     """
     import pymupdf
     region_engine = region_engine or tesseract_region_words
+    if batch_engine is None and region_engine is tesseract_region_words:batch_engine=tesseract_batch_words
     selector = selector or ruled_regions
     if len(data) > budget.max_pdf_bytes:
         raise ValueError('PDF byte budget exceeded')
@@ -270,7 +272,8 @@ def extract_local(data, source='synthetic.pdf', budget=Budget(), engine=tesserac
             raise ValueError('Encrypted PDF requires an unlocked copy')
         if len(doc) > 300:
             raise ValueError('PDF has more than 300 pages')
-        for index in prioritized_pages(doc,page_numbers,started+budget.total_seconds):
+        ordered_pages=prioritized_pages(doc,page_numbers,started+budget.total_seconds)
+        for page_offset,index in enumerate(ordered_pages):
             number, page = index+1,doc[index]
             if checkpoint:checkpoint(report)
             if page_numbers is not None and number not in page_numbers:continue
@@ -319,7 +322,8 @@ def extract_local(data, source='synthetic.pdf', budget=Budget(), engine=tesserac
                     coverage['status'] = 'small_marginal_images_skipped'
                     coverage['unexamined_content'] = 'Small marginal images were not OCR-read; verify manually.'
                 continue
-            page_deadline = min(started + budget.total_seconds, time.monotonic() + budget.per_page_seconds)
+            page_started=time.monotonic()
+            page_deadline = min(started + budget.total_seconds, page_started + budget.per_page_seconds)
             page_pixels = page_regions = 0
             page_attempted = False
 
@@ -423,6 +427,61 @@ def extract_local(data, source='synthetic.pdf', budget=Budget(), engine=tesserac
                         coverage['status'] = 'partial_review_required'
                         if checkpoint:checkpoint(report)
 
+            def read_small_crops(pending_jobs,psm,*,word_sink=None,glyph=False,parse=True):
+                """Checkpoint bounded groups; preserve earlier groups on failure."""
+                nonlocal attempted,regions_attempted,page_regions,page_attempted
+                if batch_engine is None:
+                    for pending in pending_jobs:
+                        _,r=recognize(pymupdf.Rect(pending.get('crop',pending['box'])),psm,callout=True,
+                                      glyph=glyph,word_sink=word_sink,parse_candidates=parse,pending=pending)
+                        pending['status']=r['status'];statuses.append(r['status'])
+                    return
+                zoom=budget.callout_dpi/72*(1.25 if glyph else 1)
+                for start in range(0,len(pending_jobs),8):
+                    jobs=[];reserved=[]
+                    for pending in pending_jobs[start:start+8]:
+                        rect=pymupdf.Rect(pending.get('crop',pending['box']))
+                        allowance=min(budget.max_pixels,budget.max_region_pixels,
+                                      budget.max_total_pixels-total_pixels,budget.max_page_pixels-page_pixels)
+                        pixels=render_geometry(rect,allowance,zoom)[1] if allowance>=10000 else 0
+                        r={'box':list(rect),'method':f'ocr_batch_psm{psm}','status':'budget_skipped','pixels':pixels}
+                        record_region(coverage,r)
+                        if not pixels or not available(pixels) or regions_attempted>=budget.max_regions or page_regions>=budget.max_regions_per_page:
+                            r['reason']='Pixel, region or time budget exhausted; manual review required.'
+                            pending['status']=r['status'];statuses.append(r['status']);continue
+                        consume(pixels);regions_attempted+=1;page_regions+=1
+                        if not page_attempted:page_attempted=True;attempted+=1
+                        jobs.append({'box':list(rect),'pixels':pixels});reserved.append((pending,r))
+                    if not jobs:continue
+                    batch_started=time.monotonic()
+                    try:
+                        outputs=batch_engine(page,jobs,max(.001,page_deadline-time.monotonic()),psm=psm,
+                                             max_zoom=zoom,max_total_pixels=sum(j['pixels'] for j in jobs))
+                        if len(outputs)!=len(jobs):raise ValueError('OCR batch lost crop identities')
+                        if sum(len(words) for words in outputs)>budget.max_words:raise ValueError('OCR batch word budget exceeded')
+                        for (pending,r),words in zip(reserved,outputs):
+                            if retain_words:entry['ocr_words'].extend(words)
+                            if word_sink is not None:
+                                if len(word_sink)+len(words)>budget.max_words:raise ValueError('OCR evidence word budget exceeded')
+                                word_sink.extend(words)
+                            candidates=diffuser_candidates(words,source,number,plan_confirmed=True) if parse else []
+                            for candidate in candidates:
+                                candidate['region']=r['box'];candidate['region_coordinate_space']='displayed_pdf_points'
+                                if not merge_diffuser_candidate(report['review_candidates'],candidate):report['review_candidates'].append(candidate)
+                            r['status']='review_candidate' if candidates else ('no_supported_table_recognized' if words else 'no_text')
+                            r['candidate_count']=len(candidates);pending['status']=r['status'];statuses.append(r['status'])
+                    except (OSError,ValueError,RuntimeError,MemoryError,subprocess.SubprocessError) as exc:
+                        report['warnings'].append(f'Page {number}: OCR batch failed ({type(exc).__name__}); unfinished crops require review.')
+                        for pending,r in reserved:
+                            if pending['status']=='not_examined':
+                                r['status']=pending['status']='failed';r['reason']=type(exc).__name__
+                                statuses.append('failed')
+                    finally:
+                        coverage['status']='partial_review_required'
+                        coverage.setdefault('batches',[]).append({'regions':len(jobs),'psm':psm,
+                            'elapsed_seconds':round(time.monotonic()-batch_started,3)})
+                        if checkpoint:checkpoint(report)
+
             if raster_pages >= budget.max_pages or not available(1):
                 entry['ocr_status'] = coverage['status'] = 'budget_skipped'
                 coverage['unexamined_content'] = 'Raster content not examined; manual review required.'
@@ -493,14 +552,9 @@ def extract_local(data, source='synthetic.pdf', budget=Budget(), engine=tesserac
                 # Save the whole pending queue before recognition: a worker
                 # timeout must not make the unvisited bottom of a plan vanish.
                 if checkpoint:checkpoint(report)
-                for pending in coverage['planned_callout_regions']:
-                    _,r=recognize(pymupdf.Rect(pending['box']),6,callout=True,pending=pending)
-                    pending['status']=r['status'];statuses.append(r['status'])
+                read_small_crops(coverage['planned_callout_regions'],6)
                 note_words=[]
-                for pending in coverage['planned_keynote_regions']:
-                    _,r=recognize(pymupdf.Rect(pending['box']),6,callout=True,word_sink=note_words,
-                                  parse_candidates=False,pending=pending)
-                    pending['status']=r['status'];statuses.append(r['status'])
+                read_small_crops(coverage['planned_keynote_regions'],6,word_sink=note_words,parse=False)
                 # An identical isolated reread can confirm a low-confidence
                 # literal airflow. Never replace misread characters or digits.
                 for original in [w for w in note_words if re.fullmatch(r'\d{1,4}CFM',w['text'],re.I)
@@ -515,10 +569,8 @@ def extract_local(data, source='synthetic.pdf', budget=Budget(), engine=tesserac
                         original['confidence_method']='exact_token_reread'
                 for pending in coverage['planned_keynote_markers']:
                     b=pymupdf.Rect(pending['box']);w,h=b.width,b.height
-                    interior=pymupdf.Rect(b.x0+w*.25,b.y0+h*.2,b.x1-w*.25,b.y1-h*.08)
-                    _,r=recognize(interior,10,callout=True,glyph=True,word_sink=note_words,
-                                  parse_candidates=False,pending=pending)
-                    pending['status']=r['status'];statuses.append(r['status'])
+                    pending['crop']=[b.x0+w*.25,b.y0+h*.2,b.x1-w*.25,b.y1-h*.08]
+                read_small_crops(coverage['planned_keynote_markers'],10,word_sink=note_words,glyph=True,parse=False)
                 for candidate in keynote_candidates(note_words,markers,notes,source,number,plan_confirmed=True):
                     if not merge_diffuser_candidate(report['review_candidates'],candidate):report['review_candidates'].append(candidate)
                 if checkpoint:checkpoint(report)
@@ -569,9 +621,13 @@ def extract_local(data, source='synthetic.pdf', budget=Budget(), engine=tesserac
                     if candidates is not None and not any(c.get('review_values') for c in candidates):retries.append((0 if candidates else 1,box))
                 # Give every distinct table a first pass before spending the
                 # same bounded page budget on alternate segmentation.
-                for _,box in sorted(retries,key=lambda item:item[0])[:2]:
-                    _, fallback = recognize(pymupdf.Rect(box), 6,table=True)
-                    statuses.append(fallback['status'])
+                if retries and page_offset+1<len(ordered_pages):
+                    coverage['alternate_segmentation_deferred']=True
+                    report['warnings'].append(f'Page {number}: optional alternate table reading deferred to give unread source pages a first pass; retry this page if needed.')
+                else:
+                    for _,box in sorted(retries,key=lambda item:item[0])[:2]:
+                        _, fallback = recognize(pymupdf.Rect(box), 6,table=True)
+                        statuses.append(fallback['status'])
             else:
                 coverage['unexamined_content'] = 'Full-page OCR may miss content and associations; manual review required.'
                 candidates, r = recognize(page.rect, 6, full_page=True)
@@ -588,6 +644,7 @@ def extract_local(data, source='synthetic.pdf', budget=Budget(), engine=tesserac
                 report['warnings'].append(f'Page {number}: region OCR budget exhausted; skipped areas require manual review.')
             if page_attempted:
                 report['warnings'].append(f'Page {number}: OCR is unverified and may miss or misread content; review the original.')
+            coverage['elapsed_seconds']=round(time.monotonic()-page_started,3)
             if len(report['review_candidates']) > 500:
                 raise ValueError('Too many OCR review candidates; split source documents')
     report.update(ocr_attempted_pages=attempted, ocr_regions_attempted=regions_attempted,
