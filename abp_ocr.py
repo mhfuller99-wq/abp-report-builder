@@ -678,14 +678,15 @@ def diffuser_candidates(words, source, page, *, plan_confirmed=False):
     """Use existing conservative geometry readers, without guessing associations."""
     from abp_schedule import parse_supply_outlets
     from abp_mechanical import keyed_outlets
-    from abp_outlets import centered_outlets, necked_outlets, coded_outlets, distinct_outlets
+    from abp_outlets import centered_outlets, necked_outlets, coded_outlets, sized_registers, distinct_outlets
     if not words:
         return []
     tuples = [(*w['box'], w['text']) for w in words]
     found = distinct_outlets(parse_supply_outlets(tuples, page, source) + keyed_outlets(tuples, page, source, {})
                             + centered_outlets(tuples,page,source,plan_confirmed=plan_confirmed)
                             + necked_outlets(tuples,page,source,plan_confirmed=plan_confirmed)
-                            + coded_outlets(tuples,page,source,plan_confirmed=plan_confirmed))
+                            + coded_outlets(tuples,page,source,plan_confirmed=plan_confirmed)
+                            + sized_registers(tuples,page,source,plan_confirmed=plan_confirmed))
     result = []
     for item in found:
         values = {'design_cfm': item['design_cfm']} if item.get('design_cfm') is not None else {}

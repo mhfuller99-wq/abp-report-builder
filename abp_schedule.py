@@ -10,7 +10,7 @@ never stored as motor FLA.
 """
 import re
 from abp_mechanical import schedule_candidates, diffuser_legend, keyed_outlets, packaged_submittals, TAG, expand_marks, page_words, selection_airflows, readable_text
-from abp_outlets import centered_outlets, necked_outlets, distinct_outlets
+from abp_outlets import centered_outlets, necked_outlets, distinct_outlets, sized_registers
 
 LEAD = re.compile(
     r'^(' + TAG.split('(?:', 1)[1].split(')', 1)[0] + r')-\d+(?:\.\d+)*[A-Z]?(?:-\d+(?:\.\d+)*[A-Z]?)?\b', re.I)
@@ -403,10 +403,74 @@ def _parse_doas_selection_page(page, name, tag):
     return [candidate(tag, values, f'page {page.number + 1}', evidence, 'SUBMITTAL_NAMEPLATE', text)]
 
 
+def fan_motor_fla_rows(rows):
+    """Read a scalar FLA only from an evidenced fan/motor data table.
+
+    A flattened page can put a starter dial tick immediately after ``FLA (A)``.
+    Require both the complete scalar row and its local table structure. NEC
+    reference ratings, ranges and control illustrations do not qualify. Keep
+    the actual words so the reviewer can inspect the value's provenance.
+    """
+    scalar = re.compile(r'^\*?\s*(?:Motor\s+)?FLA\s*\*?\s*\((?:A|Amps)\)\s+(\d+(?:\.\d+)?)$', re.I)
+    heading = re.compile(r'^(?:Performance|Motor(?:\s+(?:Data|Information|Details|Specifications))?)$', re.I)
+    support = re.compile(
+        r'^((?:Requested|Actual) Volume \(CFM\)|Fan RPM|Motor RPM|RPM|'
+        r'Total External SP \([^)]*\)|Input Watts \(W\)|Voltage/Cycle/Phase|'
+        r'Voltage|Volts|Size \(HP\)|Horsepower|Motor HP|HP|Motor Mounted)\s+\S+$', re.I)
+    scalar_rows, header_rows, support_rows = [], [], []
+    for y, row in rows:
+        text = text_of(row)
+        matched = scalar.fullmatch(text)
+        if matched:
+            scalar_rows.append((y, row, matched))
+        if heading.fullmatch(text):
+            header_rows.append((y, row))
+        matched = support.fullmatch(text)
+        if matched:
+            support_rows.append((y, row, matched))
+        # Bound relational work on pathological pages, withholding FLA rather
+        # than accepting a truncated, potentially ambiguous group of ratings.
+        if len(scalar_rows) > 64 or len(header_rows) > 128 or len(support_rows) > 512:
+            return None, []
+    candidates = []
+    for y, row, match in scalar_rows:
+        if len(row) < 2 or number(row[-1][4]) is None:
+            continue
+        label, value_word = row[:-1], row[-1]
+        height = max(1.0, min(20.0, value_word[3] - value_word[1]))
+        label_right = max(w[2] for w in label)
+        value_center = (value_word[0] + value_word[2]) / 2
+        if value_word[0] < label_right:
+            continue
+        headers = [(hy, hw) for hy, hw in header_rows if 0 < y - hy <= 18 * height
+                   and min(w[0] for w in row) - 2 * height <= (hw[0][0] + hw[-1][2]) / 2 <= value_word[2] + 2 * height]
+        if not headers:
+            continue
+        hy, header = max(headers, key=lambda item: item[0])
+        witnesses = {}
+        for sy, other, supported in support_rows:
+            if len(other) < 2 or not hy < sy or abs(sy - y) > 12 * height:
+                continue
+            other_right = max(w[2] for w in other[:-1])
+            other_center = (other[-1][0] + other[-1][2]) / 2
+            if abs(other_right - label_right) <= 1.5 * height and abs(other_center - value_center) <= 2 * height:
+                witnesses.setdefault(supported.group(1).upper(), other)
+        if len(witnesses) < 2:
+            continue
+        candidates.append((number(match.group(1)), list(row) + list(header) +
+                           [w for words in witnesses.values() for w in words]))
+    # Two different motor ratings on the same marked page cannot be assigned
+    # safely by proximity alone. Leave the value for manual review.
+    if not candidates or len({value for value, _words in candidates}) != 1:
+        return None, []
+    return candidates[0]
+
+
 def parse_fan_submittal(doc, name):
     found = []
     for page in doc:
-        rows = [text_of(words) for _y, words in _page_segments(page)]
+        spatial_rows = _page_segments(page)
+        rows = [text_of(words) for _y, words in spatial_rows]
         page_text = '\n'.join(rows)
         mark = re.search(r'Mark:\s*(EF-\d+(?:\s*(?:,|&|THRU|THROUGH|TO|–|-)\s*(?:EF-)?\d+)*)', page_text, re.I)
         if not mark:
@@ -425,7 +489,9 @@ def parse_fan_submittal(doc, name):
         grab(r'Requested Volume \(CFM\)\s*([\d,]+)', 'design_cfm')
         grab(r'Actual Volume \(CFM\)\s*([\d,]+)', 'selected_cfm')
         grab(r'Fan RPM\s*(\d+)', 'fan_rpm')
-        grab(r'FLA \((?:A|Amps)\)\s*([\d.]+)', 'motor_fla')
+        motor_fla, fla_words = fan_motor_fla_rows(spatial_rows)
+        if motor_fla is not None:
+            values['motor_fla'] = motor_fla
         grab(r'Total External SP[^\n]*?\s(\d*\.\d+)', 'esp')
         grab(r'Input Watts \(W\)\s*(\d+)', 'motor_watts')
         volts = VOLT.search(page_text)
@@ -435,7 +501,10 @@ def parse_fan_submittal(doc, name):
                     f'motor FLA {values.get("motor_fla")}; {values.get("motor_watts")} W')
         service = 'CEILING' if 'Ceiling Exhaust Fan' in page_text else 'INLINE' if 'Inline Fan' in page_text else ''
         for tag in tags:
-            found.append(candidate(tag, values.copy(), f'page {page.number + 1}', evidence, 'SUBMITTAL_NAMEPLATE', {'service': service} if service else {}))
+            item = candidate(tag, values.copy(), f'page {page.number + 1}', evidence, 'SUBMITTAL_NAMEPLATE', {'service': service} if service else {})
+            if fla_words:
+                item['value_words'] = {'motor_fla': fla_words}
+            found.append(item)
     return found
 
 
@@ -673,6 +742,7 @@ def parse_pdf(name, data=None, *, path=None, page_numbers=None, checkpoint=None)
             outlets.extend(necked_outlets(words, index + 1, name))
             from abp_outlets import coded_outlets
             outlets.extend(coded_outlets(words,index+1,name))
+            outlets.extend(sized_registers(words,index+1,name))
             outlets=distinct_outlets(outlets)
             completed.append(index+1)
             if checkpoint:checkpoint(found,warnings,outlets,completed,False)
