@@ -14,7 +14,8 @@ def header_text(text, project, location):
                 prefix,tail=line.split(label,1)
                 # Only fill a genuine blank project/location field; never
                 # replace another document's nonempty text or print controls.
-                if not tail.strip():lines[i]=prefix+label+' '+str(value or '').upper().replace('&','&&')
+                if not tail.strip() and str(value or '').strip():
+                    lines[i]=prefix+label+' '+str(value).upper().replace('&','&&')
     return ''.join(lines)
 
 

@@ -140,6 +140,7 @@ class ReportPresentationTests(unittest.TestCase):
         result=header_text(value,'A & B','Example')
         self.assertIn('&"Calibri,Bold"',result);self.assertIn('A && B',result)
         self.assertIn('_x000a_',result);self.assertTrue(result.endswith('&G&R&G'))
+        self.assertEqual(header_text('LOCATION:_x000a_&G','Example',''),'LOCATION:_x000a_&G')
 
 
 if __name__=='__main__':unittest.main()
