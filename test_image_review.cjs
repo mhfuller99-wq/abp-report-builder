@@ -16,3 +16,17 @@ assert.equal(helper.validateSavedReview(saved,[],{},/^KH-\d+$/).image_review.len
 assert.throws(()=>helper.validateSavedReview({...saved,image_review:[{...candidates[0],review_values:{exhaust_cfm:Infinity}}]},[],{},/^KH-\d+$/));
 assert.throws(()=>helper.validateSavedReview({...saved,image_review:[{...candidates[0],review_reasons:'not an array'}]},[],{},/^KH-\d+$/));
 console.log('Image queue saved-review round trip and malformed queue rejection pass.');
+
+// Same-source physical matches and ambiguous adjacency cannot add a second outlet.
+for(const flag of ['native_outlet_match','native_outlet_ambiguous']){
+ const duplicate={kind:'diffuser',tag:'',source:'test',page:2,type:'SAR',size:'',review_values:{},[flag]:true,review_reasons:['Image size 1x6 disagrees with native 14x6; inspect the source.']};
+ candidates.push(duplicate);ctx.renderImageReview();const last=box.children.at(-1);
+ assert.equal(last.children[4].disabled,true);assert.match(last.children[4].textContent,/existing outlet/);
+ assert.match(last.children[1].textContent,/1x6.*14x6/);
+ last.children[3].children[0].checked=true;last.children[4].onclick();
+ assert.equal(ctx.diffusers.length,1);assert.match(last.children[5].textContent,/cannot add a duplicate/);
+ const restored=helper.validateSavedReview({...saved,image_review:[duplicate]},[],{},/^KH-\d+$/);
+ assert.equal(restored.image_review[0][flag],true);
+ assert.throws(()=>helper.validateSavedReview({...saved,image_review:[{...duplicate,[flag]:'true'}]},[],{},/^KH-\d+$/));
+}
+console.log('Conflicting native/image repeats retain alternatives and cannot add duplicate outlets.');
