@@ -84,7 +84,11 @@ class SourceRunner:
         if not run:return {'review_candidates':[],'warnings':['Image stage not examined'],'coverage':[]}
         if time.monotonic()>=self.deadline:return old or {'review_candidates':[],'warnings':['Job time budget reached; retry image pages'],'coverage':[]}
         native=self.load(index,'native') or {};count=native.get('pages') or 12
-        allowance=min(120,max(60,(len(pages) if pages else count)*12),self.deadline-time.monotonic())
+        # Two engineering sheets can require both a 35-second schedule pass
+        # and a 35-second plan pass on constrained CPU. A 60-second source
+        # cap cut off valid keyed-note joins after their crops were read.
+        # Keep the existing 120-second source and 900-second job ceilings.
+        allowance=min(120,max(90,(len(pages) if pages else count)*12),self.deadline-time.monotonic())
         self.update(source=name,stage='images',source_index=index,message='Reading bounded image regions')
         result=deferred_ocr(name,stream,identity,allowance,page_numbers=pages,
             progress=lambda p:self.update(source=name,source_index=index,**p))
@@ -132,7 +136,7 @@ class Jobs:
                     if previous['status']!='done' or previous['kind']!='scan':raise ValueError('Previous scan is not ready for retry')
                     job['sources']=copy.deepcopy(previous['sources'])
                     for path in previous['root'].iterdir():
-                        if path.name=='result.json' or path.name=='status.json':continue
+                        if path.name in {'result.json','status.json'} or path.suffix=='.tmp':continue
                         try:os.link(path,root/path.name)
                         except OSError:shutil.copyfile(path,root/path.name)
                     job['retry']=retry

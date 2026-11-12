@@ -4,6 +4,17 @@ from unittest.mock import patch
 from abp_jobs import Jobs,merge_pages,SourceRunner
 
 class JobTests(unittest.TestCase):
+    def test_short_image_sources_allow_both_page_passes_within_existing_caps(self):
+        for count,remaining,expected in ((2,900,90),(20,900,120),(2,25,25)):
+            with tempfile.TemporaryDirectory() as directory:
+                job={'root':Path(directory),'sources':[{'name':'synthetic.pdf'}]}
+                with patch('abp_jobs.time.monotonic',return_value=100):
+                    runner=SourceRunner(job,lambda **k:None);runner.deadline=100+remaining
+                    result={'review_candidates':[],'coverage':[],'warnings':[]}
+                    with patch.object(runner,'load',side_effect=lambda i,k:{'pages':count} if k=='native' else None), \
+                         patch('abp_resilient.deferred_ocr',return_value=result) as read:
+                        runner.image('synthetic.pdf',io.BytesIO(b''),{},0)
+                    self.assertEqual(read.call_args.args[3],expected)
     def setUp(self):
         self.temp=tempfile.TemporaryDirectory();self.guard=patch.dict('os.environ',{'ABP_SCAN_TMPDIR':self.temp.name});self.guard.start()
     def tearDown(self):self.guard.stop();self.temp.cleanup()
@@ -59,7 +70,9 @@ class JobTests(unittest.TestCase):
         def read(blobs,runner):return {'records':[]}
         jobs=Jobs(threading.Lock(),read,None)
         first=jobs.create('scan',parts=[('files','a.pdf',io.BytesIO(b'same source'))]);parent=self.finish(jobs,first['id'])
+        (parent['root']/'inflight.tmp').write_bytes(b'uncommitted status')
         nextjob=jobs.create('scan',parent=first['id'],retry={'source_index':0,'stage':'images','page_numbers':[2]});child=self.finish(jobs,nextjob['id'])
+        self.assertFalse((child['root']/'inflight.tmp').exists())
         self.assertEqual(parent['sources'],child['sources']);self.assertEqual((parent['root']/'source-0.pdf').read_bytes(),(child['root']/'source-0.pdf').read_bytes())
 
 if __name__=='__main__':unittest.main()
