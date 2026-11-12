@@ -49,7 +49,7 @@ class PartialReviewTests(unittest.TestCase):
         self.assertEqual(notes.max_row%master.max_row,0)
         self.assertGreater(notes.max_row,master.max_row)
         disclosed=[notes.cell(r+off,3).value for off in range(0,notes.max_row,43) for r in range(4,40)]
-        self.assertEqual([x for x in disclosed if x],partial_review_lines(self.state,self.ack))
+        self.assertEqual([x for x in disclosed if x],[x.upper() for x in partial_review_lines(self.state,self.ack)])
         self.assertIn('DUCT TRAVERSE RECT.',wb.sheetnames);self.assertIn('DUCT TRAVERSE RND',wb.sheetnames)
         fan=wb['EXHAUST FANS SMALL'];self.assertEqual(fan['C10'].value,75);self.assertIsNone(fan['D10'].value)
         self.assertTrue(str(notes['C4'].value).startswith('REVIEWED PARTIAL REPORT'))

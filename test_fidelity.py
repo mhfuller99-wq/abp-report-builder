@@ -1,5 +1,7 @@
 import io,unittest,zipfile
 from copy import copy
+from unittest.mock import patch
+import abp_server as app
 from openpyxl import load_workbook
 from abp_server import build,LOOKUP,banned_initial_template,RECT_TEMPLATE,RND_TEMPLATE,BLANK_RECT_FORMS,BLANK_RND_FORMS
 from abp_reference import build_reference
@@ -18,13 +20,17 @@ class FidelityTests(unittest.TestCase):
                 continue
             with self.subTest(template=name):
                 original=path.read_bytes();src=load_workbook(io.BytesIO(original))
-                generated=build({'project':'Template fidelity','templates':[name]})
+                # Compare each original form once. Default traverse quantities
+                # are independently covered by test_reports; repeating those
+                # blank packs for every master obscures this formatting check.
+                with patch.object(app,'BLANK_RECT_FORMS',1),patch.object(app,'BLANK_RND_FORMS',1):
+                    generated=build({'project':'Template fidelity','templates':[name]})
                 dst=load_workbook(io.BytesIO(generated))
                 for s in src:
                     d=dst[s.title]
                     traverse=name in (RECT_TEMPLATE,RND_TEMPLATE)
                     if traverse:
-                        pages=BLANK_RECT_FORMS if name==RECT_TEMPLATE else BLANK_RND_FORMS
+                        pages=1
                         self.assertEqual(d.max_row, s.max_row*pages)
                         def row_of(address):
                             return int(''.join(ch for ch in address if ch.isdigit()) or 0)
@@ -39,7 +45,12 @@ class FidelityTests(unittest.TestCase):
                                 self.assertEqual(copy(getattr(c,attr)),copy(getattr(d[c.coordinate],attr)),(name,c.coordinate,attr))
                     if traverse:continue
                     for attr in ('page_setup','page_margins','print_options','HeaderFooter','row_breaks','col_breaks','sheet_format','protection','data_validations'):
-                        self.assertEqual(ET.tostring(getattr(s,attr).to_tree()),ET.tostring(getattr(d,attr).to_tree()),(name,attr))
+                        expected=getattr(s,attr).to_tree()
+                        if attr=='HeaderFooter':
+                            from abp_presentation import header_text
+                            for node in expected:
+                                if node.text:node.text=header_text(node.text,'Template fidelity','')
+                        self.assertEqual(ET.tostring(expected),ET.tostring(getattr(d,attr).to_tree()),(name,attr))
                     self.assertEqual(str(s.print_area),str(d.print_area))
                     for key,dim in s.row_dimensions.items():
                         self.assertEqual({k:v for k,v in dict(dim).items() if k!='s'},{k:v for k,v in dict(d.row_dimensions[key]).items() if k!='s'},(name,'row',key))

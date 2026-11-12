@@ -740,6 +740,8 @@ def populate_diffusers(wb,diffusers):
                 reset_measurements(ws)
             page+=1
             ws['A5']=excel_safe(system)
+            for unused in range(6+len(items[start:start+21]),27):
+                ws.row_dimensions[unused].hidden=True
             for row,item in enumerate(items[start:start+21],6):
                 count+=1
                 location=str(item.get('location') or '')
@@ -826,12 +828,14 @@ def build(payload):
     if not wb.sheetnames:
         raise ValueError('No worksheets were generated')
     wb.calculation=CalcProperties(calcMode='auto',fullCalcOnLoad=True)
+    from abp_presentation import uppercase_cells,finish_headers
+    uppercase_cells(wb)
     origins={ws.title:ws._template_origin for ws in wb if hasattr(ws,'_template_origin')}
     for ws in wb:
         if hasattr(ws,'_template_formulas') and ws._template_formulas!={c.coordinate:c.value for row in ws for c in row if c.data_type=='f'}:
             raise ValueError('Build stopped: a template formula changed on '+ws.title)
     out=io.BytesIO();wb.save(out)
-    result=group_template_sheets(preserve_template_parts(out.getvalue(),origins),origins)
+    result=group_template_sheets(finish_headers(preserve_template_parts(out.getvalue(),origins),project,payload.get('location','')),origins)
     from abp_audit import audit_report
     checked=audit_report(result,origins)
     print('Template integrity passed: '+json.dumps(checked),flush=True)

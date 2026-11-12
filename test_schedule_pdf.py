@@ -149,7 +149,7 @@ class SchedulePdfTests(unittest.TestCase):
         for address, original in written.items():
             cell = sheet[address]
             self.assertNotEqual(cell.data_type, 'f', address)
-            self.assertEqual(cell.value, abp_server.excel_safe(original))
+            self.assertEqual(cell.value, abp_server.excel_safe(original).upper())
             self.assertTrue(str(cell.value).startswith("'"), address)
         self.assertEqual(sheet['G6'].value, 25)
         self.assertNotEqual(sheet['G6'].data_type, 'f')
