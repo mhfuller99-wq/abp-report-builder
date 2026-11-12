@@ -152,6 +152,109 @@ def coded_outlets(words,page_number,source,*,plan_confirmed=False):
             for w,i,value in pairs if used[i]==1]
 
 
+def sized_registers(words, page_number, source, *, plan_confirmed=False):
+    """Explicit rectangular SAR label over labeled airflow, including split words.
+
+    The printed register dimensions are preserved; they are not a duct/neck
+    diameter. Return/exhaust labels participate only to reject shared/ambiguous
+    airflow associations. No equipment connection, room or inclusion is inferred.
+    """
+    if len(words)>30000 or (not plan_confirmed and not plan_context(words)):return []
+    size_pattern=r'(\d{1,3}(?:\.\d+)?)"?[xX×](\d{1,3}(?:\.\d+)?)"?'
+    label_pattern=re.compile(size_pattern+r'\s*(SAR|RAG|EAR|EAG)?',re.I)
+    number_pattern=r'(?:\d{1,4}|\d{1,2},\d{3})'
+    unique=[];seen=set();grid=defaultdict(list)
+    for original in words:
+        if len(original)<5 or not all(math.isfinite(v) for v in original[:4]):continue
+        w=(*original[:4],original[4].strip(),*original[5:])
+        key=(*[round(v,2) for v in w[:4]],w[4].upper())
+        if key in seen:continue
+        seen.add(key);i=len(unique);unique.append(w)
+        grid[(int(w[0]//64),int(w[1]//64))].append(i)
+    words=unique
+    def bounded_neighbors(index,x,y,dxs):
+        buckets=[];count=0
+        for dx in dxs:
+            for dy in (-1,0,1):
+                bucket=index.get((x+dx,y+dy),())
+                count+=len(bucket)
+                if count>128:return []
+                buckets.append(bucket)
+        return [i for bucket in buckets for i in bucket]
+    def nearby(w):
+        x,y=int(w[0]//64),int(w[1]//64)
+        return bounded_neighbors(grid,x,y,(-2,-1,0,1,2))
+    def same_line(a,b):
+        h=a[3]-a[1]
+        return .6*h<=b[3]-b[1]<=1.5*h and abs(a[1]-b[1])<=.25*h
+    def box(ids):
+        return (min(words[i][0] for i in ids),min(words[i][1] for i in ids),
+                max(words[i][2] for i in ids),max(words[i][3] for i in ids))
+    anchors=[];anchor_uses=defaultdict(int);flows=[];unit_uses=defaultdict(int)
+    for i,w in enumerate(words):
+        h=w[3]-w[1]
+        if not 3<=h<=30:continue
+        match=label_pattern.fullmatch(w[4])
+        if match and all(1<=float(v)<=144 for v in match.group(1,2)):
+            ids=[i];kind=match[3]
+            if not kind:
+                choices=[j for j in nearby(w) if words[j][4].upper() in {'SAR','RAG','EAR','EAG'}
+                         and same_line(w,words[j]) and 0<=words[j][0]-w[2]<=h]
+                if len(choices)!=1:continue
+                ids.append(choices[0]);kind=words[choices[0]][4]
+            anchors.append({'ids':ids,'box':box(ids),'type':kind.upper(),
+                            'size':f'{match[1]}x{match[2]}'})
+            for j in ids:anchor_uses[j]+=1
+        combined=re.fullmatch('('+number_pattern+r')\s*CFM',w[4],re.I)
+        if combined:
+            ids=[i];value=int(combined[1].replace(',',''))
+        elif re.fullmatch(number_pattern,w[4]):
+            choices=[j for j in nearby(w) if words[j][4].upper()=='CFM'
+                     and same_line(w,words[j]) and 0<=words[j][0]-w[2]<=h]
+            if len(choices)!=1:continue
+            ids=[i,choices[0]];value=int(w[4].replace(',',''))
+        else:continue
+        if not 1<=value<=10000:continue
+        flows.append({'ids':ids,'box':box(ids),'value':value})
+        for j in ids:unit_uses[j]+=1
+
+    flows=[f for f in flows if all(unit_uses[j]==1 for j in f['ids'])]
+    flow_grid=defaultdict(list)
+    for index,f in enumerate(flows):
+        b=f['box'];flow_grid[(int((b[0]+b[2])/128),int((b[1]+b[3])/128))].append(index)
+    pairs=[];flow_uses=defaultdict(int)
+    for anchor in anchors:
+        if any(anchor_uses[j]!=1 for j in anchor['ids']):continue
+        a=anchor['box'];h=a[3]-a[1]
+        # A nearby legend/example or table label is not a physical register.
+        local=nearby((*a,''))
+        if not local:continue  # Oversized neighborhood; do not hide ambiguity.
+        if any(re.fullmatch(r'(?:LEGEND|SYMBOLS?|INDICATES|SCHEDULE|EXAMPLE|ACTUAL|MEASURED)',words[j][4],re.I)
+               and a[1]-6*h<=words[j][1]<=a[3]+2*h
+               and a[0]-12*h<=words[j][0]<=a[2]+12*h for j in local):continue
+        options=[]
+        x,y=int((a[0]+a[2])/128),int((a[1]+a[3])/128)
+        candidates=bounded_neighbors(flow_grid,x,y,(-1,0,1))
+        for index in candidates:
+            f=flows[index]
+            b=f['box']
+            if (.6*h<=b[3]-b[1]<=1.5*h and .65*h<=b[1]-a[1]<=1.8*h
+                    and abs((a[0]+a[2]-b[0]-b[2])/2)<=.65*h):options.append(index)
+        for index in options:flow_uses[index]+=1
+        if len(options)!=1:continue
+        index=options[0];pairs.append((anchor,index))
+    result=[]
+    for anchor,index in pairs:
+        if anchor['type']!='SAR' or flow_uses[index]!=1:continue
+        flow=flows[index];a,b=anchor['box'],flow['box']
+        result.append({'include':False,'type':'SAR','size':anchor['size'],'shape':'rectangular',
+                       'system':'','location':'','design_cfm':flow['value'],'source':source,
+                       'reference':f'page {page_number}','position':[round(a[0],2),round(a[1],2)],
+                       'evidence_box':[min(a[0],b[0]),a[1],max(a[2],b[2]),b[3]],
+                       'evidence':f"{anchor['size']} SAR / {flow['value']} CFM; printed register dimensions and airflow; confirm supply service, duct connection and room; register size is not inferred neck size"})
+    return sorted(result,key=lambda item:(item['position'][1],item['position'][0]))
+
+
 def distinct_outlets(items):
     """Collapse overlapping parser readings, never distinct equal-flow devices."""
     result=[]

@@ -54,13 +54,15 @@ def phrases(words, pattern):
 
 
 TAG = r'(?:PAHU|PU|MSAH|MSHP|MS|EUH|GUH|CUH|UH|KEF|EF|SF|RF|FS|PF|VRF|IU|IDU|DSS|DOAS|SSAU|AHU|RTU|MAU|OAU|FCU|SSCU|HVLS|EH|BCU)-\d+(?:\.\d+)*[A-Z]?(?:-\d+(?:\.\d+)*[A-Z]?)?'
+# AC is deliberately schedule-local: electrical AC notation is not equipment.
+SCHEDULE_TAG = TAG.replace('(?:PAHU|', '(?:AC|PAHU|', 1)
 MARK_HEADERS = {'MARK', 'TAG', 'ID', 'UNIT MARK', 'UNIT TAG'}
 
 
-def expand_marks(value):
+def expand_marks(value, tag_pattern=TAG):
     """Expand explicit same-family lists and bounded integer ranges, atomically."""
     value = value.upper().strip()
-    first = re.match(r'(' + TAG + r')', value)
+    first = re.match(r'(' + tag_pattern + r')', value)
     if not first:
         return []
     prefix = first.group(1).split('-', 1)[0]
@@ -70,12 +72,12 @@ def expand_marks(value):
             return []
         if not part.startswith(prefix+'-'):
             part = prefix+'-'+part
-        if re.fullmatch(TAG, part) and (prefix == 'BCU' or part.count('-') == 1):
+        if re.fullmatch(tag_pattern, part) and (prefix == 'BCU' or part.count('-') == 1):
             if part.split('-',1)[0] != prefix:
                 return []
             result.append(part)
             continue
-        match = re.fullmatch(r'(' + TAG + r')\s*(?:THRU|THROUGH|TO|–|-)\s*(' + TAG + r'|\d+)', part)
+        match = re.fullmatch(r'(' + tag_pattern + r')\s*(?:THRU|THROUGH|TO|–|-)\s*(' + tag_pattern + r'|\d+)', part)
         if not match:
             return []
         start, end = match.groups()
@@ -110,14 +112,14 @@ def selection_airflows(words):
     return result
 
 
-def joined_schedule_tags(words):
+def joined_schedule_tags(words, tag_pattern=TAG):
     """Join horizontal CAD tag tokens only inside an explicit ID column.
 
     An explicit hyphen and unique adjacent number are required. Do not turn a
     nearby schedule value or a prose equipment reference into a new tag.
     """
     added=[];consumed=set()
-    family=re.compile(TAG.split(')-',1)[0]+')',re.I)
+    family=re.compile(tag_pattern.split(')-',1)[0]+')',re.I)
     for row in rows(words):
         for i,w in enumerate(row):
             if not family.fullmatch(w[4]):continue
@@ -129,10 +131,58 @@ def joined_schedule_tags(words):
                 if other[4] not in {'-','–','−'} and not re.fullmatch(r'-?\d+(?:\.\d+)*[A-Z]?',other[4],re.I):break
                 parts.append(other)
                 token=''.join(p[4] for p in parts).replace('–','-').replace('−','-')
-                if re.fullmatch(TAG,token,re.I):
+                if re.fullmatch(tag_pattern,token,re.I):
                     added.append((w[0],w[1],other[2],w[3],token,*w[5:]))
                     consumed.update(id(p) for p in parts);break
     return [w for w in words if id(w) not in consumed]+added
+
+
+def _ac_schedule_context(header, mark):
+    """Admit AC only inside a titled HVAC unit schedule with fan airflow.
+
+    A title must occupy its own visual text segment, rather than appear inside
+    a note such as SEE AIR CONDITIONING UNIT SCHEDULE. Column bounds supplied
+    by schedule_candidates keep adjacent MARK tables out of this decision.
+    """
+    title_pattern = re.compile(
+        r'(?:(?:HEATING (?:&|AND) )?AIR CONDITIONING|AIR CONDITIONER|'
+        r'PACKAGED (?:GAS[ /-]*(?:ELECTRIC|ELEC(?:TRIC)?\.?)|AIR CONDITIONING))'
+        r'(?: UNIT)? SCHEDULE', re.I)
+    titles = []
+    for line in rows(header):
+        segments = [[]]
+        for word in line:
+            if segments[-1] and word[0]-segments[-1][-1][2] > 18:
+                segments.append([])
+            segments[-1].append(word)
+        for segment in segments:
+            if segment and 0 < mark[1]-segment[0][1] < 65 and title_pattern.fullmatch(
+                    ' '.join(w[4] for w in segment)):
+                titles.append(segment)
+    if len(titles) != 1:
+        return None
+    title_y = titles[0][0][1]
+    columns = [w for w in header if w[1] > title_y + 3]
+    flows = list(phrases(columns, r'SUPPLY(?: AIR)? (?:CFM|AIRFLOW)(?: \(CFM\))?'))
+    groups = phrases(columns, r'(?:SUPPLY|EVAPORATOR) FAN')
+    for anchor in phrases(columns, r'CFM|AIRFLOW'):
+        context = ' '.join(w[4].upper() for w in columns
+                           if abs(center(w)-center(anchor)) < 30 and 0 <= anchor[1]-w[1] < 38)
+        if re.search(r'\b(?:OUTDOOR|OUTSIDE|O/?A|OSA|RETURN|EXHAUST)\b', context):
+            continue
+        if any(group[0]-45 < center(anchor) < group[2]+45
+               and 0 < anchor[1]-group[1] < 45 for group in groups):
+            flows.append(anchor)
+    # A full SUPPLY CFM phrase and its contained CFM are the same column.
+    flows = [anchor for anchor in dict.fromkeys(flows) if not any(
+        anchor != other and abs(anchor[1]-other[1]) < 3
+        and other[0] <= anchor[0] and other[2] >= anchor[2] for other in flows)]
+    if not flows:
+        return None
+    evidence = titles[0] + [w for w in columns if any(
+        anchor[0] <= w[0] and w[2] <= anchor[2] and abs(w[1]-anchor[1]) < 3
+        for anchor in groups + flows)]
+    return {'flows': flows, 'words': evidence}
 
 
 def schedule_candidates(words, page_number, name):
@@ -141,10 +191,10 @@ def schedule_candidates(words, page_number, name):
     Column positions, not a fixed numeric order, determine the field. Repeated
     MARK columns bound adjacent schedules. Unlabeled numbers are never imported.
     """
-    words = joined_schedule_tags(list(words))
+    words = joined_schedule_tags(list(words), SCHEDULE_TAG)
     # Stacked family/number tags are accepted only beneath a matching tag column.
     for word in list(words):
-        if not re.fullmatch(TAG.split(')-', 1)[0] + ')', word[4], re.I):
+        if not re.fullmatch(SCHEDULE_TAG.split(')-', 1)[0] + ')', word[4], re.I):
             continue
         marks = [w for w in words if w[4].upper() in MARK_HEADERS
                  and 0 < word[1]-w[1] < 600 and abs(center(w)-center(word)) < 20]
@@ -157,17 +207,17 @@ def schedule_candidates(words, page_number, name):
     found = []
     consumed = set()
     for tagword in words:
-        if id(tagword) in consumed or not re.match(TAG, tagword[4], re.I):
+        if id(tagword) in consumed or not re.match(SCHEDULE_TAG, tagword[4], re.I):
             continue
         adjacent = sorted([w for w in words if abs(w[1]-tagword[1]) < 2 and w[0] >= tagword[0]], key=lambda w: w[0])
         mark_words = [tagword]
         for w in adjacent[1:]:
-            if w[0]-mark_words[-1][2] > 18 or not re.fullmatch(r'(?:'+TAG+r'|THRU|THROUGH|TO|AND|[,&–-]|\d+(?:,\d+)*,?)', w[4], re.I):
+            if w[0]-mark_words[-1][2] > 18 or not re.fullmatch(r'(?:'+SCHEDULE_TAG+r'|THRU|THROUGH|TO|AND|[,&–-]|\d+(?:,\d+)*,?)', w[4], re.I):
                 break
             mark_words.append(w)
         tags = []
         for count in range(len(mark_words),0,-1):
-            tags = expand_marks(' '.join(w[4] for w in mark_words[:count]))
+            tags = expand_marks(' '.join(w[4] for w in mark_words[:count]), SCHEDULE_TAG)
             if tags:
                 consumed.update(id(w) for w in mark_words[:count])
                 break
@@ -178,7 +228,7 @@ def schedule_candidates(words, page_number, name):
         if not marks:
             continue
         mark = max(marks, key=lambda w: w[1])
-        first_row = min((w[1] for w in words if re.fullmatch(TAG,w[4],re.I)
+        first_row = min((w[1] for w in words if re.fullmatch(SCHEDULE_TAG,w[4],re.I)
                          and w[1] > mark[1] and abs(center(w)-center(mark)) < 30), default=tagword[1])
         right = min((w[0] - 12 for w in words if w[4].upper() in MARK_HEADERS
                      and abs(w[1] - mark[1]) < 5 and w[0] > mark[2]), default=100000)
@@ -190,6 +240,9 @@ def schedule_candidates(words, page_number, name):
             continue
         row = [w for w in words if mark[0] - 20 <= w[0] < right and abs(w[1] - tagword[1]) < 3]
         family = tags[0].split('-')[0]
+        ac_context = _ac_schedule_context(header, mark) if family == 'AC' else None
+        if family == 'AC' and not ac_context:
+            continue
         values = {}
         text = {}
         value_words = {}
@@ -300,6 +353,52 @@ def schedule_candidates(words, page_number, name):
             if re.search(r'\b(?:OUTDOOR|OUTSIDE|O/?A|OSA|RETURN|EXHAUST)\b',context):continue
             if any(abs(center(g)-center(anchor))<75 and 0<anchor[1]-g[1]<45 for g in supply_groups):supply_flows.append(anchor)
         if len(supply_flows)==1:below(supply_flows[0],'design_cfm')
+        if family == 'AC':
+            # AC needs an explicitly identified supply/evaporator fan column;
+            # an unlabeled CFM column elsewhere in the schedule is not enough.
+            values.pop('design_cfm', None)
+            value_words.pop('design_cfm', None)
+            if len(ac_context['flows']) == 1:
+                below(ac_context['flows'][0], 'design_cfm')
+            outside_flows = [anchor for anchor in phrases(header, r'AIR CFM|CFM')
+                if any(re.fullmatch(r'OUTSIDE|OUTDOOR|OA|OSA', word[4], re.I)
+                       and abs(center(word)-center(anchor)) < 35
+                       and 0 <= anchor[1]-word[1] < 38 for word in header)]
+            if len(outside_flows) == 1:
+                below(outside_flows[0], 'osa_cfm')
+            # Gas/electric type and capacity come from printed schedule fields,
+            # never from the AC prefix, model number or office report.
+            gas_fields = [(r'GAS INPUT', 'heating_input_btu'),
+                          (r'GAS OUTPUT', 'heating_output_btu')]
+            for pattern, field in gas_fields:
+                anchors = phrases(header, pattern + r'(?: \(BTU/?H(?:R)?\))?')
+                if len(anchors) != 1:
+                    continue
+                anchor = anchors[0]
+                choices = [w for w in row if abs(center(w)-center(anchor)) < 25
+                           and re.fullmatch(r'\d[\d,]*(?:\.\d+)?', w[4])]
+                if len(choices) != 1:
+                    continue
+                number = choices[0]
+                units = [w for w in row if re.fullmatch(r'BTU/?H(?:R)?', w[4], re.I)
+                         and 0 <= w[0]-number[2] < 8 and abs(w[1]-number[1]) < 3]
+                header_units = [w for w in header if re.fullmatch(r'\(?BTU/?H(?:R)?\)?', w[4], re.I)
+                                and abs(center(w)-center(anchor)) < 30
+                                and 0 <= w[1]-anchor[1] < 20]
+                if not units and not header_units:
+                    continue
+                capacity = float(number[4].replace(',', ''))
+                # A printed zero means no positive gas capacity. Keep it in
+                # row evidence, but do not suggest a gas companion from it.
+                if capacity <= 0:
+                    continue
+                values[field] = capacity
+                value_words[field] = [tagword, number] + units + header_units + [w for w in header
+                    if anchor[0] <= w[0] and w[2] <= anchor[2] and abs(w[1]-anchor[1]) < 3]
+            if any(values.get(field, 0) > 0 for _, field in gas_fields):
+                text.update(heating_type='GAS', unit_type='GAS HEAT')
+                if phrases(header, r'PACKAGED|PACKAGE'):
+                    text['unit_type'] = 'PACKAGED GAS / ELECTRIC'
         # Fan schedules often spell static pressure S.P. IN / INCHES / IN H2O.
         # Keep this abbreviation confined to fan equipment and labeled units.
         if family in {'EF','KEF','SF','RF','PF'}:
@@ -342,6 +441,11 @@ def schedule_candidates(words, page_number, name):
             take(r'Peak Fan Airflow', 'selected_cfm')
         if family == 'DOAS':
             text['unit_type'] = 'DOAS'
+        if family == 'AC':
+            # OCR review must also trust the contextual evidence that makes AC
+            # an HVAC unit, not merely the numeric cell and the letters AC.
+            for field in values:
+                value_words[field] = value_words.get(field, []) + ac_context['words']
         evidence = ' '.join(w[4] for w in sorted(row, key=lambda w: w[0]))
         item = {'tag': tags[0], 'values': values, 'text': text,
                 'value_words': value_words,
