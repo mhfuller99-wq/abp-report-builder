@@ -6,6 +6,38 @@ from abp_ocr import Budget, extract_local, word
 
 
 class PlanIntegrationTests(unittest.TestCase):
+    def test_failed_later_batch_preserves_completed_physical_outlets(self):
+        import subprocess
+        boxes=[[20+i*40,100,55+i*40,122] for i in range(10)]
+        calls=[];saved=[]
+        def batch(page,jobs,timeout,**kwargs):
+            calls.append(len(jobs))
+            if len(calls)==2:raise subprocess.TimeoutExpired('synthetic batch',timeout)
+            return [[word(j['box'][0],101,j['box'][0]+27,107,'824CD',95),
+                     word(j['box'][0],111,j['box'][0]+30,117,'175CFM',95)] for j in jobs]
+        with pymupdf.open() as doc:
+            page=doc.new_page(width=600,height=800);page.insert_text((20,30),'HVAC PLAN')
+            with patch('abp_ocr.paired_text_regions',return_value=(boxes,False)):
+                report=extract_local(doc.tobytes(),batch_engine=batch,region_engine=lambda *a,**k:[],
+                                     checkpoint=lambda r:saved.append(len(r['review_candidates'])),retain_words=False)
+        self.assertEqual(calls,[8,2]);self.assertIn(8,saved)
+        self.assertEqual(len(report['review_candidates']),8)
+        self.assertEqual([p['status'] for p in report['coverage'][0]['planned_callout_regions']][-2:],['failed','failed'])
+        self.assertFalse(report['complete_takeoff'])
+        self.assertLessEqual(report['pixels_processed'],Budget().max_page_pixels)
+
+    def test_optional_schedule_retry_cannot_starve_unread_plan(self):
+        with pymupdf.open() as doc:
+            page=doc.new_page(width=600,height=800);page.insert_text((20,30),'FAN SCHEDULE')
+            page=doc.new_page(width=600,height=800);page.insert_text((20,30),'HVAC PLAN')
+            calls=[]
+            def engine(page,*args,psm,**kwargs):calls.append((page.number,psm));return []
+            report=extract_local(doc.tobytes(),region_engine=engine,
+                                 selector=lambda *a,**k:([[0,100,100,200]],1,False),retain_words=False)
+            self.assertNotIn((0,6),calls)
+            self.assertIn((1,11),calls)
+            self.assertTrue(report['coverage'][0]['alternate_segmentation_deferred'])
+
     def test_keyed_grilles_use_distinct_markers_and_exact_flow_reread(self):
         from test_keynotes import fixture
         words,markers,notes=fixture()
