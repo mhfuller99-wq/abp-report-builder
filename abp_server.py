@@ -17,6 +17,7 @@ from abp_job import NUMERIC_FIELDS, TEXT_FIELDS, COIL_FORMS, canonical_tag, post
 from abp_schedule import parse_pdf, annotate
 from abp_scan import scan as bounded_pdf_scan, ScanIncomplete
 from abp_review_gate import partial_review_allowed, partial_review_lines
+from abp_ocr_candidates import reconcile_diffuser_sources
 
 ROOT=Path(__file__).resolve().parent
 TEMPLATES=ROOT/'03_Workbooks_and_Master_Templates'
@@ -261,6 +262,11 @@ def read_sources(blobs, *, runner=None):
     # Schedule headings mean the text was usable, even if another drawing was scanned.
     sparse=total_chars<SPARSE_TEXT_LIMIT or (image_only and not signals)
     if len(diffusers)>500:raise ValueError('More than 500 supply outlets were found. Split the source set; no partial outlet list was accepted.')
+    # Only a unique source name identifies a document on both scan pathways.
+    # Job uploads reject duplicates; legacy direct uploads must not cross-match them.
+    names=[Path(name).name[:160] for name,_ in blobs]
+    ambiguous_names={name for name in names if names.count(name)>1}
+    reconcile_diffuser_sources([o for o in diffusers if o.get('source') not in ambiguous_names], image_review)
     return {'scan_status':'incomplete' if incomplete_sources else 'review_required','complete_takeoff':False,'source_checkpoints':checkpoints,'tags':list(records)[:MAX_RECORDS],'records':list(records.values())[:MAX_RECORDS],'diffusers':diffusers[:500],'image_review':image_review,'image_coverage':image_coverage,'image_coverage_truncated':image_coverage_truncated,'warnings':warnings,'characters':total_chars,'sources':sources,'preview':'\n'.join(preview)[:1800],'signals':sorted(signals),'sparse':sparse}
 
 # These labels only suggest which original ABP workbook to include.
@@ -948,9 +954,12 @@ function renderImageReview(){
   const values=document.createElement('p');values.textContent=Object.entries(candidate.review_values||{}).map(([k,v])=>fieldLabel(k)+': '+v).join(' · ')||'No reliable design value. Enter it manually after checking the source.';panel.append(values);
   const label=document.createElement('label'),confirmation=document.createElement('input');confirmation.type='checkbox';label.append(confirmation,document.createTextNode(' I checked this candidate against the original source and reviewed duplicates.'));panel.append(label);
   const add=document.createElement('button');add.type='button';add.textContent=candidate.accepted?'Added to review':'Add checked candidate to review';add.disabled=!!candidate.accepted;panel.append(add);
+  const existingOutlet=candidate.kind==='diffuser'&&(candidate.native_outlet_match===true||candidate.native_outlet_ambiguous===true);
+  if(existingOutlet){add.disabled=true;add.textContent='Review existing outlet row';}
   if(candidate.kind==='kitchen_hood'&&!savedTagPattern.test(candidate.tag)){add.disabled=true;add.textContent='Manual preparation needed for this tag format';}
   const status=document.createElement('p');status.setAttribute('role','status');panel.append(status);
   add.onclick=()=>{try{
+   if(existingOutlet)throw Error('Compare the native and image readings in the original source, then edit the existing outlet row. This image candidate cannot add a duplicate outlet.');
    if(!confirmation.checked)throw Error('Check the original source and confirm it first.');
    if(candidate.kind==='equipment'){
     if(!savedTagPattern.test(candidate.tag))throw Error('Unsupported equipment ID; prepare this record manually. No tag was renamed.');

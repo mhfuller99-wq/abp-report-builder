@@ -744,6 +744,10 @@ def parse_pdf(name, data=None, *, path=None, page_numbers=None, checkpoint=None)
             outlets.extend(coded_outlets(words,index+1,name))
             outlets.extend(sized_registers(words,index+1,name))
             outlets=distinct_outlets(outlets)
+            for outlet in outlets:
+                if outlet.get('reference') == f'page {index+1}':
+                    outlet['position_coordinate_space']='displayed_pdf_points'
+                    outlet['page_rotation']=page.rotation
             completed.append(index+1)
             if checkpoint:checkpoint(found,warnings,outlets,completed,False)
         found.extend(parse_doas_submittal(selected, name))

@@ -702,7 +702,7 @@ def diffuser_candidates(words, source, page, *, plan_confirmed=False):
                        'method': 'ocr', 'type': item.get('type', ''), 'size': item.get('size', ''),
                        'type_confidence':min(type_scores) if type_scores and all(v is not None for v in type_scores) else None,
                        'evidence_text': item.get('evidence', '') + ('; page position (points): ' + str(item['position']) if item.get('position') else ''),
-                       'position': item.get('position'),
+                       'position': item.get('position'), 'position_coordinate_space': 'displayed_pdf_points',
                        'review_reasons': ['Confirm device, size, airflow, duct connection and room in the original drawing.']})
     return result
 
