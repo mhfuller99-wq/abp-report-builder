@@ -13,6 +13,25 @@ from test_mechanical import word as native_word
 
 
 class SourceReviewTests(unittest.TestCase):
+    def test_time_limited_plan_retains_outlet_before_decorative_circles(self):
+        with pymupdf.open() as doc:
+            p=doc.new_page(width=600,height=800);p.insert_text((20,30),'HVAC PLAN')
+            p.draw_circle((100,200),9)
+            now=[0.];calls=[]
+            def engine(*args,psm,**kwargs):
+                calls.append(psm);now[0]+=40
+                return [word(10,60,40,68,'914CD',96),word(10,70,45,78,'310CFM',96)] if psm==11 else []
+            def unused_selector(*args,**kwargs):
+                raise AssertionError('Plan reading must not spend time on unused table selection')
+            with patch('abp_ocr.time.monotonic',side_effect=lambda:now[0]):
+                result=extract_local(doc.tobytes(),region_engine=engine,selector=unused_selector,retain_words=False)
+            self.assertEqual(calls,[11])
+            self.assertEqual(result['review_candidates'][0]['review_values'],{'design_cfm':310})
+            self.assertFalse(result['review_candidates'][0]['include'])
+            self.assertFalse(result['complete_takeoff'])
+            self.assertEqual(result['coverage'][0]['preview_pixels'],0)
+            self.assertTrue(any(r['status']=='budget_skipped' for r in result['coverage'][0]['regions']))
+
     def test_literal_cd_cfm_callouts_keep_repeated_outlets_and_omit_ambiguous_pairs(self):
         from abp_outlets import coded_outlets
         from abp_ocr import diffuser_candidates

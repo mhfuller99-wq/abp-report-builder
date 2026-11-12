@@ -326,7 +326,7 @@ def extract_local(data, source='synthetic.pdf', budget=Budget(), engine=tesserac
                 total_pixels += pixels
                 page_pixels += pixels
 
-            def recognize(rect, psm, full_page=False, word_sink=None, table=False, reserve_regions=0):
+            def recognize(rect, psm, full_page=False, word_sink=None, table=False):
                 nonlocal attempted, regions_attempted, page_regions, page_attempted
                 max_pixels = budget.max_pixels if full_page else min(budget.max_pixels, budget.max_region_pixels)
                 # Use the remaining pixel allowance for the next table instead
@@ -341,7 +341,7 @@ def extract_local(data, source='synthetic.pdf', budget=Budget(), engine=tesserac
                 _, pixels = render_geometry(rect, max_pixels, (budget.dpi if full_page else budget.region_dpi) / 72)
                 r = {'box': list(rect), 'status': 'budget_skipped', 'method': f'ocr_psm{psm}', 'pixels': pixels}
                 record_region(coverage, r)
-                if not available(pixels) or regions_attempted >= budget.max_regions-reserve_regions or page_regions >= budget.max_regions_per_page-reserve_regions:
+                if not available(pixels) or regions_attempted >= budget.max_regions or page_regions >= budget.max_regions_per_page:
                     r['reason'] = 'Pixel, region or time budget exhausted; manual review required.'
                     return None, r
                 consume(pixels)
@@ -426,14 +426,18 @@ def extract_local(data, source='synthetic.pdf', budget=Budget(), engine=tesserac
             boxes = []
             preview_failed = False
             try:
-                _, preview_pixels = render_geometry(page.rect, min(budget.max_preview_pixels, budget.max_pixels), 1.)
+                # Plan tiles do not use table selection; neither render nor
+                # charge a full-page table preview for this path.
+                preview_pixels = 0
+                if not plan_tiles:
+                    _, preview_pixels = render_geometry(page.rect, min(budget.max_preview_pixels, budget.max_pixels), 1.)
                 if not available(preview_pixels):
                     entry['ocr_status'] = coverage['status'] = 'budget_skipped'
                     report['warnings'].append(f'Page {number}: preview pixel/time budget exhausted; manual review required.')
                     coverage['unexamined_content'] = 'Raster content not examined; manual review required.'
                     continue
                 consume(preview_pixels)
-                boxes, _, truncated = selector(page, max_pixels=min(budget.max_preview_pixels, budget.max_pixels),
+                boxes, _, truncated = ([], 0, False) if plan_tiles else selector(page, max_pixels=min(budget.max_preview_pixels, budget.max_pixels),
                                                max_regions=budget.max_detected_regions, deadline=page_deadline)
                 boxes=complete_raster_tables(boxes,images,page.rect)
                 coverage['preview_pixels'] = preview_pixels
@@ -451,6 +455,17 @@ def extract_local(data, source='synthetic.pdf', budget=Budget(), engine=tesserac
                 pymupdf.TOOLS.store_shrink(100)
             statuses = []
             if plan_tiles:
+                # Read the plan before optional circle refinement. Region-count
+                # reservations alone do not reserve wall time: decorative
+                # circles can otherwise exhaust the deadline before any tile.
+                coverage['unexamined_content']='Plan tiles may omit symbols, rooms and duct connections; review every source page.'
+                coverage['selection']='plan_tiles'
+                rect=page.rect; nx,ny=(3,2) if rect.width>=rect.height else (2,3)
+                for y in range(ny):
+                    for x in range(nx):
+                        tile=pymupdf.Rect(max(rect.x0,rect.x0+x*rect.width/nx-24),max(rect.y0,rect.y0+y*rect.height/ny-24),
+                                          min(rect.x1,rect.x0+(x+1)*rect.width/nx+24),min(rect.y1,rect.y0+(y+1)*rect.height/ny+24))
+                        _,r=recognize(tile,11);statuses.append(r['status'])
                 # Read the inside of a printed circle separately from its flow.
                 # Large plan tiles often turn circled A/B marks into @ or omit
                 # them. Every recognition still uses the same shared budgets.
@@ -465,29 +480,18 @@ def extract_local(data, source='synthetic.pdf', budget=Budget(), engine=tesserac
                 for box in circles:
                     rect=pymupdf.Rect(box);inset=rect.width*.20
                     letters=[]
-                    _,r=recognize(rect+(inset,inset,-inset,-inset),10,word_sink=letters,reserve_regions=6)
+                    _,r=recognize(rect+(inset,inset,-inset,-inset),10,word_sink=letters)
                     statuses.append(r['status'])
                     if len(letters)!=1 or not re.fullmatch(r'[A-Z]',letters[0]['text']) or (letters[0].get('confidence') or 0)<80:continue
                     cx=(rect.x0+rect.x1)/2;flows=[]
                     flow_rect=pymupdf.Rect(cx-rect.width*.70,rect.y1+rect.height*.03,
                                           cx+rect.width*.70,rect.y1+rect.height*.72)&page.rect
-                    _,r=recognize(flow_rect,7,word_sink=flows,reserve_regions=6);statuses.append(r['status'])
+                    _,r=recognize(flow_rect,7,word_sink=flows);statuses.append(r['status'])
                     candidate=circle_outlet(letters,flows,source,number,box)
                     if candidate:
                         candidate['region']=list(rect | flow_rect)
                         report['review_candidates'].append(candidate)
                         r['status']='review_candidate';r['candidate_count']=1
-                # Floor plans contain scattered symbols, not just ruled tables.
-                # Overlapping tiles retain legible callouts under the SAME pixel,
-                # region and time limits; skipped tiles remain in coverage.
-                coverage['unexamined_content']='Plan tiles may omit symbols, rooms and duct connections; review every source page.'
-                coverage['selection']='plan_tiles'
-                rect=page.rect; nx,ny=(3,2) if rect.width>=rect.height else (2,3)
-                for y in range(ny):
-                    for x in range(nx):
-                        tile=pymupdf.Rect(max(rect.x0,rect.x0+x*rect.width/nx-24),max(rect.y0,rect.y0+y*rect.height/ny-24),
-                                          min(rect.x1,rect.x0+(x+1)*rect.width/nx+24),min(rect.y1,rect.y0+(y+1)*rect.height/ny+24))
-                        _,r=recognize(tile,11);statuses.append(r['status'])
             elif boxes:
                 coverage['unexamined_content'] = 'All content outside selected table crops; manual review required.'
                 retries = []
