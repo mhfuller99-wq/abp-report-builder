@@ -13,6 +13,9 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 from abp_ocr_regions import render_geometry, raster_regions, ruled_regions, hood_information_candidates, information_parser_limited, complete_raster_tables, circle_regions
+from abp_ocr_candidates import merge_diffuser_candidate
+from abp_plan_regions import paired_text_regions
+from abp_keynotes import keynote_regions, keynote_candidates
 
 
 @dataclass(frozen=True)
@@ -28,11 +31,12 @@ class Budget:
     max_preview_pixels: int = 6_000_000
     max_region_pixels: int = 2_000_000
     max_page_pixels: int = 16_000_000
-    max_regions: int = 32
-    max_regions_per_page: int = 20
+    max_regions: int = 64
+    max_regions_per_page: int = 48
     max_detected_regions: int = 12
     max_coverage_regions: int = 240
     region_dpi: int = 216
+    callout_dpi: int = 288
 
 
 def word(x, y, x2, y2, text, confidence=None):
@@ -285,7 +289,9 @@ def extract_local(data, source='synthetic.pdf', budget=Budget(), engine=tesserac
             from abp_mechanical import page_words
             displayed_words=page_words(page)
             plan_page=plan_context(displayed_words) or bool(re.search(r'(?:FLOOR|CEILING)[ _-]+PLAN',source,re.I))
-            plan_tiles=plan_page and not centered_outlets(displayed_words,number,source,plan_confirmed=True)
+            # Native callouts do not prove that every device has extractable
+            # text: CAD plans commonly mix native labels and outlined glyphs.
+            plan_tiles=plan_page
             for w in native:
                 w['box'] = list(pymupdf.Rect(w['box']) * page.rotation_matrix)
             if retain_words:
@@ -326,7 +332,8 @@ def extract_local(data, source='synthetic.pdf', budget=Budget(), engine=tesserac
                 total_pixels += pixels
                 page_pixels += pixels
 
-            def recognize(rect, psm, full_page=False, word_sink=None, table=False):
+            def recognize(rect, psm, full_page=False, word_sink=None, table=False, callout=False,
+                          glyph=False, parse_candidates=True, pending=None):
                 nonlocal attempted, regions_attempted, page_regions, page_attempted
                 max_pixels = budget.max_pixels if full_page else min(budget.max_pixels, budget.max_region_pixels)
                 # Use the remaining pixel allowance for the next table instead
@@ -338,7 +345,9 @@ def extract_local(data, source='synthetic.pdf', budget=Budget(), engine=tesserac
                        'reason':'Pixel budget exhausted; manual review required.'}
                     record_region(coverage,r)
                     return None,r
-                _, pixels = render_geometry(rect, max_pixels, (budget.dpi if full_page else budget.region_dpi) / 72)
+                zoom=(budget.dpi if full_page else budget.callout_dpi if callout else budget.region_dpi)/72
+                if glyph:zoom=min(5.,zoom*1.25)
+                _, pixels = render_geometry(rect, max_pixels, zoom)
                 r = {'box': list(rect), 'status': 'budget_skipped', 'method': f'ocr_psm{psm}', 'pixels': pixels}
                 record_region(coverage, r)
                 if not available(pixels) or regions_attempted >= budget.max_regions or page_regions >= budget.max_regions_per_page:
@@ -354,7 +363,7 @@ def extract_local(data, source='synthetic.pdf', budget=Budget(), engine=tesserac
                     remaining = max(.001, page_deadline - time.monotonic())
                     ocr = (engine(page, pixels, remaining) if full_page else
                            region_engine(page, pixels, remaining, clip=list(rect), psm=psm,
-                                         max_zoom=budget.region_dpi / 72))
+                                         max_zoom=zoom))
                     if len(ocr) > budget.max_words:
                         raise ValueError('OCR word budget exceeded')
                     if table and psm==11:
@@ -376,19 +385,15 @@ def extract_local(data, source='synthetic.pdf', budget=Budget(), engine=tesserac
                     parser_limited = information_parser_limited(ocr)
                     if parser_limited:
                         report['warnings'].append(f'Page {number}: hood header-complexity budget exceeded; manual review required.')
-                    candidates = hood_candidates(ocr, source, number, 'ocr') + equipment_candidates(ocr,source,number,'ocr')
-                    if full_page or plan_tiles:
+                    candidates = (hood_candidates(ocr, source, number, 'ocr') + equipment_candidates(ocr,source,number,'ocr')) if parse_candidates else []
+                    if parse_candidates and (full_page or plan_tiles):
                         candidates = diffuser_candidates(ocr, source, number, plan_confirmed=plan_page) + candidates
                     for candidate in candidates:
                         candidate['region'] = list(rect)
                         candidate['region_coordinate_space'] = 'displayed_pdf_points'
                     for candidate in candidates:
                         # Overlapping plan tiles must not create duplicate physical outlets.
-                        if candidate.get('kind')=='diffuser' and candidate.get('position') and any(
-                            old.get('kind')=='diffuser' and old.get('page')==number and old.get('source')==source
-                            and old.get('type')==candidate.get('type') and old.get('review_values')==candidate.get('review_values')
-                            and old.get('position') and math.dist(old['position'],candidate['position'])<6
-                            for old in report['review_candidates']):continue
+                        if merge_diffuser_candidate(report['review_candidates'],candidate):continue
                         if candidate.get('kind')=='equipment' and any(
                             old.get('kind')=='equipment' and old.get('page')==number and old.get('source')==source
                             and old.get('tag')==candidate.get('tag') and old.get('region')==candidate.get('region')
@@ -410,6 +415,7 @@ def extract_local(data, source='synthetic.pdf', budget=Budget(), engine=tesserac
                     return None, r
                 finally:
                     pymupdf.TOOLS.store_shrink(100)
+                    if pending is not None:pending['status']=r['status']
                     # A wide schedule may outlast the source allowance. Save
                     # each completed region atomically rather than losing its
                     # candidates while waiting for the whole page to finish.
@@ -455,17 +461,73 @@ def extract_local(data, source='synthetic.pdf', budget=Budget(), engine=tesserac
                 pymupdf.TOOLS.store_shrink(100)
             statuses = []
             if plan_tiles:
+                # Small paired CAD text crops retain readable glyphs at high
+                # resolution without rasterizing most of an engineering sheet.
+                # Geometry selects crops only; the existing literal readers and
+                # confidence checks still determine candidate values.
+                try:
+                    callouts,limited=paired_text_regions(page,deadline=page_deadline)
+                except (OSError,ValueError,RuntimeError,MemoryError) as exc:
+                    callouts,limited=[],True
+                    coverage['callout_selection_failed']=type(exc).__name__
+                coverage['callout_selection_truncated']=limited
+                coverage['planned_callout_regions']=[{'box':box,'status':'not_examined'} for box in callouts]
+                coverage['unexamined_content']='Plan crops may omit symbols, rooms and duct connections; review every source page.'
+                coverage['selection']='plan_tiles'
+                rect=page.rect; nx,ny=(3,2) if rect.width>=rect.height else (2,3)
+                tiles=[]
+                for x in range(nx):
+                    for y in range(ny):
+                        tile=pymupdf.Rect(max(rect.x0,rect.x0+x*rect.width/nx-24),max(rect.y0,rect.y0+y*rect.height/ny-24),
+                                          min(rect.x1,rect.x0+(x+1)*rect.width/nx+24),min(rect.y1,rect.y0+(y+1)*rect.height/ny+24))
+                        tiles.append({'box':list(tile),'status':'not_examined'})
+                coverage['planned_tiles']=tiles
+                try:
+                    markers,notes,key_limited=keynote_regions(page,deadline=page_deadline)
+                except (OSError,ValueError,RuntimeError,MemoryError) as exc:
+                    markers,notes,key_limited=[],[],True
+                    coverage['keynote_selection_failed']=type(exc).__name__
+                coverage['keynote_selection_truncated']=key_limited
+                coverage['planned_keynote_regions']=[{'box':b,'status':'not_examined'} for b in notes]
+                coverage['planned_keynote_markers']=[{'box':b,'status':'not_examined'} for b in markers] if notes else []
+                # Save the whole pending queue before recognition: a worker
+                # timeout must not make the unvisited bottom of a plan vanish.
+                if checkpoint:checkpoint(report)
+                for pending in coverage['planned_callout_regions']:
+                    _,r=recognize(pymupdf.Rect(pending['box']),6,callout=True,pending=pending)
+                    pending['status']=r['status'];statuses.append(r['status'])
+                note_words=[]
+                for pending in coverage['planned_keynote_regions']:
+                    _,r=recognize(pymupdf.Rect(pending['box']),6,callout=True,word_sink=note_words,
+                                  parse_candidates=False,pending=pending)
+                    pending['status']=r['status'];statuses.append(r['status'])
+                # An identical isolated reread can confirm a low-confidence
+                # literal airflow. Never replace misread characters or digits.
+                for original in [w for w in note_words if re.fullmatch(r'\d{1,4}CFM',w['text'],re.I)
+                                 and (w.get('confidence') or 0)<80][:4]:
+                    refined=[]
+                    _,r=recognize(pymupdf.Rect(original['box'])+(-1,-1,1,1),7,callout=True,
+                                  word_sink=refined,parse_candidates=False)
+                    statuses.append(r['status'])
+                    if len(refined)==1 and refined[0]['text'].upper()==original['text'].upper() and (refined[0].get('confidence') or 0)>=80:
+                        original['original_confidence']=original.get('confidence')
+                        original['confidence']=refined[0]['confidence']
+                        original['confidence_method']='exact_token_reread'
+                for pending in coverage['planned_keynote_markers']:
+                    b=pymupdf.Rect(pending['box']);w,h=b.width,b.height
+                    interior=pymupdf.Rect(b.x0+w*.25,b.y0+h*.2,b.x1-w*.25,b.y1-h*.08)
+                    _,r=recognize(interior,10,callout=True,glyph=True,word_sink=note_words,
+                                  parse_candidates=False,pending=pending)
+                    pending['status']=r['status'];statuses.append(r['status'])
+                for candidate in keynote_candidates(note_words,markers,notes,source,number,plan_confirmed=True):
+                    if not merge_diffuser_candidate(report['review_candidates'],candidate):report['review_candidates'].append(candidate)
+                if checkpoint:checkpoint(report)
                 # Read the plan before optional circle refinement. Region-count
                 # reservations alone do not reserve wall time: decorative
                 # circles can otherwise exhaust the deadline before any tile.
-                coverage['unexamined_content']='Plan tiles may omit symbols, rooms and duct connections; review every source page.'
-                coverage['selection']='plan_tiles'
-                rect=page.rect; nx,ny=(3,2) if rect.width>=rect.height else (2,3)
-                for y in range(ny):
-                    for x in range(nx):
-                        tile=pymupdf.Rect(max(rect.x0,rect.x0+x*rect.width/nx-24),max(rect.y0,rect.y0+y*rect.height/ny-24),
-                                          min(rect.x1,rect.x0+(x+1)*rect.width/nx+24),min(rect.y1,rect.y0+(y+1)*rect.height/ny+24))
-                        _,r=recognize(tile,11);statuses.append(r['status'])
+                for pending in tiles:
+                    _,r=recognize(pymupdf.Rect(pending['box']),11,pending=pending)
+                    pending['status']=r['status'];statuses.append(r['status'])
                 # Read the inside of a printed circle separately from its flow.
                 # Large plan tiles often turn circled A/B marks into @ or omit
                 # them. Every recognition still uses the same shared budgets.
@@ -490,7 +552,8 @@ def extract_local(data, source='synthetic.pdf', budget=Budget(), engine=tesserac
                     candidate=circle_outlet(letters,flows,source,number,box)
                     if candidate:
                         candidate['region']=list(rect | flow_rect)
-                        report['review_candidates'].append(candidate)
+                        if not merge_diffuser_candidate(report['review_candidates'],candidate):
+                            report['review_candidates'].append(candidate)
                         r['status']='review_candidate';r['candidate_count']=1
             elif boxes:
                 coverage['unexamined_content'] = 'All content outside selected table crops; manual review required.'
@@ -547,7 +610,8 @@ def circle_outlet(letters, flows, source, page, box):
     if raw==match[1] and (flow.get('confidence') or 0)>=80:values['design_cfm']=int(raw.replace(',',''))
     return {'kind':'diffuser','tag':'','values':{},'review_values':values,
             'status':'UNVERIFIED','include':False,'source':source,'page':page,'method':'ocr',
-            'type':letter['text'],'size':'','position':[round(box[0],2),round(box[1],2)],
+            'type':letter['text'],'type_confidence':letter.get('confidence'),'size':'',
+            'position':[round(letter['box'][0],2),round(letter['box'][1],2)],
             'region':list(box),'region_coordinate_space':'displayed_pdf_points',
             'evidence_text':letter['text']+' / '+raw+'; printed circle and adjacent airflow; confirm in source',
             'review_reasons':['Confirm supply service, design airflow, neck size, room, system and revision.']}
@@ -574,9 +638,11 @@ def diffuser_candidates(words, source, page, *, plan_confirmed=False):
         relevant=[w for w in words if not box or (w['box'][0]>=box[0]-.1 and w['box'][1]>=box[1]-.1 and w['box'][2]<=box[2]+.1 and w['box'][3]<=box[3]+.1)]
         if not relevant or any(w['confidence'] is None or w['confidence'] < 80 for w in relevant):
             values = {}
+        type_scores=[w.get('confidence') for w in relevant if w['text'].upper()==item.get('type','').upper()]
         result.append({'kind': 'diffuser', 'tag': '', 'values': {}, 'review_values': values,
                        'status': 'UNVERIFIED', 'include': False, 'source': source, 'page': page,
                        'method': 'ocr', 'type': item.get('type', ''), 'size': item.get('size', ''),
+                       'type_confidence':min(type_scores) if type_scores and all(v is not None for v in type_scores) else None,
                        'evidence_text': item.get('evidence', '') + ('; page position (points): ' + str(item['position']) if item.get('position') else ''),
                        'position': item.get('position'),
                        'review_reasons': ['Confirm device, size, airflow, duct connection and room in the original drawing.']})
@@ -609,7 +675,8 @@ def extract(data, source='source.pdf', timeout=65, *, path=None, page_numbers=No
             mark_staging(root)
             if page_numbers is not None and (not page_numbers or len(page_numbers)>300 or any(type(p)!=int or not 1<=p<=300 for p in page_numbers)):
                 raise ValueError('Invalid OCR page selection')
-            (root/'request.json').write_text(json.dumps({'timeout':max(1,timeout-2),'page_numbers':page_numbers}),encoding='utf-8')
+            (root/'request.json').write_text(json.dumps({'timeout':max(1,timeout-2),'page_numbers':page_numbers,
+                                                       'source':str(source)[:255]}),encoding='utf-8')
             if path is not None:
                 import shutil
                 shutil.copyfile(path, root / 'source.pdf')
@@ -685,7 +752,7 @@ def _worker(directory):
         encoded=json.dumps(compact,allow_nan=False).encode()
         if len(encoded)>2_000_000:raise ValueError('Checkpoint response exceeds budget')
         tmp=root/'checkpoint.tmp';tmp.write_bytes(encoded);os.replace(tmp,root/'checkpoint.json')
-    report = extract_local((root / 'source.pdf').read_bytes(), source='uploaded PDF', retain_words=False,
+    report = extract_local((root / 'source.pdf').read_bytes(), source=request.get('source','uploaded PDF'), retain_words=False,
                           budget=Budget(total_seconds=request.get('timeout',60)),page_numbers=request.get('page_numbers'),checkpoint=checkpoint)
     compact = {'review_candidates': report['review_candidates'], 'warnings': report['warnings'],
                'ocr_attempted_pages': report['ocr_attempted_pages'], 'complete_takeoff': False,
