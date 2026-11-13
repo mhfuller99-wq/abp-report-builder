@@ -31,8 +31,11 @@ This only requests a reread. Concatenated fragments never become a value here.
         parts=sorted((w for w in words if abs(w['box'][1]-tag['box'][1])<3
                       and abs((w['box'][0]+w['box'][2])/2-x)<25
                       and re.fullmatch(r'\d{1,3}',w['text'])),key=lambda w:w['box'][0])
-        if (len(parts)!=2 or len(parts[1]['text'])!=3 or not 0<parts[1]['box'][0]-parts[0]['box'][2]<8
-                or any((w.get('confidence') or 0)<80 for w in parts)):
+        # Low-confidence fragments are exactly why a source-cell reread is
+        # needed. Selection supplies no value: the caller still requires one
+        # >=90-confidence literal matching every digit before accepting it.
+        if (len(parts)!=2 or len(parts[1]['text'])!=3
+                or not 0<parts[1]['box'][0]-parts[0]['box'][2]<8):
             continue
         found.append(parts)
     return found[:4]
