@@ -3,7 +3,7 @@ import unittest
 from unittest.mock import patch
 import pymupdf
 from abp_mechanical import schedule_candidates
-from abp_ocr import equipment_candidates,word
+from abp_ocr import equipment_candidates,word,extract_local
 from abp_outline_tables import read,split_flow_cells
 
 
@@ -57,7 +57,8 @@ class FurnaceTests(unittest.TestCase):
         self.assertEqual([[w['text'] for w in parts] for parts in found],[['1','250']])
         self.assertFalse(any(w['text']=='1250' for w in words))
         next(w for w in words if w['text']=='250')['confidence']=50
-        self.assertEqual(split_flow_cells(words),[])
+        self.assertEqual([[w['text'] for w in parts] for parts in split_flow_cells(words)],[['1','250']])
+        self.assertNotIn('design_cfm',equipment_candidates(words+[word(10,40,150,48,'SCHEDULE',100)],'synthetic.pdf',1,'ocr')[0]['review_values'])
 
     def test_image_field_needs_tag_value_and_context_confidence(self):
         words=[word(*w,confidence=96) for w in furnace()]
@@ -69,6 +70,25 @@ class FurnaceTests(unittest.TestCase):
         next(w for w in words if w['text']=='FURNACE')['confidence']=96
         next(w for w in words if w['text']=='AHU-7')['confidence']=40
         self.assertEqual(equipment_candidates(words,'synthetic.pdf',1,'ocr')[0]['review_values'],{})
+
+    def test_uncertain_fragments_require_a_strong_matching_literal_reread(self):
+        for literal,confidence,expected in [('1,250',95,1250),('1,250',89,None),('1,251',95,None)]:
+            with self.subTest(literal=literal,confidence=confidence),pymupdf.open() as doc:
+                page=doc.new_page(width=600,height=800);page.insert_text((10,30),'SCHEDULE')
+                words=[word(*w,confidence=96) for w in furnace() if w[4]!='1,250']
+                words.extend([word(94,110,98,118,'1',50),word(102,110,114,118,'250',50),
+                              word(520,90,540,98,'MARK',100),word(10,40,150,48,'SCHEDULE',100)])
+                calls=[]
+                def engine(page,pixels,timeout,**kwargs):
+                    calls.append(kwargs['psm'])
+                    return [word(94,110,114,118,literal,confidence)]
+                with patch('abp_outline_tables.read',return_value=words):
+                    result=extract_local(doc.tobytes(),region_engine=engine,
+                        selector=lambda *a,**k:([[0,0,590,200]],1,False),retain_words=False)
+                record=next(c for c in result['review_candidates'] if c['tag']=='AHU-7')
+                self.assertIn(7,calls)
+                self.assertEqual(record['review_values'].get('design_cfm'),expected)
+                self.assertFalse(record['include']);self.assertEqual(record['values'],{})
 
 
 class OutlineTableTests(unittest.TestCase):
