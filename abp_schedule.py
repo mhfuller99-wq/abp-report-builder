@@ -472,12 +472,21 @@ def parse_fan_submittal(doc, name):
         spatial_rows = _page_segments(page)
         rows = [text_of(words) for _y, words in spatial_rows]
         page_text = '\n'.join(rows)
-        mark = re.search(r'Mark:\s*(EF-\d+(?:\s*(?:,|&|THRU|THROUGH|TO|–|-)\s*(?:EF-)?\d+)*)', page_text, re.I)
-        if not mark:
+        # Manufacturer selections may print explicit Tags at the top and an
+        # unrelated internal Mark at the bottom. Read only complete EF lists;
+        # never translate a manufacturer mark into a project equipment ID.
+        lists=[]
+        for line in rows:
+            match=re.fullmatch(r'(?:Unit )?(?:Mark|Tags?):\s*(EF-\d+.*)',line,re.I)
+            if not match:continue
+            printed=re.sub(r'(?<=\d)\s+(?=EF-)',', ',match.group(1),flags=re.I)
+            parsed=expand_marks(printed)
+            if not parsed or any(not re.fullmatch(r'EF-\d+',tag,re.I) for tag in parsed):
+                lists.append(None)
+            else:lists.append(parsed)
+        if not lists or any(tags is None for tags in lists) or len({tuple(sorted(tags)) for tags in lists if tags})!=1:
             continue
-        tags = expand_marks(mark.group(1))
-        if not tags:
-            continue
+        tags=lists[0]
         tag = ', '.join(tags)
         values = {}
 
