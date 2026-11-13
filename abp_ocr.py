@@ -17,6 +17,8 @@ from abp_ocr_candidates import merge_diffuser_candidate
 from abp_plan_regions import paired_text_regions
 from abp_keynotes import keynote_regions, keynote_candidates
 from abp_ocr_batch import tesseract_batch_words
+import abp_outline_outlets
+import abp_outline_tables
 
 
 @dataclass(frozen=True)
@@ -99,8 +101,12 @@ def prioritized_pages(doc, page_numbers, deadline):
     for i in numbers:
         if time.monotonic()>=deadline:break
         words=doc[i].get_text('words')
-        if len(words)<=30_000 and any(re.fullmatch(r'SCHEDULES?',w[4].strip(' .:;'),re.I) for w in words):
-            priorities[i]=0
+        if len(words)<=30_000:
+            text=' '.join(w[4] for w in words)
+            schedule=any(re.fullmatch(r'SCHEDULES?',w[4].strip(' .:;'),re.I) for w in words)
+            selection=bool(re.search(r'\b(?:Tags?|Mark):\s*EF-\d+\b',text,re.I)
+                           and re.search(r'Requested Volume \(CFM\)',text,re.I))
+            if schedule or selection:priorities[i]=0
         pymupdf.TOOLS.store_shrink(100)
     return sorted(numbers,key=lambda i:(priorities.get(i,1),i))
 
@@ -365,9 +371,12 @@ def extract_local(data, source='synthetic.pdf', budget=Budget(), engine=tesserac
                     attempted += 1
                 try:
                     remaining = max(.001, page_deadline - time.monotonic())
-                    ocr = (engine(page, pixels, remaining) if full_page else
-                           region_engine(page, pixels, remaining, clip=list(rect), psm=psm,
-                                         max_zoom=zoom))
+                    ocr = abp_outline_tables.read(page,rect,native,pixels,remaining,region_engine) if table and psm==11 else None
+                    if ocr is None:
+                        remaining=max(.001,page_deadline-time.monotonic())
+                        ocr = (engine(page, pixels, remaining) if full_page else
+                               region_engine(page, pixels, remaining, clip=list(rect), psm=psm,
+                                             max_zoom=zoom))
                     if len(ocr) > budget.max_words:
                         raise ValueError('OCR word budget exceeded')
                     if table and psm==11:
@@ -378,11 +387,20 @@ def extract_local(data, source='synthetic.pdf', budget=Budget(), engine=tesserac
                                  and (w.get('confidence') or 0)<80][:2]
                         for original in targets:
                             refined=[]
-                            recognize(pymupdf.Rect(original['box'])+(-1,-1,1,1),7,word_sink=refined)
-                            if len(refined)==1 and refined[0]['text'].upper()==original['text'].upper() and (refined[0].get('confidence') or 0)>=80:
+                            recognize(pymupdf.Rect(original['box'])+(-1,-1,1,1),7,word_sink=refined,callout=True,glyph=True,parse_candidates=False)
+                            if len(refined)==1 and refined[0]['text'].upper().translate(str.maketrans('–—−‐‑','-----'))==original['text'].upper().translate(str.maketrans('–—−‐‑','-----')) and (refined[0].get('confidence') or 0)>=80:
                                 original['original_confidence']=original.get('confidence')
                                 original['confidence']=refined[0]['confidence']
                                 original['confidence_method']='exact_token_reread'
+                    if table and psm==11:
+                        for parts in abp_outline_tables.split_flow_cells(ocr):
+                            refined=[];cell=pymupdf.Rect(parts[0]['box'])|pymupdf.Rect(parts[1]['box'])
+                            recognize(cell+(-2,-2,2,2),7,word_sink=refined,callout=True,glyph=True,parse_candidates=False)
+                            if (len(refined)==1 and (refined[0].get('confidence') or 0)>=90
+                                    and re.fullmatch(r'\d{1,3},\d{3}|\d{4,6}',refined[0]['text'])
+                                    and refined[0]['text'].replace(',','')==''.join(w['text'] for w in parts)):
+                                refined[0]['original_segments']=[{'text':w['text'],'box':w['box'],'confidence':w.get('confidence')} for w in parts]
+                                ocr=[w for w in ocr if all(w is not p for p in parts)]+refined
                     if retain_words:
                         entry['ocr_words'].extend(ocr)
                     if word_sink is not None:word_sink.extend(ocr)
@@ -427,7 +445,8 @@ def extract_local(data, source='synthetic.pdf', budget=Budget(), engine=tesserac
                         coverage['status'] = 'partial_review_required'
                         if checkpoint:checkpoint(report)
 
-            def read_small_crops(pending_jobs,psm,*,word_sink=None,glyph=False,parse=True):
+            def read_small_crops(pending_jobs,psm,*,word_sink=None,glyph=False,parse=True,
+                                 raster_page=None,capture=False,on_batch=None):
                 """Checkpoint bounded groups; preserve earlier groups on failure."""
                 nonlocal attempted,regions_attempted,page_regions,page_attempted
                 if batch_engine is None:
@@ -444,7 +463,9 @@ def extract_local(data, source='synthetic.pdf', budget=Budget(), engine=tesserac
                         allowance=min(budget.max_pixels,budget.max_region_pixels,
                                       budget.max_total_pixels-total_pixels,budget.max_page_pixels-page_pixels)
                         pixels=render_geometry(rect,allowance,zoom)[1] if allowance>=10000 else 0
-                        r={'box':list(rect),'method':f'ocr_batch_psm{psm}','status':'budget_skipped','pixels':pixels}
+                        r={'box':pending.get('source_box',list(rect)),
+                           'method':'outline_ocr_batch' if raster_page is not None else f'ocr_batch_psm{psm}',
+                           'status':'budget_skipped','pixels':pixels}
                         record_region(coverage,r)
                         if not pixels or not available(pixels) or regions_attempted>=budget.max_regions or page_regions>=budget.max_regions_per_page:
                             r['reason']='Pixel, region or time budget exhausted; manual review required.'
@@ -455,12 +476,14 @@ def extract_local(data, source='synthetic.pdf', budget=Budget(), engine=tesserac
                     if not jobs:continue
                     batch_started=time.monotonic()
                     try:
-                        outputs=batch_engine(page,jobs,max(.001,page_deadline-time.monotonic()),psm=psm,
+                        outputs=batch_engine(raster_page if raster_page is not None else page,jobs,
+                                             max(.001,page_deadline-time.monotonic()),psm=psm,
                                              max_zoom=zoom,max_total_pixels=sum(j['pixels'] for j in jobs))
                         if len(outputs)!=len(jobs):raise ValueError('OCR batch lost crop identities')
                         if sum(len(words) for words in outputs)>budget.max_words:raise ValueError('OCR batch word budget exceeded')
                         for (pending,r),words in zip(reserved,outputs):
-                            if retain_words:entry['ocr_words'].extend(words)
+                            if retain_words and raster_page is None:entry['ocr_words'].extend(words)
+                            if capture:pending['words']=words
                             if word_sink is not None:
                                 if len(word_sink)+len(words)>budget.max_words:raise ValueError('OCR evidence word budget exceeded')
                                 word_sink.extend(words)
@@ -480,6 +503,7 @@ def extract_local(data, source='synthetic.pdf', budget=Budget(), engine=tesserac
                         coverage['status']='partial_review_required'
                         coverage.setdefault('batches',[]).append({'regions':len(jobs),'psm':psm,
                             'elapsed_seconds':round(time.monotonic()-batch_started,3)})
+                        if on_batch:on_batch()
                         if checkpoint:checkpoint(report)
 
             if raster_pages >= budget.max_pages or not available(1):
@@ -520,6 +544,51 @@ def extract_local(data, source='synthetic.pdf', budget=Budget(), engine=tesserac
                 pymupdf.TOOLS.store_shrink(100)
             statuses = []
             if plan_tiles:
+                # Native S labels can survive while adjacent airflow digits are
+                # outlined CAD paths. Read these small regions before full tiles.
+                # All renders share the same page, pixel, region and time caps.
+                if batch_engine is not None:
+                    outline_doc=None
+                    try:
+                        plans,limited=abp_outline_outlets.prepare(page,native,page_deadline)
+                        coverage['outline_selection_truncated']=limited
+                        if plans:
+                            outline_doc,outline_jobs=abp_outline_outlets.atlas(page,plans)
+                            coverage['planned_outline_regions']=[
+                                {'box':p['crop'],'anchor':p['anchor'][:2],'status':'not_examined'} for p in plans]
+                            coverage['unexamined_content']='Outlined callouts are unverified; rooms, duct connections and all other content require review.'
+                            if checkpoint:checkpoint(report)
+                            contexts=[]
+                            def save_outlines():
+                                decoded=abp_outline_outlets.candidates(plans,outline_jobs+contexts,source,number,
+                                                                     time.monotonic()+.5)
+                                for candidate in decoded:
+                                    existing=next((old for old in report['review_candidates']
+                                        if old.get('method')=='native_anchor_outline_ocr'
+                                        and old.get('source')==source and old.get('page')==number
+                                        and old.get('position')==candidate['position']),None)
+                                    if existing is not None:
+                                        existing.clear();existing.update(candidate)
+                                    elif not merge_diffuser_candidate(report['review_candidates'],candidate):
+                                        report['review_candidates'].append(candidate)
+                                for i,pending in enumerate(coverage['planned_outline_regions']):
+                                    views=[j for j in outline_jobs+contexts if j['anchor_index']==i]
+                                    pending['views_completed']=sum('words' in j for j in views)
+                                    pending['views_pending']=sum('words' not in j for j in views)
+                                    pending['status']='review_candidate' if pending['views_completed']>=2 else 'partial_review_required'
+                            read_small_crops(outline_jobs,6,glyph=True,parse=False,
+                                             raster_page=outline_doc[0],capture=True,on_batch=save_outlines)
+                            contexts=abp_outline_outlets.context_jobs(plans,outline_jobs,
+                                min(budget.max_regions-regions_attempted,budget.max_regions_per_page-page_regions))
+                            read_small_crops(contexts,6,parse=False,capture=True,on_batch=save_outlines)
+                            save_outlines()
+                            if checkpoint:checkpoint(report)
+                    except (OSError,ValueError,RuntimeError,MemoryError) as exc:
+                        coverage['outline_selection_failed']=type(exc).__name__
+                        report['warnings'].append(f'Page {number}: outlined-callout reading incomplete; manual review required.')
+                    finally:
+                        if outline_doc is not None:outline_doc.close()
+                        pymupdf.TOOLS.store_shrink(100)
                 # Small paired CAD text crops retain readable glyphs at high
                 # resolution without rasterizing most of an engineering sheet.
                 # Geometry selects crops only; the existing literal readers and

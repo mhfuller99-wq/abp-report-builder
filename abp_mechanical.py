@@ -253,7 +253,7 @@ def schedule_candidates(words, page_number, name):
                 motor = phrases(header, r'(?:MOTOR|FAN) (?:VOLTS?|VOLTAGE|PHASE|PH|AMPS|FLA|KW)')
                 anchors = [a for a in anchors if not any(abs(a[1]-b[1]) < 3 and b[0] <= a[0] and b[2] >= a[2] for b in motor)]
             if field == 'design_cfm':
-                outside = phrases(header, r'(?:OUTSIDE AIR|OUTDOOR AIR|OA|OSA|EXHAUST|RETURN)(?: CFM| \(CFM\))|(?:PEAK|MAXIMUM|MAX|RATED|SELECTED)(?: FAN)? AIRFLOW')
+                outside = phrases(header, r'(?:OUTSIDE AIR|OUTDOOR AIR|O\.A\.|OA|OSA|EXHAUST|RETURN)(?: CFM| \(CFM\))|(?:PEAK|MAXIMUM|MAX|RATED|SELECTED)(?: FAN)? AIRFLOW')
                 anchors = [a for a in anchors if not any(abs(a[1]-b[1]) < 3 and b[0] <= a[0] and b[2] >= a[2] for b in outside)]
             if len(anchors) != 1:
                 return
@@ -317,14 +317,29 @@ def schedule_candidates(words, page_number, name):
                 if phrases(header, pattern):kinds.append(kind)
             if len(kinds)==1:text['heating_type']=kinds[0]
         take(r'(?:DESIGN |TOTAL |SUPPLY |SUPPLY AIR |SA )?(?:CFM|AIRFLOW)(?: \(CFM\))?|SCFM(?: @ \S+)?', 'design_cfm')
-        take(r'(?:OUTSIDE AIR|OUTDOOR AIR|OA|OSA)(?: CFM| \(CFM\))?', 'osa_cfm')
-        take(r'(?:ESP|E\.S\.P\.)(?: \(.*\))?', 'esp')
+        take(r'(?:OUTSIDE AIR|OUTDOOR AIR|O\.A\.|OA|OSA)(?: CFM| \(CFM\))?', 'osa_cfm')
+        take(r'(?:ESP|E\.S\.P\.)(?: \([^()]{1,24}\))?', 'esp')
         take(r'EXT\.? S\.?P\.?(?: IN\.? WG)?', 'esp')
         take(r'MOTOR HP', 'motor_hp')
         take(r'MOTOR FLA', 'motor_fla')
         take(r'MOTOR VOLTS|VOLTAGE \(V\)', 'motor_volts')
         take(r'FAN RPM', 'fan_rpm')
         take(r'MCA', 'unit_mca')
+        if (family == 'AHU' and phrases(header,r'NATURAL GAS FURNACE')
+                and phrases(header,r'TYPE') and phrases(header,r'TOTAL')
+                and phrases(header,r'E\.S\.P\. \(IN\)') and phrases(header,r'O\.A\. CFM')):
+            # In this explicit furnace schema TOTAL is supply airflow. The
+            # adjacent O.A. CFM column is never the unit total. Repeated MARK
+            # columns already exclude evaporator and condenser ratings.
+            values.pop('design_cfm',None);value_words.pop('design_cfm',None)
+            take(r'TOTAL','design_cfm')
+            take(r'INPUT \(M\.B\.H\.\)','heating_input_btu',1000)
+            take(r'OUTPUT \(M\.B\.H\.\)','heating_output_btu',1000)
+            context_boxes=phrases(header,r'NATURAL GAS FURNACE|TYPE|TOTAL|E\.S\.P\. \(IN\)|O\.A\. CFM')
+            context_words=[w for w in header if any(a[0]<=w[0] and w[2]<=a[2] and abs(w[1]-a[1])<3 for a in context_boxes)]
+            for field in ('design_cfm','heating_input_btu','heating_output_btu'):
+                if field in values:value_words[field]=value_words.get(field,[])+context_words
+            text.update(heating_type='GAS',unit_type='GAS HEAT')
         # Stacked headers are common in CAD schedules. Bind each numeric value
         # to its own labeled column; never use a fixed numeric field order.
         numeric = [w for w in row if re.fullmatch(r'\d[\d,]*(?:\.\d+)?', w[4])]
