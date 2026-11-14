@@ -156,18 +156,33 @@ def run_suite(suite_path,index_path,commit):
         except (OSError,ValueError,KeyError,TypeError) as exc:
             gate.append({'project_id':pid,'reason':'invalid_report','detail':str(exc)});continue
         results.append(result)
-        if not result['candidate_checks_pass']:gate.append({'project_id':pid,'reason':'extraction_failure'})
+        acceptance=entry.get('acceptance_mode','automatic')
+        if acceptance not in ('automatic','reviewed_workflow'):raise ValueError('Invalid acceptance mode')
+        result['acceptance_mode']=acceptance
+        reviewed_hash=entry['sha256']
+        if acceptance=='automatic' and not result['candidate_checks_pass']:gate.append({'project_id':pid,'reason':'extraction_failure'})
         if not result['truth_complete']:gate.append({'project_id':pid,'reason':'incomplete_expected_answers'})
-        if not result['automatic_report_ready']:gate.append({'project_id':pid,'reason':'manual_review_remaining'})
+        if acceptance=='automatic' and not result['automatic_report_ready']:gate.append({'project_id':pid,'reason':'manual_review_remaining'})
+        if acceptance=='reviewed_workflow':
+            from abp_benchmark_reviewed import evaluate_reviewed
+            try:
+                reviewed=entry['reviewed_review']
+                if (reviewed.get('commit')!=commit or reviewed.get('raw_review_sha256')!=entry['sha256']
+                        or reviewed.get('mode')!='website_reviewed' or digest(reviewed['path'])!=reviewed['sha256']):
+                    raise ValueError('Reviewed export is not bound to this raw scan and revision')
+                result['reviewed_workflow']=evaluate_reviewed(project,read(reviewed['path']))
+                reviewed_hash=reviewed['sha256']
+                if not result['reviewed_workflow']['reviewed_inventory_pass']:gate.append({'project_id':pid,'reason':'reviewed_inventory_failed'})
+            except (OSError,KeyError,ValueError,TypeError):gate.append({'project_id':pid,'reason':'reviewed_export_missing_or_invalid'})
         # An extraction pass is never a workbook acceptance pass.
         audit=entry.get('workbook_audit')
-        if not isinstance(audit,dict) or audit.get('commit')!=commit or audit.get('review_sha256')!=entry['sha256']:
+        if not isinstance(audit,dict) or audit.get('commit')!=commit or audit.get('review_sha256')!=reviewed_hash:
             gate.append({'project_id':pid,'reason':'workbook_not_verified'})
         else:
             try:
                 if digest(audit['path'])!=audit['sha256']:raise ValueError('Workbook audit changed')
                 report=read(audit['path'])
-                if report.get('commit')!=commit or report.get('review_sha256')!=entry['sha256']:
+                if report.get('commit')!=commit or report.get('review_sha256')!=reviewed_hash:
                     raise ValueError('Workbook audit belongs to another review or revision')
                 book=report['workbook'];templates=report['original_templates']
                 if not templates or digest(book['path'])!=book['sha256']:
@@ -175,11 +190,19 @@ def run_suite(suite_path,index_path,commit):
                 if any(digest(t['path'])!=t['sha256'] for t in templates):
                     raise ValueError('Original template changed after audit')
                 required=('original_formulas_preserved','blank_actuals','original_layout_preserved','grouped_equipment','required_traverses')
+                if acceptance=='reviewed_workflow':
+                    required+=('exact_design_values','all_caps','diffuser_totals_adjacent','no_unnecessary_comments','no_unexplained_omissions')
+                    if report.get('raw_review_sha256')!=entry['sha256'] or not re.fullmatch(r'[a-f0-9]{48}',report.get('website_job_id','')):
+                        raise ValueError('Website build provenance missing')
                 if not all(report.get(k) is True for k in required):raise ValueError('Workbook acceptance incomplete')
                 result['workbook_verified']=True
             except (OSError,KeyError,ValueError,TypeError):gate.append({'project_id':pid,'reason':'workbook_audit_failed'})
-    if not any(p['split']=='holdout' for p in suite['projects']):gate.append({'reason':'no_holdout_projects'})
-    return {'commit':commit,'suite_sha256':digest(suite_path),'results':results,'release_gate_pass':not gate,'blockers':gate}
+    required_holdouts=suite.get('required_holdouts',1)
+    if type(required_holdouts)!=int or not 1<=required_holdouts<=100:raise ValueError('Invalid required holdout count')
+    if sum(p['split']=='holdout' for p in suite['projects'])<required_holdouts:gate.append({'reason':'no_holdout_projects' if required_holdouts==1 else 'insufficient_holdout_projects'})
+    return {'commit':commit,'suite_sha256':digest(suite_path),'results':results,'release_gate_pass':not gate,'blockers':gate,
+            'all_raw_candidate_checks_pass':bool(results) and len(results)==len(suite['projects']) and all(r['candidate_checks_pass'] for r in results),
+            'scope':'Acceptance uses each declared automatic or reviewed workflow; reviewed acceptance never changes raw extraction scores.'}
 
 
 if __name__=='__main__':

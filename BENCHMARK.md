@@ -47,3 +47,21 @@ The private gate is a local release check, not a GitHub branch-protection rule.
 A failed gate blocks a claim that the application is generally ready; a narrowly
 scoped correction must still state its verified scope and unresolved limitations.
 Reserve new validation projects after using a held-out project to develop a fix.
+
+Reviewed workflow acceptance is a separate, explicit mode. Set a report entry's
+`acceptance_mode` to `reviewed_workflow` and provide `reviewed_review` with its
+path, hash, commit, `raw_review_sha256` and `mode: website_reviewed`. Keep the raw
+export unchanged. Its errors and automatic readiness remain visible even when
+the independently checked reviewed inventory and workbook pass. The reviewed
+inventory is compared against complete frozen source answers, including physical
+quantity, per-unit locations, deliberate blanks, page accounting and approval
+bound to the exact inventory. This evaluator does not call the application gate.
+
+For this mode the workbook audit binds the reviewed export's hash and also records
+`raw_review_sha256` and the actual `website_job_id`. It must affirm
+`exact_design_values`, `all_caps`, `diffuser_totals_adjacent`,
+`no_unnecessary_comments` and `no_unexplained_omissions` in addition to the original
+template checks above. These are evidence requirements, not automatic assertions.
+Set suite-level `required_holdouts: 2` when two qualified held-out projects are
+required. Neither reviewed acceptance nor a passing suite upgrades automatic scan
+coverage or certifies field measurements.

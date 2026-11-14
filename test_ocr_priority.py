@@ -19,10 +19,10 @@ class PriorityTests(unittest.TestCase):
         self.assertFalse(result['complete_takeoff'])
 
     def test_source_allowance_respects_the_remaining_job_deadline(self):
-        from abp_jobs import SourceRunner,write_json
+        from abp_jobs import SourceRunner
         with tempfile.TemporaryDirectory() as directory:
-            runner=SourceRunner({'root':Path(directory),'sources':[{'name':'synthetic.pdf'}]},lambda **p:None)
-            write_json(runner.cache(0,'native'),{'pages':3})
+            runner=SourceRunner({'root':Path(directory),'sources':[{'name':'synthetic.pdf','sha256':'a'*64}]},lambda **p:None)
+            runner.save(0,'native',{'pages':3})
             runner.deadline=time.monotonic()+20
             with patch('abp_resilient.deferred_ocr',return_value={'review_candidates':[],'coverage':[]}) as image:
                 runner.image('synthetic.pdf',io.BytesIO(),{'bytes':0,'sha256':'a'*64},60)

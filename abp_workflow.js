@@ -99,9 +99,8 @@ renderImageReview=function(){workflowOriginalImageReview();$('image-review').que
  const label=workflowElement('label','Reason to exclude this candidate'),input=document.createElement('input');input.maxLength=500;input.setAttribute('aria-label','Candidate '+(index+1)+' exclusion reason');label.append(input);panel.append(label);
  const status=workflowElement('p');status.setAttribute('role','status');panel.append(workflowButton('Exclude with source reason',()=>{if(input.value.trim().length<10){status.textContent='Enter a source-based reason of at least 10 characters.';return;}c.excluded=true;c.exclusion_note=input.value.trim();renderImageReview();workflowChanged();}),status);
  });};
-let humanReviewNote='';
-function renderHumanReview(box){
- const panel=workflowElement('details');panel.append(workflowElement('summary','Complete human source review'));
+function renderHumanReview(box,wasOpen){
+ const panel=workflowElement('details');panel.id='human-source-review';panel.open=wasOpen;panel.append(workflowElement('summary','Complete human source review'));
  panel.append(workflowElement('p','Account for every source page, resolve equipment and image candidates, and review the final design inventory. This does not mark automatic scanning complete or certify field measurements.'));
  const message=workflowElement('p');message.setAttribute('role','status');
  for(const source of scanState.source_checkpoints){
@@ -110,15 +109,21 @@ function renderHumanReview(box){
   const range=workflowElement('input');range.placeholder='1, 3-5';range.setAttribute('aria-label',source.name+' reviewed pages');const label=workflowElement('label','Reviewed page numbers');label.append(range);row.append(label);
   const disposition=workflowElement('select');disposition.setAttribute('aria-label',source.name+' page disposition');for(const [value,text] of [['reviewed','Relevant design content reviewed'],['not_applicable','No applicable TAB design data']]){const option=workflowElement('option',text);option.value=value;disposition.append(option);}row.append(disposition);
   const note=workflowElement('input');note.maxLength=500;note.setAttribute('aria-label',source.name+' page review note');const nl=workflowElement('label','What was checked on these pages');nl.append(note);row.append(nl);
-  row.append(workflowButton('Record page review',()=>{try{const pages=parseRetryPages(range.value);if(!pages||!source.pages||pages.some(p=>p>source.pages))throw Error('Enter explicit page numbers within this document.');if(note.value.trim().length<10)throw Error('Describe what was checked in at least 10 characters.');humanPageReviews=humanPageReviews.filter(p=>!(p.source===source.name&&p.sha256===source.sha256&&pages.includes(p.page)));for(const page of pages)humanPageReviews.push({source:source.name,sha256:source.sha256,page,disposition:disposition.value,note:note.value.trim()});humanSourceReview=null;workflowSave();renderReadiness();}catch(e){message.textContent=e.message;}}));
+  row.append(workflowButton('Record page review',()=>{try{const pages=parseRetryPages(range.value);if(!pages||!source.pages||pages.some(p=>p>source.pages))throw Error('Enter explicit page numbers within this document.');if(note.value.trim().length<10)throw Error('Describe what was checked in at least 10 characters.');humanPageReviews=humanPageReviews.filter(p=>!(p.source===source.name&&p.sha256===source.sha256&&pages.includes(p.page)));for(const page of pages)humanPageReviews.push({source:source.name,sha256:source.sha256,page,disposition:disposition.value,note:note.value.trim()});humanSourceReview=null;workflowSave();renderReadiness(true);}catch(e){message.textContent=e.message;}}));
   if(reviewed.length){const list=workflowElement('details');list.append(workflowElement('summary','Recorded page decisions'));for(const p of reviewed.sort((a,b)=>a.page-b.page))list.append(workflowElement('p','Page '+p.page+' · '+p.disposition.replaceAll('_',' ')+' · '+p.note));row.append(list);}panel.append(row);
  }
- const label=workflowElement('label','Final review basis, differences and deliberate blanks'),input=workflowElement('textarea');input.maxLength=1000;input.value=humanReviewNote;input.setAttribute('aria-label','Final source review basis');input.oninput=()=>{humanReviewNote=input.value;};label.append(input);panel.append(label);
+ const label=workflowElement('label','Final review basis, differences and deliberate blanks'),input=workflowElement('textarea');input.maxLength=1000;input.value=humanReviewNote;input.setAttribute('aria-label','Final source review basis');input.oninput=()=>{humanReviewNote=input.value;workflowSave();};label.append(input);panel.append(label);
  const confirm=workflowElement('input');confirm.type='checkbox';const confirmLabel=workflowElement('label');confirmLabel.append(confirm,document.createTextNode(' I compared the final inventory with all applicable source pages, resolved differences, and accounted for missing design information.'));panel.append(confirmLabel);
- panel.append(workflowButton('Approve reviewed design inventory',()=>{try{if(!confirm.checked)throw Error('Confirm the completed source review first.');humanSourceReview=makeSourceReview(workflowOriginalPayload(),humanPageReviews,humanReviewNote);workflowSave();renderReadiness();}catch(e){message.textContent=e.message;}}),message);box.append(panel);
+ panel.append(workflowButton('Approve reviewed design inventory',()=>{try{if(!confirm.checked)throw Error('Confirm the completed source review first.');humanSourceReview=makeSourceReview(workflowOriginalPayload(),humanPageReviews,humanReviewNote);workflowSave();renderReadiness(true);}catch(e){message.textContent=e.message;}}),message);box.append(panel);
 }
-function renderReadiness(){
- const box=$('readiness');if(!box)return;box.replaceChildren();
+function renderReadiness(force=false){
+ const box=$('readiness');if(!box)return;
+ // A delayed inventory autosave must not erase a page note or confirmation
+ // while the reviewer is using it. Approval still checks the current payload.
+ const humanPanel=$('human-source-review');
+ if(!force&&humanPanel?.open&&humanPanel.contains(document.activeElement))return;
+ const humanOpen=humanPanel?.open===true;box.replaceChildren();
+ if(humanSourceReview&&!workflowBusy)$('scanstatus').textContent=sourceReviewApproved(workflowOriginalPayload())?'AUTOMATED SCAN: '+scanState.status.toUpperCase()+'. HUMAN SOURCE REVIEW APPROVED FOR THIS INVENTORY.':'Source or inventory changed after human approval. Recheck the changes and approve the reviewed design inventory again.';
  const verified=records.filter(r=>r.status==='VERIFIED').length,unresolved=records.filter(r=>!['VERIFIED','EXCLUDED'].includes(r.status));
  const assessment=sourceReadiness(records,diffusers,imageReview,officeComparison?compareOfficeDesign(officeComparison,records,diffusers):null);
  const title=workflowElement('h3',assessment.title);box.append(title);
@@ -136,7 +141,7 @@ function renderReadiness(){
    if(record.source&&/\.pdf$/i.test(record.source))row.append(workflowButton('View '+record.tag+' source',()=>viewSource(record.source,sourcePage(record.reference))));box.append(row);
  }
  if(scanState.source_checkpoints.length){
-  renderHumanReview(box);
+  renderHumanReview(box,humanOpen);
   const heading=workflowElement('h4','Source coverage and page retries');box.append(heading);
   scanState.source_checkpoints.forEach(c=>{
    const row=workflowElement('div');row.className='source-checkpoint';
@@ -248,7 +253,7 @@ function renderComparison(){
  wrap.append(table);box.append(wrap);
 }
 function restoreWorkflow(saved){
- humanSourceReview=null;humanReviewNote='';humanPageReviews=Array.isArray(saved.review?.human_page_reviews)?saved.review.human_page_reviews:[];
+ humanSourceReview=null;humanReviewNote=typeof saved.review?.human_review_note==='string'?saved.review.human_review_note:'';humanPageReviews=Array.isArray(saved.review?.human_page_reviews)?saved.review.human_page_reviews:[];
  const data=validateSavedReview(saved.review,[...document.querySelectorAll('.template input')].map(x=>x.value),unitForms,savedTagPattern);
  scanState=validateScanState(data.scan_state);renderScanReview();records=data.records;tags=records.map(r=>r.tag);diffusers=data.diffusers||[];imageReview=data.image_review||[];imageCoverage=data.image_coverage||[];imageCoverageTruncated=data.image_coverage_truncated===true;
  $('project').value=data.project;$('location').value=data.location;$('standard').value=data.standard;document.querySelectorAll('.template input').forEach(x=>x.checked=data.templates.includes(x.value));

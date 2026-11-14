@@ -66,6 +66,8 @@ function validateSavedReview(data, templates, forms, tagPattern) {
   const numeric=x=>(typeof x==='number'||typeof x==='string'&&x.trim()!=='')&&Number.isFinite(Number(x))&&Number(x)>=0&&Number(x)<=1000000;
   const fields=reviewNumericFields;
   if(!object(data)||data.format!=='ABP-PREFIELD-REVIEW'||data.version!==1||typeof data.project!=='string'||data.project.length>180||typeof data.location!=='string'||data.location.length>180||!['Commercial','USACE'].includes(data.standard)||!Array.isArray(data.records)||data.records.length>500||!Array.isArray(data.templates)||data.templates.some(t=>typeof t!=='string'||!templates.includes(t))||new Set(data.templates).size!==data.templates.length) invalid();
+  if(data.human_page_reviews!==undefined&&(!Array.isArray(data.human_page_reviews)||data.human_page_reviews.length>30000||data.human_page_reviews.some(p=>!object(p)||typeof p.source!=='string'||p.source.length>160||! /^[a-f0-9]{64}$/.test(p.sha256||'')||!Number.isInteger(p.page)||p.page<1||p.page>300||!['reviewed','not_applicable'].includes(p.disposition)||typeof p.note!=='string'||p.note.trim().length<10||p.note.length>500)))invalid();
+  if(data.human_review_note!==undefined&&(typeof data.human_review_note!=='string'||data.human_review_note.length>1000))invalid();
   const tags=new Set();
   for(const r of data.records) {
     if(!object(r)||typeof r.tag!=='string'||!tagPattern.test(r.tag)||tags.has(r.tag.toUpperCase())||!['UNVERIFIED','VERIFIED','EXCLUDED'].includes(r.status)) invalid();
@@ -152,7 +154,7 @@ function renderScanReview(){
 // Stable source observations survive review edits; CFM/room are not identity.
 function outletFromImage(candidate){
  const outlet={include:false,type:candidate.type||'',size:candidate.size||'',design_cfm:candidate.review_values?.design_cfm??null,system:'',location:'',source:candidate.source,reference:'page '+candidate.page,evidence:candidate.evidence_text||''};
- for(const key of ['position','region','region_coordinate_space','shape','quantity','quantity_unresolved'])if(candidate[key]!==undefined)outlet[key]=JSON.parse(JSON.stringify(candidate[key]));
+ for(const key of ['position','position_coordinate_space','region','region_coordinate_space','coordinate_space','method','shape','quantity','quantity_unresolved'])if(candidate[key]!==undefined)outlet[key]=JSON.parse(JSON.stringify(candidate[key]));
  outlet.observation={type:outlet.type,size:outlet.size,design_cfm:outlet.design_cfm};
  return outlet;
 }
@@ -204,7 +206,7 @@ function undoOutletBatch(outlets,action){
 }
 
 
-let humanSourceReview=null,humanPageReviews=[];
+let humanSourceReview=null,humanPageReviews=[],humanReviewNote='';
 function sourceInventorySnapshot(payload){
  const recordKeys=['tag','status','template','coil_template','source','reference','instance_locations',...reviewNumericFields,'heater_kw',...reviewTextFields];
  const outletKeys=['include','type','size','system','location','design_cfm','source','reference','position','quantity','quantity_unresolved'];
