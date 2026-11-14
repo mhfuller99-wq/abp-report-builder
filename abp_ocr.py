@@ -19,6 +19,7 @@ from abp_keynotes import keynote_regions, keynote_candidates
 from abp_ocr_batch import tesseract_batch_words
 import abp_outline_outlets
 import abp_outline_tables
+import abp_product_tables
 
 
 @dataclass(frozen=True)
@@ -107,6 +108,7 @@ def prioritized_pages(doc, page_numbers, deadline):
             selection=bool(re.search(r'\b(?:Tags?|Mark):\s*EF-\d+\b',text,re.I)
                            and re.search(r'Requested Volume \(CFM\)',text,re.I))
             if schedule or selection:priorities[i]=0
+            if abp_product_tables.product_tag([word(*w[:5]) for w in words]):priorities[i]=-1
         pymupdf.TOOLS.store_shrink(100)
     return sorted(numbers,key=lambda i:(priorities.get(i,1),i))
 
@@ -127,6 +129,13 @@ def tesseract_region_words(page, pixels, timeout, clip=None, psm=11, max_zoom=3.
             if pix.width * pix.height > estimate:
                 raise ValueError('Raster budget exceeded')
             ox, oy = pix.x, pix.y
+            # Product tables use pale shaded cells. Removing only light gray
+            # pixels prevents cell backgrounds from merging words into rules.
+            # Identity is native and page-local; generic scans are unchanged.
+            native_product=[word(*w[:5]) for w in page.get_text('words')]
+            if abp_product_tables.product_tag(native_product):
+                clean=pix.samples.translate(bytes(0 if i<120 else 255 for i in range(256)))
+                pix=pymupdf.Pixmap(pymupdf.csGRAY,pix.width,pix.height,clean,False)
             pix.save(str(source))
         finally:
             # MuPDF's decoded image cache otherwise grows across previews/crops.
@@ -401,6 +410,23 @@ def extract_local(data, source='synthetic.pdf', budget=Budget(), engine=tesserac
                                     and refined[0]['text'].replace(',','')==''.join(w['text'] for w in parts)):
                                 refined[0]['original_segments']=[{'text':w['text'],'box':w['box'],'confidence':w.get('confidence')} for w in parts]
                                 ocr=[w for w in ocr if all(w is not p for p in parts)]+refined
+                    if parse_candidates and abp_product_tables.product_tag(native):
+                        for original_row in abp_product_tables.uncertain_rows(ocr):
+                            cell=pymupdf.Rect(original_row[0]['box'])
+                            for item in original_row[1:]:cell |= pymupdf.Rect(item['box'])
+                            refined=[]
+                            recognize(cell+(-2,-1.5,2,1.5),7,word_sink=refined,callout=True,glyph=True,parse_candidates=False)
+                            for item in refined:
+                                if re.fullmatch(r'H[2₂][O0]|cfm',item['text'],re.I) and (item.get('confidence') or 0)<80:
+                                    unit=[]
+                                    recognize(pymupdf.Rect(item['box'])+(-2,-2,2,4),6,word_sink=unit,callout=True,glyph=True,parse_candidates=False)
+                                    if abp_product_tables.same_row([item],unit):
+                                        item['original_confidence']=item.get('confidence')
+                                        item['confidence']=unit[0]['confidence']
+                                        item['recognition_method']='exact_product_unit_reread'
+                            if abp_product_tables.same_row(original_row,refined):
+                                for item in refined:item['recognition_method']='exact_product_row_reread'
+                                ocr=[w for w in ocr if all(w is not old for old in original_row)]+refined
                     if retain_words:
                         entry['ocr_words'].extend(ocr)
                     if word_sink is not None:word_sink.extend(ocr)
@@ -408,6 +434,8 @@ def extract_local(data, source='synthetic.pdf', budget=Budget(), engine=tesserac
                     if parser_limited:
                         report['warnings'].append(f'Page {number}: hood header-complexity budget exceeded; manual review required.')
                     candidates = (hood_candidates(ocr, source, number, 'ocr') + equipment_candidates(ocr,source,number,'ocr')) if parse_candidates else []
+                    if parse_candidates:
+                        candidates += abp_product_tables.candidates(ocr,native,source,number)
                     if parse_candidates and (full_page or plan_tiles):
                         candidates = diffuser_candidates(ocr, source, number, plan_confirmed=plan_page) + candidates
                     for candidate in candidates:

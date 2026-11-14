@@ -29,7 +29,54 @@ def plan_context(words):
     for line in lines:
         line=re.sub(r'\bH\s*\.\s*V\s*\.\s*A\s*\.\s*C\s*\.', 'HVAC',line,flags=re.I).strip()
         if re.fullmatch(rf'(?:\d+\s+)?{title}(?:\s+\d+)?',line,re.I):return True
+        # Named areas in actual sheet titles, not prose references to a plan.
+        if re.fullmatch(r'(?:\d+\s+)?MECHANICAL\s*-\s*(?:[A-Z]+\s+){0,5}HVAC(?:/COMPRESSED AIR)?\s+PLAN',line,re.I):return True
     return False
+
+
+def numbered_supply_outlets(words, page_number, source):
+    """S-number over an explicit airflow/CFM pair. Review-only, no duct inference."""
+    if len(words)>30000:return []
+    words=list(dict.fromkeys(tuple(w) for w in words))
+    if not plan_context(words):return []
+    grid=defaultdict(list)
+    for i,w in enumerate(words):grid[(int(w[0]//48),int(w[1]//48))].append(i)
+    def near(w):
+        x,y=int(w[0]//48),int(w[1]//48)
+        ids=[i for dx in (-1,0,1) for dy in (-1,0,1) for i in grid.get((x+dx,y+dy),[])]
+        return ids if len(ids)<=128 else []
+    pairs=[];uses=defaultdict(int)
+    for i,w in enumerate(words):
+        if not re.fullmatch(r'S\d{1,2}',w[4]):continue
+        h=w[3]-w[1]
+        if not 3<=h<=30:continue
+        options=[]
+        for j in near(w):
+            n=words[j]
+            if not FLOW.fullmatch(n[4]) or not 10<=int(n[4].replace(',',''))<=10000:continue
+            if not .65*h<=n[1]-w[1]<=1.7*h:continue
+            for k in near(n):
+                u=words[k]
+                if u[4]!='CFM' or abs(u[1]-n[1])>.2*h:continue
+                if not 0<=u[0]-n[2]<=.8*h:continue
+                if not all(.65*h<=v[3]-v[1]<=1.5*h for v in (n,u)):continue
+                if abs((n[0]+u[2]-w[0]-w[2])/2)>.45*h:continue
+                # Reject legend/example and prose attached to the symbol.
+                if any(re.search(r'[A-Za-z]{3}',words[t][4]) and t!=k
+                       and abs(words[t][1]-w[1])<h and abs(words[t][0]-w[0])<3*h for t in near(w)):continue
+                options.append((j,k))
+        if len(options)==1:
+            j,k=options[0];pairs.append((i,j,k));uses[j]+=1;uses[k]+=1
+    result=[]
+    for i,j,k in pairs:
+        if uses[j]!=1 or uses[k]!=1:continue
+        w,n,u=(words[t] for t in (i,j,k))
+        result.append({'include':False,'type':w[4],'size':'','system':'','location':'',
+            'design_cfm':int(n[4].replace(',','')),'source':source,'reference':f'page {page_number}',
+            'position':[round(w[0],2),round(w[1],2)],
+            'evidence_box':[min(w[0],n[0]),w[1],max(w[2],u[2]),max(n[3],u[3])],
+            'evidence':f'{w[4]} / {n[4]} CFM; confirm supply service, neck, room, system and revision'})
+    return result
 
 def centered_outlets(words, page_number, source, legend=None, *, plan_confirmed=False):
     """Read centered type-over-flow bubbles, including comma-formatted CFM.
