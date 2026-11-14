@@ -71,7 +71,10 @@ function renderReadiness(){
  const assessment=sourceReadiness(records,diffusers,imageReview,officeComparison?compareOfficeDesign(officeComparison,records,diffusers):null);
  const title=workflowElement('h3',assessment.title);box.append(title);
  if(assessment.empty)box.append(workflowElement('p','No job equipment was captured. A completed scan stage does not mean its schedules were recognized. Retry the schedule pages or add source-reviewed equipment before building.'));
- if(assessment.pendingImages)box.append(workflowElement('p',assessment.pendingImages+' image candidates still require source review. They are not verified equipment.'));
+ if(assessment.pendingImages){
+  box.append(workflowElement('p',assessment.imageOutlets+' image outlet candidates and '+assessment.imageEquipment+' image equipment/hood candidates await source confirmation. They may overlap existing review rows and are not report-ready entries.'));
+  const link=workflowElement('a','Review image candidates');link.href='#image-review';box.append(link);
+ }
  if(assessment.problems)box.append(workflowElement('p',assessment.problems+' office comparison findings require review below. Missing IDs, differences and unsupported values remain unresolved.'));
  box.append(workflowElement('p',scanStateBlocked(scanState)?'Source coverage is incomplete or outdated. Review the omissions and acknowledge a partial report before building.':'Source extraction still requires manual review; it is never certified as a complete takeoff.'));
  for(const record of unresolved){
@@ -135,7 +138,7 @@ function applyScanResult(data,retrySourceName){
  tags=records.map(r=>r.tag);imageReview=data.image_review||[];imageCoverage=data.image_coverage||[];imageCoverageTruncated=data.image_coverage_truncated===true;
  scanJobId=data.job_id;sourceManifest=data.source_manifest||[];
  renderReview();renderOutlets();renderImageReview();renderImageCoverage();
- $('scanstatus').textContent=(data.scan_status==='incomplete'?'SCAN INCOMPLETE. Completed results retained. ':'Source results ready for review. ')+records.length+' equipment entries and '+diffusers.length+' outlet candidates. '+(retrySourceName?'Retried '+retrySourceName+'; affected equipment requires fresh verification. ':'')+(data.warnings||[]).join(' | ');
+ $('scanstatus').textContent=(data.scan_status==='incomplete'?'SCAN INCOMPLETE. Completed results retained. ':'Source results ready for review. ')+scanCandidateSummary(records,diffusers,imageReview)+(retrySourceName?'Retried '+retrySourceName+'; affected equipment requires fresh verification. ':'')+(data.warnings||[]).join(' | ');
  workflowSave();
 }
 async function workflowRecommendations(data){

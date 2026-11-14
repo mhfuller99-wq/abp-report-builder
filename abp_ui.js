@@ -24,9 +24,18 @@ function sourceReadiness(records,outlets,images,comparison){
   const unresolved=records.filter(r=>!['VERIFIED','EXCLUDED'].includes(r.status)).length;
   const pendingImages=images.filter(c=>!c.accepted).length;
   const problems=comparison?comparison.rows.filter(r=>r.status!=='match').length:0;
-  const empty=!records.length&&!outlets.length;
-  const title=empty?'No equipment or outlets extracted — source review required':verified+' equipment verified · '+unresolved+' equipment unresolved';
-  return {title,empty,pendingImages,problems};
+  const imageOutlets=images.filter(c=>!c.accepted&&c.kind==='diffuser').length;
+  const imageEquipment=images.filter(c=>!c.accepted&&['equipment','kitchen_hood'].includes(c.kind)).length;
+  const empty=!records.length&&!outlets.length&&!images.length;
+  const title=empty?'No equipment or outlets extracted — source review required':
+    !records.length&&!outlets.length?'Image candidates found — source confirmation required':verified+' equipment verified · '+unresolved+' equipment unresolved';
+  return {title,empty,pendingImages,imageOutlets,imageEquipment,problems};
+}
+function scanCandidateSummary(records,outlets,images){
+  const counts=sourceReadiness(records,outlets,images,null);
+  return records.length+' equipment review rows; '+outlets.length+' outlet review rows. '+
+    counts.imageOutlets+' image outlet candidates and '+counts.imageEquipment+' image equipment/hood candidates awaiting source confirmation. '+
+    'Image candidates may overlap existing rows; they are not report-ready entries. ';
 }
 function emptySourceReport(records,outlets,state){
   return !!state?.source_checkpoints?.length&&!records.some(r=>r.status==='VERIFIED'&&r.template)&&!outlets.some(d=>d.include!==false);
