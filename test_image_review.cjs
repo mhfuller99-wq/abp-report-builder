@@ -2,6 +2,7 @@ const fs=require('fs'),vm=require('vm'),assert=require('assert');
 class Element {constructor(tag){this.tag=tag;this.children=[];this.attributes={};this.checked=false}append(...x){this.children.push(...x)}replaceChildren(){this.children=[]}setAttribute(k,v){this.attributes[k]=v}}
 const box=new Element('div');const candidates=[{kind:'kitchen_hood',tag:'KH-1',source:'synthetic.pdf',page:1,review_values:{exhaust_cfm:2400,makeup_air_cfm:1800},evidence_text:'KH-1 2400 1800'}];
 const ctx=vm.createContext({document:{createElement:x=>new Element(x),createTextNode:x=>x,querySelectorAll:()=>[]},$:()=>box,imageReview:candidates,records:[],diffusers:[],tags:[],savedTagPattern:/^KH-\d+$/,fieldLabel:x=>x,renderReview(){},renderOutlets(){},updateWorkspace(){}});
+vm.runInContext(fs.readFileSync(__dirname+'/abp_ui.js','utf8'),ctx);
 const source=fs.readFileSync(__dirname+'/abp_server.py','utf8');
 vm.runInContext(source.slice(source.indexOf('function renderImageReview(){'),source.indexOf('function projectPayload(){')),ctx);
 ctx.renderImageReview();let panel=box.children[2];let button=panel.children[4];button.onclick();assert.equal(ctx.records.length,0);assert.match(panel.children[5].textContent,/confirm/);

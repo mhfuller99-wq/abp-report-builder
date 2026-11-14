@@ -1,4 +1,4 @@
-const reviewNumericFields=['design_cfm','osa_cfm','osa_min_cfm','esp','total_sp','motor_hp','motor_volts','motor_fla','design_gpm','cooling_edb','cooling_ewb','cooling_ldb','cooling_lwb','heating_cfm','heating_edb','heating_ldb','heating_input_btu','heating_output_btu','cooling_total_btu','cooling_sensible_btu','electric_heating_edb','electric_heating_ldb','heater_volts','heater_phase','heater_amps','heater_stages','heating_ewt','heating_lwt','water_dp_ft'];
+const reviewNumericFields=['quantity','design_cfm','osa_cfm','osa_min_cfm','esp','total_sp','motor_hp','motor_volts','motor_fla','design_gpm','cooling_edb','cooling_ewb','cooling_ldb','cooling_lwb','heating_cfm','heating_edb','heating_ldb','heating_input_btu','heating_output_btu','cooling_total_btu','cooling_sensible_btu','electric_heating_edb','electric_heating_ldb','heater_volts','heater_phase','heater_amps','heater_stages','heating_ewt','heating_lwt','water_dp_ft'];
 const reviewEvidenceFields=['selected_cfm','heater_kw'];
 const reviewTextFields=['manufacturer','model','unit_type','service','equipment_location','area_served','heating_type'];
 function mergeSourceFiles(current,incoming){
@@ -11,7 +11,7 @@ function mergeSourceFiles(current,incoming){
   if(files.reduce((n,f)=>n+f.size,0)>200000000)throw Error('Combined source documents exceed 200 MB. Remove a file before adding more.');
   return files;
 }
-function fieldLabel(key){return ({exhaust_cfm:'Hood exhaust CFM',supply_cfm:'Hood supply CFM (evidence only)',makeup_air_cfm:'Hood makeup CFM (evidence only)',heater_volts:'Heater design volts',heater_phase:'Heater phases (1 or 3)',heater_amps:'Heater design amps',heater_stages:'Heater stages',heating_type:'Heating type: ELECTRIC, GAS, or HOT WATER',heating_ewt:'Heating entering water temperature',heating_lwt:'Heating leaving water temperature',water_dp_ft:'Water pressure drop (ft)',cooling_edb:'Cooling entering dry bulb °F',cooling_ewb:'Cooling entering wet bulb °F',cooling_ldb:'Cooling leaving dry bulb °F',cooling_lwb:'Cooling leaving wet bulb °F',heating_edb:'Heating entering dry bulb °F',heating_ldb:'Heating leaving dry bulb °F',heating_cfm:'Heating CFM',heating_input_btu:'Heating input BTU/h',heating_output_btu:'Heating output BTU/h'})[key]||key.replaceAll('_',' ');}
+function fieldLabel(key){return ({quantity:'Physical quantity under this printed tag',exhaust_cfm:'Hood exhaust CFM',supply_cfm:'Hood supply CFM (evidence only)',makeup_air_cfm:'Hood makeup CFM (evidence only)',heater_volts:'Heater design volts',heater_phase:'Heater phases (1 or 3)',heater_amps:'Heater design amps',heater_stages:'Heater stages',heating_type:'Heating type: ELECTRIC, GAS, or HOT WATER',heating_ewt:'Heating entering water temperature',heating_lwt:'Heating leaving water temperature',water_dp_ft:'Water pressure drop (ft)',cooling_edb:'Cooling entering dry bulb °F',cooling_ewb:'Cooling entering wet bulb °F',cooling_ldb:'Cooling leaving dry bulb °F',cooling_lwb:'Cooling leaving wet bulb °F',heating_edb:'Heating entering dry bulb °F',heating_ldb:'Heating leaving dry bulb °F',heating_cfm:'Heating CFM',heating_input_btu:'Heating input BTU/h',heating_output_btu:'Heating output BTU/h'})[key]||key.replaceAll('_',' ');}
 function reviewCoverage(records, outlets) {
   if(!records.length&&!outlets.length)return 'No equipment or outlets extracted. This is an empty takeoff; review the source documents before building a job report.';
   const populated=records.filter(r=>r.status==='VERIFIED'&&r.template).length;
@@ -22,10 +22,10 @@ function reviewCoverage(records, outlets) {
 function sourceReadiness(records,outlets,images,comparison){
   const verified=records.filter(r=>r.status==='VERIFIED').length;
   const unresolved=records.filter(r=>!['VERIFIED','EXCLUDED'].includes(r.status)).length;
-  const pendingImages=images.filter(c=>!c.accepted).length;
+  const pendingImages=images.filter(c=>!c.accepted&&!c.excluded).length;
   const problems=comparison?comparison.rows.filter(r=>r.status!=='match').length:0;
-  const imageOutlets=images.filter(c=>!c.accepted&&c.kind==='diffuser').length;
-  const imageEquipment=images.filter(c=>!c.accepted&&['equipment','kitchen_hood'].includes(c.kind)).length;
+  const imageOutlets=images.filter(c=>!c.accepted&&!c.excluded&&c.kind==='diffuser').length;
+  const imageEquipment=images.filter(c=>!c.accepted&&!c.excluded&&['equipment','kitchen_hood'].includes(c.kind)).length;
   const empty=!records.length&&!outlets.length&&!images.length;
   const title=empty?'No equipment or outlets extracted — source review required':
     !records.length&&!outlets.length?'Image candidates found — source confirmation required':verified+' equipment verified · '+unresolved+' equipment unresolved';
@@ -73,6 +73,8 @@ function validateSavedReview(data, templates, forms, tagPattern) {
     if(r.template!==undefined&&(typeof r.template!=='string'||r.template!==''&&!Object.hasOwn(forms,r.template))) invalid();
     if(r.coil_template!==undefined&&!['','Coil DX GAS HT.xlsx','COIL DX HP ELE.xlsx','Coil WTR CLG WTR HT.xlsx'].includes(r.coil_template)) invalid();
     for(const field of fields) if(r[field]!==undefined&&r[field]!==null&&r[field]!==''&&!numeric(r[field])) invalid();
+    if(r.quantity!=null&&r.quantity!==''&&(!Number.isInteger(Number(r.quantity))||Number(r.quantity)<1||Number(r.quantity)>100)) invalid();
+    if(r.instance_locations!==undefined&&(!Array.isArray(r.instance_locations)||r.instance_locations.length>100||r.instance_locations.some(x=>typeof x!=='string'||x.length>120))) invalid();
     if(r.design_cfm!=null&&r.design_cfm!==''&&r.osa_cfm!=null&&r.osa_cfm!==''&&Number(r.osa_cfm)>Number(r.design_cfm)) invalid();
     for(const key of reviewTextFields) if(r[key]!==undefined&&(typeof r[key]!=='string'||r[key].length>120)) invalid();
     if(r.heater_phase!=null&&r.heater_phase!==''&&![1,3].includes(Number(r.heater_phase))) invalid();
@@ -144,4 +146,106 @@ function renderScanReview(){
  box.hidden=!scanStateBlocked(scanState);
  $('partial-coverage').textContent=scanState.source_checkpoints.map(c=>c.name+': native '+c.native_status+'; image '+c.image_status+(c.reason?' — '+c.reason:'')).concat(scanState.warnings).join('\n');
  $('partial-review-ack').checked=false;$('partial-review-note').value='';
+}
+
+
+// Stable source observations survive review edits; CFM/room are not identity.
+function outletFromImage(candidate){
+ const outlet={include:false,type:candidate.type||'',size:candidate.size||'',design_cfm:candidate.review_values?.design_cfm??null,system:'',location:'',source:candidate.source,reference:'page '+candidate.page,evidence:candidate.evidence_text||''};
+ for(const key of ['position','region','region_coordinate_space','shape','quantity','quantity_unresolved'])if(candidate[key]!==undefined)outlet[key]=JSON.parse(JSON.stringify(candidate[key]));
+ outlet.observation={type:outlet.type,size:outlet.size,design_cfm:outlet.design_cfm};
+ return outlet;
+}
+function samePhysicalOutlet(a,b){
+ if(a.source!==b.source||a.reference!==b.reference)return false;
+ if(!Array.isArray(a.position)||!Array.isArray(b.position)||a.position.length!==2||b.position.length!==2)return false;
+ return a.position.every(Number.isFinite)&&b.position.every(Number.isFinite)&&Math.hypot(a.position[0]-b.position[0],a.position[1]-b.position[1])<=2;
+}
+function reconcileReviewedOutlets(previous,native,images,retried){
+ const observations=native.map(o=>({...o}));
+ for(const candidate of images.filter(c=>c.kind==='diffuser')){
+  const o=outletFromImage(candidate);
+  // Only materialize an image observation already represented by a review row.
+  if(previous.some(old=>samePhysicalOutlet(old,o))&&!observations.some(old=>samePhysicalOutlet(old,o)))observations.push(o);
+ }
+ const consumed=new Set(),result=[];
+ for(const old of previous){
+  const matches=observations.map((o,i)=>samePhysicalOutlet(old,o)?i:-1).filter(i=>i>=0);
+  const affected=old.source===retried;
+  if(matches.length===1&&!consumed.has(matches[0])){
+   const index=matches[0],incoming=observations[index];consumed.add(index);
+   result.push(affected?{...old,include:false,prior_inclusion:old.include!==false,
+    latest_observation:{type:incoming.type,size:incoming.size,design_cfm:incoming.design_cfm},
+    review_notice:'This source was retried. Your reviewed values and associations were retained. Compare the new source observation, then check Include again.'}:old);
+  }else{
+   for(const index of matches)consumed.add(index);
+   result.push(affected?{...old,include:false,prior_inclusion:old.include!==false,
+    review_notice:matches.length?'Ambiguous repeated source observations: resolve this physical outlet before including.':'This outlet was not recovered on retry. Your prior row is retained; check the source before including it.'}:old);
+  }
+ }
+ for(let i=0;i<native.length;i++)if(!consumed.has(i))result.push(observations[i]);
+ if(result.length>500)throw Error('Outlet review limit exceeded; previous review was preserved.');
+ return result;
+}
+function assignOutletBatch(outlets,indices,values,note){
+ if(!Array.isArray(indices)||!indices.length||new Set(indices).size!==indices.length||indices.some(i=>!Number.isInteger(i)||i<0||i>=outlets.length))throw Error('Select the specific outlets to update.');
+ const changes={};for(const key of ['system','location','size'])if(String(values[key]||'').trim())changes[key]=String(values[key]).trim().toUpperCase();
+ if(!Object.keys(changes).length)throw Error('Enter a system, room or neck size to assign.');
+ if(Object.values(changes).some(x=>x.length>120))throw Error('Assignment text is too long.');
+ if(typeof note!=='string'||note.trim().length<10||note.length>500)throw Error('Describe the source evidence for this assignment (10–500 characters).');
+ if(indices.some(i=>(outlets[i].review_history||[]).length>=30))throw Error('Review history limit reached; save this review before starting another batch.');
+ const action={note:note.trim(),at:new Date().toISOString(),rows:indices.map(i=>({index:i,before:Object.fromEntries(Object.keys(changes).map(k=>[k,outlets[i][k]??''])),after:changes}))};
+ const result=outlets.map((o,i)=>indices.includes(i)?{...o,...changes,review_history:[...(o.review_history||[]),{kind:'batch_assignment',note:action.note,at:action.at,source:o.source,reference:o.reference,before:action.rows.find(r=>r.index===i).before,after:changes}]}:o);
+ return {outlets:result,action};
+}
+function undoOutletBatch(outlets,action){
+ if(!action||action.rows.some(r=>!outlets[r.index]||Object.entries(r.after).some(([k,v])=>outlets[r.index][k]!==v)))throw Error('These fields changed after the batch. Review them individually; newer edits were preserved.');
+ return outlets.map((o,i)=>{const row=action.rows.find(r=>r.index===i);return row?{...o,...row.before,review_history:[...(o.review_history||[]),{kind:'undo_batch',at:new Date().toISOString(),batch_at:action.at}]}:o;});
+}
+
+
+let humanSourceReview=null,humanPageReviews=[];
+function sourceInventorySnapshot(payload){
+ const recordKeys=['tag','status','template','coil_template','source','reference','instance_locations',...reviewNumericFields,'heater_kw',...reviewTextFields];
+ const outletKeys=['include','type','size','system','location','design_cfm','source','reference','position','quantity','quantity_unresolved'];
+ const project=(rows,keys)=>rows.map(r=>Object.fromEntries(keys.filter(k=>Object.hasOwn(r,k)).map(k=>[k,r[k]])));
+ return {project:payload.project||'',location:payload.location||'',templates:payload.templates||[],standard:payload.standard||'Commercial',records:project(payload.records||[],recordKeys),diffusers:project(payload.diffusers||[],outletKeys),image_decisions:(payload.image_review||[]).map(r=>({accepted:r.accepted??false,excluded:r.excluded??false,exclusion_note:r.exclusion_note||'',tag:r.tag||'',source:r.source||'',page:r.page??null,position:r.position??null}))};
+}
+function sourceReviewErrors(payload){
+ const state=payload.scan_state||{},review=payload.source_review;
+ if(!review||typeof review!=='object')return ['Human source review has not been approved'];
+ const errors=[];
+ if(review.version!==1||review.approved!==true)errors.push('Human source review has not been approved');
+ if(!['incomplete','review_required'].includes(state.status)||state.complete_takeoff!==false)errors.push('Sources are unscanned, outdated or unknown');
+ if(JSON.stringify(review.scan_state)!==JSON.stringify(state))errors.push('Source scan changed after human review');
+ if(JSON.stringify(review.inventory)!==JSON.stringify(sourceInventorySnapshot(payload)))errors.push('Design inventory changed after human review');
+ if(typeof review.note!=='string'||review.note.trim().length<20||review.note.trim().length>1000)errors.push('Record the review basis and deliberate blanks (20–1000 characters)');
+ const checkpoints=state.source_checkpoints||[],pages=review.pages;
+ if(!checkpoints.length||!Array.isArray(pages)||pages.length>30000)return [...errors,'Source pages have not been accounted for'];
+ const expected=new Set(),actual=new Set();
+ for(const source of checkpoints){
+  if(!Number.isInteger(source.pages)||source.pages<1||source.pages>300||! /^[a-f0-9]{64}$/.test(source.sha256||'')){errors.push('Re-upload sources with page counts and content identities');continue;}
+  for(let page=1;page<=source.pages;page++)expected.add(JSON.stringify([source.name,source.sha256,page]));
+ }
+ for(const page of pages){
+  if(!page||typeof page.source!=='string'||typeof page.sha256!=='string'||!Number.isInteger(page.page)){errors.push('Invalid human page review');continue;}
+  const key=JSON.stringify([page.source,page.sha256,page.page]);if(actual.has(key))errors.push('Duplicate human page review');actual.add(key);
+  if(!['reviewed','not_applicable'].includes(page.disposition)||typeof page.note!=='string'||page.note.trim().length<10||page.note.trim().length>500)errors.push('Every page needs a reviewed / not applicable disposition and source note');
+ }
+ if(actual.size!==expected.size||[...actual].some(k=>!expected.has(k)))errors.push('Every uploaded page must be accounted for against its source hash');
+ if((payload.records||[]).some(r=>!['VERIFIED','EXCLUDED'].includes(r.status)))errors.push('Resolve every equipment review row');
+ if((payload.image_review||[]).some(c=>c.accepted!==true&&!(c.excluded===true&&typeof c.exclusion_note==='string'&&c.exclusion_note.trim().length>=10&&c.exclusion_note.trim().length<=500)))errors.push('Resolve every image candidate: add it or exclude it with a reason');
+ if(!(payload.records||[]).some(r=>r.status==='VERIFIED')&&!(payload.diffusers||[]).some(o=>o.include===true))errors.push('The reviewed inventory is empty');
+ const supplyUnits=new Set((payload.records||[]).filter(r=>r.status==='VERIFIED'&&!['Exhaust Fans _Sm._.xlsx','Exhaust Fans _Std._.xlsx','Kitchen Hood.xlsx','Chiller - Air Cooled.xlsx','Chiller - Water Cooled.xlsx'].includes(r.template)).map(r=>String(r.tag||'').trim().toUpperCase()));
+ for(const outlet of payload.diffusers||[]){if(outlet.include!==true)continue;
+  if(!supplyUnits.has(String(outlet.system||'').trim().toUpperCase()))errors.push('Every included supply outlet must belong to a verified supply unit in this inventory');
+  if(outlet.quantity_unresolved||outlet.quantity!==undefined&&outlet.quantity!==1)errors.push('Resolve repeated outlet quantities into physical rows before approval');
+  if(['source','reference','type','system','location','design_cfm'].some(k=>outlet[k]===undefined||outlet[k]===null||outlet[k]===''))errors.push('Included outlets need source, type, system, location and design CFM; document deliberate neck-size blanks in the review basis');
+ }
+ return [...new Set(errors)];
+}
+function sourceReviewApproved(payload){return sourceReviewErrors(payload).length===0;}
+function makeSourceReview(payload,pages,note){
+ const review=JSON.parse(JSON.stringify({version:1,approved:true,scan_state:payload.scan_state,inventory:sourceInventorySnapshot(payload),pages,note}));
+ const errors=sourceReviewErrors({...payload,source_review:review});if(errors.length)throw Error(errors.join('. '));return review;
 }

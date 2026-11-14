@@ -70,6 +70,10 @@ def equipment_candidates(words,source,page,method):
     for item in parse_page(tuples,page,source):
         # SERVES references in another unit's schedule are not equipment rows.
         if item.get('basis')=='PLAN_TAG':continue
+        def supported(evidence):
+            scores=[confidence.get((tuple(w[:4]),w[4])) for w in evidence]
+            return bool(scores) and all(c is not None and c>=80 for c in scores)
+        if item.get('identity_words') and not supported(item['identity_words']):continue
         values={k:v for k,v in item.get('values',{}).items() if k in UNIT_TOTALS}
         if item.get('tag') in seen:continue
         seen.add(item['tag'])
@@ -79,12 +83,15 @@ def equipment_candidates(words,source,page,method):
             scores=[confidence.get((tuple(w[:4]),w[4])) for w in evidence]
             if confident or (scores and all(c is not None and c>=80 for c in scores)):
                 reviewed[field]=value
+        reviewed_text={k:v for k,v in item.get('text',{}).items()
+                       if confident or supported(item.get('text_words',{}).get(k,[]))}
         found.append({'kind':'equipment','tag':item['tag'],'source':source,'page':page,
             'method':method,'status':'UNVERIFIED','include':False,
-            'review_values':reviewed,'values':{},
+            'review_values':reviewed,'values':{},'review_text':reviewed_text,
+            'field_evidence':{k:v for k,v in item.get('field_evidence',{}).items() if k in reviewed},
             'review_reasons':['Image schedule candidate: compare every value, equipment ID, column heading and source revision.'
                 if confident else 'OCR confidence is checked per tag, heading and value; uncertain fields left blank for manual source review.'],
-            'template':inferred_form(item['tag'],{'text_proposed':item.get('text',{})}), 'evidence':words[:300],
+            'template':inferred_form(item['tag'],{'text_proposed':reviewed_text}), 'evidence':words[:300],
             'confidence_min':min((w.get('confidence') or 0 for w in words),default=0)})
     return found
 
@@ -352,7 +359,7 @@ def extract_local(data, source='synthetic.pdf', budget=Budget(), engine=tesserac
                 page_pixels += pixels
 
             def recognize(rect, psm, full_page=False, word_sink=None, table=False, callout=False,
-                          glyph=False, parse_candidates=True, pending=None):
+                          glyph=False, parse_candidates=True, pending=None, outline_hint=None):
                 nonlocal attempted, regions_attempted, page_regions, page_attempted
                 max_pixels = budget.max_pixels if full_page else min(budget.max_pixels, budget.max_region_pixels)
                 # Use the remaining pixel allowance for the next table instead
@@ -380,7 +387,8 @@ def extract_local(data, source='synthetic.pdf', budget=Budget(), engine=tesserac
                     attempted += 1
                 try:
                     remaining = max(.001, page_deadline - time.monotonic())
-                    ocr = abp_outline_tables.read(page,rect,native,pixels,remaining,region_engine) if table and psm==11 else None
+                    ocr = abp_outline_tables.read(page,rect,native,pixels,remaining,region_engine,
+                                                 transposed_hint=outline_hint) if table and psm==11 else None
                     if ocr is None:
                         remaining=max(.001,page_deadline-time.monotonic())
                         ocr = (engine(page, pixels, remaining) if full_page else
@@ -388,6 +396,15 @@ def extract_local(data, source='synthetic.pdf', budget=Budget(), engine=tesserac
                                              max_zoom=zoom))
                     if len(ocr) > budget.max_words:
                         raise ValueError('OCR word budget exceeded')
+                    if table and psm==11 and outline_hint is None:
+                        from abp_transposed import reread_requested
+                        if reread_requested(ocr):
+                            refined=[]
+                            recognize(rect,11,word_sink=refined,table=True,parse_candidates=False,outline_hint=ocr)
+                            if refined:
+                                # A fresh bounded read replaces the crop, not guessed
+                                # character repairs or fabricated confidence scores.
+                                ocr=refined
                     if table and psm==11:
                         # Re-read uncertain printed IDs in isolation. Only an
                         # exact repeat can strengthen confidence; no digit repair.

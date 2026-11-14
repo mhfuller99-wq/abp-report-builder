@@ -18,6 +18,8 @@ from abp_schedule import parse_pdf, annotate
 from abp_scan import scan as bounded_pdf_scan, ScanIncomplete
 from abp_review_gate import partial_review_allowed, partial_review_lines
 from abp_ocr_candidates import reconcile_diffuser_sources
+from abp_inventory import validate_inventory, expand_instances
+from abp_source_review import source_review_approved
 
 ROOT=Path(__file__).resolve().parent
 TEMPLATES=ROOT/'03_Workbooks_and_Master_Templates'
@@ -580,7 +582,7 @@ def add_template(wb,path):
                     if dxf.border is not None:dxf.border=bake_painted(dxf.border,source_palette)
     source.close()
 
-def validate_scan_state(state, acknowledgement=None):
+def validate_scan_state(state, acknowledgement=None, reviewed_design=False):
     if not isinstance(state,dict) or state.get('status') not in ('not_scanned','review_required','incomplete','stale','unknown'):
         raise ValueError('Invalid source scan state')
     if state.get('complete_takeoff') is not False:raise ValueError('Invalid takeoff completeness')
@@ -596,7 +598,7 @@ def validate_scan_state(state, acknowledgement=None):
     warnings=state.get('warnings')
     if not isinstance(warnings,list) or len(warnings)>1000 or any(not isinstance(w,str) or len(w)>2000 for w in warnings):raise ValueError('Invalid scan warnings')
     if state['status'] in ('incomplete','stale','unknown') or any(c['native_status']!='completed_native_stage' or c['image_status'] in ('incomplete','not_started') for c in checkpoints):
-        if not partial_review_allowed(state, acknowledgement):
+        if not reviewed_design and not partial_review_allowed(state, acknowledgement):
             raise ValueError('Source review is incomplete or source files changed. Rescan, or explicitly acknowledge the displayed incomplete coverage with a manual review note; no partial report was built.')
 
 
@@ -605,7 +607,7 @@ def validate_api_scan_state(payload):
     if not isinstance(payload,dict) or 'scan_state' not in payload:
         raise ValueError('Source scan history is required. Refresh the app and rescan the complete source set before building. Older API clients must send scan_state; no report was built.')
     state=payload['scan_state']
-    validate_scan_state(state, payload.get('scan_acknowledgement'))
+    validate_scan_state(state, payload.get('scan_acknowledgement'), source_review_approved(payload))
     has_evidence=any(payload.get(key) for key in ('records','tags','diffusers','image_review','image_coverage'))
     if state['status']=='not_scanned' and (has_evidence or state['source_checkpoints']):
         raise ValueError('Unscanned state is only valid for a blank worksheet pack. Rescan source documents before building extracted equipment.')
@@ -619,7 +621,7 @@ def validate_api_scan_state(payload):
 
 def validate_payload(payload):
     if not isinstance(payload,dict):raise ValueError('Invalid request')
-    if 'scan_state' in payload:validate_scan_state(payload['scan_state'], payload.get('scan_acknowledgement'))
+    if 'scan_state' in payload:validate_scan_state(payload['scan_state'], payload.get('scan_acknowledgement'), source_review_approved(payload))
     if not str(payload.get('project','')).strip():raise ValueError('Project name is required')
     if len(str(payload.get('project','')))>180:raise ValueError('Project name too long')
     if len(str(payload.get('location','')))>180:raise ValueError('Location too long')
@@ -667,6 +669,7 @@ def validate_payload(payload):
             if unit_form(r)!='Air Moving Equipment.xlsx':raise ValueError(f'{tag}: minimum outside air requires an air-moving form')
             if r.get('osa_cfm') in (None,'') or float(r['osa_min_cfm'])>float(r['osa_cfm']):raise ValueError(f'{tag}: minimum outside air must not exceed maximum outside air')
         if r.get('design_cfm') not in (None,'') and r.get('osa_cfm') not in (None,'') and float(r['osa_cfm'])>float(r['design_cfm']):raise ValueError(f'{tag}: outside-air CFM exceeds total design CFM')
+    validate_inventory(records)
     outlets=payload.get('diffusers',[])
     if not isinstance(outlets,list) or len(outlets)>500:raise ValueError('Invalid supply outlets')
     for item in outlets:
@@ -772,6 +775,7 @@ def build(payload):
     wb=Workbook();wb.remove(wb.active)
     records=sorted([{**r,'tag':canonical_tag(r['tag'])} for r in payload.get('records',[])],key=lambda r:[int(t) if t.isdigit() else t for t in re.split(r'(\d+)',r['tag'])])
     if not isinstance(records,list):raise ValueError('Invalid review records')
+    records=expand_instances(records)
     requested=[name for name in selected if not banned_initial_template(name)]
     equipment=[]
     for name in requested:
@@ -800,7 +804,7 @@ def build(payload):
     populate_equipment(wb,records,equipment)
     populate_diffusers(wb,payload.get('diffusers') or [])
     prepare_documentation(wb,excel_safe(project),excel_safe(str(payload.get('location',''))),support)
-    disclosure=partial_review_lines(payload.get('scan_state') or {},payload.get('scan_acknowledgement'))
+    disclosure=[] if source_review_approved(payload) else partial_review_lines(payload.get('scan_state') or {},payload.get('scan_acknowledgement'))
     if disclosure:
         note_sheets=[ws for ws in wb if getattr(ws,'_template_file',None)=='Notes.xlsx']
         if not note_sheets:raise ValueError('The original Notes form is required for partial-review disclosure')
@@ -954,7 +958,7 @@ function renderImageReview(){
   const values=document.createElement('p');values.textContent=Object.entries(candidate.review_values||{}).map(([k,v])=>fieldLabel(k)+': '+v).join(' · ')||'No reliable design value. Enter it manually after checking the source.';panel.append(values);
   const label=document.createElement('label'),confirmation=document.createElement('input');confirmation.type='checkbox';label.append(confirmation,document.createTextNode(' I checked this candidate against the original source and reviewed duplicates.'));panel.append(label);
   const add=document.createElement('button');add.type='button';add.textContent=candidate.accepted?'Added to review':'Add checked candidate to review';add.disabled=!!candidate.accepted;panel.append(add);
-  const existingOutlet=candidate.kind==='diffuser'&&(candidate.native_outlet_match===true||candidate.native_outlet_ambiguous===true);
+  const existingOutlet=candidate.kind==='diffuser'&&(candidate.native_outlet_match===true||candidate.native_outlet_ambiguous===true||diffusers.some(o=>samePhysicalOutlet(o,outletFromImage(candidate))));
   if(existingOutlet){add.disabled=true;add.textContent='Review existing outlet row';}
   if(candidate.kind==='kitchen_hood'&&!savedTagPattern.test(candidate.tag)){add.disabled=true;add.textContent='Manual preparation needed for this tag format';}
   const status=document.createElement('p');status.setAttribute('role','status');panel.append(status);
@@ -967,7 +971,8 @@ function renderImageReview(){
     if(!row){if(records.length>=500)throw Error('Equipment review limit reached.');row={tag:candidate.tag,template:(typeof unitForms!=='undefined'&&Object.hasOwn(unitForms,candidate.template)?candidate.template:defaultUnitForm(candidate.tag)),source:candidate.source,reference:'page '+candidate.page,status:'UNVERIFIED',candidates:[]};records.push(row);}
     const values={};for(const [key,value] of Object.entries(candidate.review_values||{}))if(reviewNumericFields.includes(key))values[key]=value;
     row.candidates??=[];if(row.candidates.length>=30)throw Error('Source candidate limit reached; compare this page manually.');
-    row.candidates.push({source:candidate.source,reference:'page '+candidate.page,evidence:'Source-confirmed image schedule; still requires equipment verification.',basis:'MANUAL_IMAGE_REVIEW',values});
+    row.candidates.push({source:candidate.source,reference:'page '+candidate.page,evidence:'Source-confirmed image schedule; still requires equipment verification.',basis:'MANUAL_IMAGE_REVIEW',values,text:candidate.review_text||{},field_evidence:candidate.field_evidence||{}});
+    for(const key of reviewTextFields)if(candidate.review_text?.[key]&&(!row[key]||row[key]===''))row[key]=candidate.review_text[key];
     for(const [key,value] of Object.entries(values))if(row[key]===undefined||row[key]===null||row[key]==='')row[key]=value;
     row.status='UNVERIFIED';row.flags??=[];row.flags.push('Checked image candidate added. Existing nonblank inputs were retained; resolve any conflicts before verification.');
     tags=records.map(r=>r.tag);document.querySelectorAll('.template input').forEach(el=>{if(el.value===row.template)el.checked=true});
@@ -979,17 +984,17 @@ function renderImageReview(){
     document.querySelectorAll('.template input').forEach(el=>{if(el.value==='Kitchen Hood.xlsx')el.checked=true});
    }else{
     if(diffusers.length>=500)throw Error('Outlet review limit reached.');
-    diffusers.push({include:false,type:candidate.type||'',size:candidate.size||'',design_cfm:candidate.review_values?.design_cfm??null,system:'',location:'',source:candidate.source,reference:'page '+candidate.page,evidence:candidate.evidence_text||''});
+    diffusers.push(outletFromImage(candidate));
    }
    candidate.accepted=true;renderReview();renderOutlets();renderImageReview();updateWorkspace();
   }catch(error){status.textContent=error.message}};
   box.append(panel);
  });
 }
-function projectPayload(){return {scan_state:scanState,scan_acknowledgement:currentScanAcknowledgement(),project:$('project').value,location:$('location').value,standard:$('standard').value,layout:'individual',tags,records,diffusers,image_review:imageReview,image_coverage:imageCoverage,image_coverage_truncated:imageCoverageTruncated,templates:[...document.querySelectorAll('.template input:checked')].map(x=>x.value)}}
+function projectPayload(){return {source_review:humanSourceReview,human_page_reviews:humanPageReviews,scan_state:scanState,scan_acknowledgement:currentScanAcknowledgement(),project:$('project').value,location:$('location').value,standard:$('standard').value,layout:'individual',tags,records,diffusers,image_review:imageReview,image_coverage:imageCoverage,image_coverage_truncated:imageCoverageTruncated,templates:[...document.querySelectorAll('.template input:checked')].map(x=>x.value)}}
 $('saveproject').onclick=()=>{try{const data=serializeSavedReview({format:'ABP-PREFIELD-REVIEW',version:1,...projectPayload()});const url=URL.createObjectURL(new Blob([data],{type:'application/json'}));const a=document.createElement('a');a.href=url;a.download='ABP_Project_Review.json';a.click();setTimeout(()=>URL.revokeObjectURL(url),10000)}catch(error){$('status').textContent=error.message}};
-$('loadproject').onchange=async ev=>{try{const f=ev.target.files[0];if(!f)return;assertSavedReviewSize(f.size);if(!templatesReady)throw Error('Wait for report worksheets to load before restoring a review.');const data=validateSavedReview(await parseSavedReviewFile(f),[...document.querySelectorAll('.template input')].map(x=>x.value),unitForms,savedTagPattern);scanState=validateScanState(data.scan_state);renderScanReview();$('scanstatus').textContent=scanStateNotice();$('project').value=String(data.project||'');$('location').value=String(data.location||'');$('standard').value=data.standard==='USACE'?'USACE':'Commercial';records=data.records;tags=records.map(r=>r.tag);diffusers=Array.isArray(data.diffusers)?data.diffusers:[];imageReview=Array.isArray(data.image_review)?data.image_review:[];imageCoverage=Array.isArray(data.image_coverage)?data.image_coverage:[];imageCoverageTruncated=data.image_coverage_truncated===true;renderImageCoverage();renderImageReview();document.querySelectorAll('.template input').forEach(x=>x.checked=data.templates.includes(x.value));renderReview();renderOutlets();$('status').textContent='Saved review restored. Recheck verification and source revisions before building your report.'}catch(e){$('status').textContent=e.message}};
-$('generate').onclick=async()=>{if($('buildmethod').value==='reference'){await generateReference();return}if(!templatesReady){$('status').textContent=templateError||'Wait for report worksheets to load.';return}let payload=projectPayload();if(scanBuildBlocked(scanState,payload.scan_acknowledgement)){$('status').textContent=scanStateNotice()+'Save your review and rescan changed sources, or review incomplete coverage and enter a note and acknowledgment below the scan results.';return}if(!payload.project.trim()){$('status').textContent='Add a project name before building your report.';$('project').focus();return}if(!payload.templates.length){$('status').textContent='Select at least one report worksheet.';$('template-panel').scrollIntoView();return}$('generate').disabled=true;$('generate').textContent='Building report…';$('generate').setAttribute('aria-busy','true');$('status').textContent='Building your report...';try{let r=await fetch('/api/build',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});if(!r.ok)await readApiJson(r);let blob=await r.blob(),url=URL.createObjectURL(blob),a=document.createElement('a');a.href=url;a.download=(payload.project.replace(/[^a-z0-9_-]+/gi,'_')||'ABP')+'_PreField_TAB.xlsx';a.click();setTimeout(()=>URL.revokeObjectURL(url),10000);$('status').textContent=(payload.scan_acknowledgement?'Reviewed partial report built. SOURCE SCAN REMAINS INCOMPLETE. See Notes for omissions. ':'Report built. ')+reviewCoverage(payload.records,payload.diffusers)}catch(e){$('status').textContent=e.message}finally{$('generate').disabled=false;$('generate').textContent='Build report';$('generate').removeAttribute('aria-busy')}};
+$('loadproject').onchange=async ev=>{try{const f=ev.target.files[0];if(!f)return;assertSavedReviewSize(f.size);if(!templatesReady)throw Error('Wait for report worksheets to load before restoring a review.');const data=validateSavedReview(await parseSavedReviewFile(f),[...document.querySelectorAll('.template input')].map(x=>x.value),unitForms,savedTagPattern);humanSourceReview=null;humanPageReviews=Array.isArray(data.human_page_reviews)?data.human_page_reviews:[];scanState=validateScanState(data.scan_state);renderScanReview();$('scanstatus').textContent=scanStateNotice();$('project').value=String(data.project||'');$('location').value=String(data.location||'');$('standard').value=data.standard==='USACE'?'USACE':'Commercial';records=data.records;tags=records.map(r=>r.tag);diffusers=Array.isArray(data.diffusers)?data.diffusers:[];imageReview=Array.isArray(data.image_review)?data.image_review:[];imageCoverage=Array.isArray(data.image_coverage)?data.image_coverage:[];imageCoverageTruncated=data.image_coverage_truncated===true;renderImageCoverage();renderImageReview();document.querySelectorAll('.template input').forEach(x=>x.checked=data.templates.includes(x.value));renderReview();renderOutlets();$('status').textContent='Saved review restored. Recheck verification and source revisions before building your report.'}catch(e){$('status').textContent=e.message}};
+$('generate').onclick=async()=>{if($('buildmethod').value==='reference'){await generateReference();return}if(!templatesReady){$('status').textContent=templateError||'Wait for report worksheets to load.';return}let payload=projectPayload();if(!sourceReviewApproved(payload)&&scanBuildBlocked(scanState,payload.scan_acknowledgement)){$('status').textContent=scanStateNotice()+'Save your review and rescan changed sources, or review incomplete coverage and enter a note and acknowledgment below the scan results.';return}if(!payload.project.trim()){$('status').textContent='Add a project name before building your report.';$('project').focus();return}if(!payload.templates.length){$('status').textContent='Select at least one report worksheet.';$('template-panel').scrollIntoView();return}$('generate').disabled=true;$('generate').textContent='Building report…';$('generate').setAttribute('aria-busy','true');$('status').textContent='Building your report...';try{let r=await fetch('/api/build',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});if(!r.ok)await readApiJson(r);let blob=await r.blob(),url=URL.createObjectURL(blob),a=document.createElement('a');a.href=url;a.download=(payload.project.replace(/[^a-z0-9_-]+/gi,'_')||'ABP')+'_PreField_TAB.xlsx';a.click();setTimeout(()=>URL.revokeObjectURL(url),10000);$('status').textContent=(payload.scan_acknowledgement?'Reviewed partial report built. SOURCE SCAN REMAINS INCOMPLETE. See Notes for omissions. ':'Report built. ')+reviewCoverage(payload.records,payload.diffusers)}catch(e){$('status').textContent=e.message}finally{$('generate').disabled=false;$('generate').textContent='Build report';$('generate').removeAttribute('aria-busy')}};
 
 function updateWorkspace(){
  const reference=$('buildmethod').value==='reference';

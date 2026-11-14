@@ -41,7 +41,7 @@ This only requests a reread. Concatenated fragments never become a value here.
     return found[:4]
 
 
-def read(page, box, native, pixels, timeout, engine):
+def read(page, box, native, pixels, timeout, engine, transposed_hint=None):
     import pymupdf
     started = time.monotonic()
     rect = pymupdf.Rect(box)
@@ -51,7 +51,9 @@ def read(page, box, native, pixels, timeout, engine):
     # A register range table or generic catalog page is not an equipment table.
     furnace = all(token in title for token in ('SPLIT', 'SCHEDULE', 'FURNACE', 'MARK', 'E.S.P.', 'CFM'))
     fan = all(token in title for token in ('EXHAUST', 'FAN', 'SCHEDULE', 'ID', 'E.S.P.', 'CFM'))
-    if not (furnace or fan) or len(headers)>500 or pixels<10_000:
+    from abp_transposed import reread_requested
+    transposed = bool(transposed_hint) and reread_requested(transposed_hint)
+    if not (furnace or fan or transposed) or len(headers)>500 or pixels<10_000:
         return None
     if any(re.fullmatch(r'ACTUAL|MEASURED|INITIAL|FINAL', w['text'], re.I) for w in headers):
         return None
@@ -67,7 +69,11 @@ def read(page, box, native, pixels, timeout, engine):
         # are associated components and never independent air-moving units.
         render_rect.x1=marks[1]['box'][0]-4
     paths=page.get_cdrawings()
-    if len(paths)>20_000:
+    # The count covers the whole sheet, while the rendered selection is capped
+    # below at 3,000 local glyph paths / 50,000 operations. Dense unrelated
+    # details must not veto a small schedule. Keep a hard traversal ceiling and
+    # the existing deadline, raster and local geometry caps.
+    if len(paths)>50_000:
         return None
     selected=[];operations=0
     matrix=page.rotation_matrix

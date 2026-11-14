@@ -1,7 +1,7 @@
 """Source-based equipment review and job-specific ABP form assembly."""
 import re
 
-NUMERIC_FIELDS = ('design_cfm','osa_cfm','osa_min_cfm','esp','total_sp','motor_hp','motor_volts','motor_fla','design_gpm',
+NUMERIC_FIELDS = ('quantity','design_cfm','osa_cfm','osa_min_cfm','esp','total_sp','motor_hp','motor_volts','motor_fla','design_gpm',
                   'cooling_edb','cooling_ewb','cooling_ldb','cooling_lwb',
                   'heating_cfm','heating_edb','heating_ldb','heating_input_btu','heating_output_btu',
                   'cooling_total_btu','cooling_sensible_btu','electric_heating_edb','electric_heating_ldb',

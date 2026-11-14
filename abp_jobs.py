@@ -8,6 +8,7 @@ import copy, gc, hashlib, json, os, re, secrets, shutil, tempfile, threading, ti
 from contextlib import ExitStack
 from pathlib import Path
 from abp_limits import mark_staging
+from abp_reader_version import READER_VERSION
 
 TTL=2*60*60
 MAX_RETAINED_BYTES=350_000_000
@@ -55,7 +56,14 @@ class SourceRunner:
     def cache(self,index,kind):return self.job['root']/f'{index}-{kind}.json'
     def load(self,index,kind):
         path=self.cache(index,kind)
-        return json.loads(path.read_text(encoding='utf-8')) if path.exists() else None
+        if not path.exists():return None
+        cached=json.loads(path.read_text(encoding='utf-8'))
+        if cached.get('_reader_version')!=READER_VERSION or cached.get('_source_sha256')!=self.job['sources'][index]['sha256']:
+            return None
+        return cached
+    def save(self,index,kind,result):
+        write_json(self.cache(index,kind),{**result,'_reader_version':READER_VERSION,
+                                        '_source_sha256':self.job['sources'][index]['sha256']})
     def selection(self,index,kind):
         selection=self.job.get('retry')
         if selection is None:return True,None
@@ -75,7 +83,7 @@ class SourceRunner:
         kwargs.update(timeout=min(90,remaining),ocr_timeout=0,page_numbers=pages,
                       progress=lambda p:self.update(source=name,source_index=index,**p))
         result=scan(name,stream,**kwargs)
-        result=merge_pages(old,result,pages,'native');write_json(self.cache(index,'native'),result)
+        result=merge_pages(old,result,pages,'native');self.save(index,'native',result)
         return result
     def image(self,name,stream,identity,timeout):
         from abp_resilient import deferred_ocr
@@ -98,7 +106,7 @@ class SourceRunner:
         for p in range(1,(native.get('pages') or 0)+1):
             coverage.setdefault(p,{'page':p,'status':'budget_skipped','unexamined_content':'Page not completed; retry this page or review manually.'})
         result['coverage']=[coverage[p] for p in sorted(coverage)]
-        write_json(self.cache(index,'images'),result);return result
+        self.save(index,'images',result);return result
 
 class Jobs:
     def __init__(self,work_lock,read_sources,build,reference_build=None,*,janitor=False):

@@ -324,6 +324,7 @@ def schedule_candidates(words, page_number, name):
         take(r'MOTOR FLA', 'motor_fla')
         take(r'MOTOR VOLTS|VOLTAGE \(V\)', 'motor_volts')
         take(r'FAN RPM', 'fan_rpm')
+        take(r'QTY\.?|QUANTITY', 'quantity')
         take(r'MCA', 'unit_mca')
         if (family == 'AHU' and phrases(header,r'NATURAL GAS FURNACE')
                 and phrases(header,r'TYPE') and phrases(header,r'TOTAL')

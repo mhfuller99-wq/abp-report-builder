@@ -115,7 +115,7 @@ UNIT_FORMS={
     'Unit Heater WTR.xlsx':{'tag':'C3','area_served':'C4','heating_cfm':'C10','heating_edb':'C12','heating_ldb':'C13','heating_ewt':'C17','heating_lwt':'C18','design_gpm':'C20','water_dp_ft':'C21'},
     'Air Moving Equipment.xlsx':{'tag':'G3','design_cfm':'G17','osa_cfm':'G18','total_sp':'G20','esp':'G21','motor_hp':'T4','motor_volts':'T5','motor_fla':'T6','service':'G10','area_served':'G11','equipment_location':'G12','unit_type':'G9'},
     'Exhaust Fans _Std._.xlsx':{'tag':'H3','design_cfm':'H17','esp':'H21','motor_hp':'U4','motor_volts':'U5','motor_fla':'U6','service':'H10','area_served':'H11'},
-    'Exhaust Fans _Sm._.xlsx':{'tag':'C3','design_cfm':'C10','esp':'C11'},
+    'Exhaust Fans _Sm._.xlsx':{'tag':'C3','manufacturer':'C4','model':'C5','service':'C6','area_served':'C7','design_cfm':'C10','esp':'C11'},
     'Fan Coil Units WTR.xlsx':{'tag':'C3','design_cfm':'C11','osa_cfm':'C12','area_served':'C4'},
     'Fan Coil Units DX.xlsx':{'tag':'C3','area_served':'C4','design_cfm':'C11','osa_cfm':'C12','cooling_edb':'C16','cooling_ewb':'C17','cooling_ldb':'C18','cooling_lwb':'C19','heating_edb':'C26','heating_ldb':'C27'},
     # Printed labels are DX COOLING and GAS HEATING. BTU rows are formulas.
@@ -124,7 +124,7 @@ UNIT_FORMS={
     'Kitchen Hood.xlsx':{'tag':'D3','design_cfm':'D6'},
     'Chiller - Air Cooled.xlsx':{'tag':'C3','design_gpm':'C17'},
 }
-TEXT_CELLS={'service','area_served','equipment_location','unit_type'}
+TEXT_CELLS={'manufacturer','model','service','area_served','equipment_location','unit_type'}
 
 HEATER_FORMS={'ELECTRIC':'Unit Heater ELE.xlsx','GAS':'Unit Heater GAS.xlsx','HOT WATER':'Unit Heater WTR.xlsx'}
 
@@ -165,6 +165,8 @@ def doas_fan_coil(record):
 
 def inferred_form(tag, record=None):
     tag=str(tag or '').upper()
+    if re.match(r'^F-\d',tag) and ((record or {}).get('text_proposed') or {}).get('unit_type') == 'FURNACE':
+        return 'Air Moving Equipment.xlsx'
     if re.match(r'^(EUH|GUH|CUH|UH)[- ]?\d',tag):return heater_form(tag, record)
     if re.match(r'^DOAS[- ]?\d',tag):return doas_fan_coil(record)
     if re.match(r'^(AHU|PAHU|PU|RTU|OAU|MAU|AC)[- ]?\d',tag):return 'Air Moving Equipment.xlsx'

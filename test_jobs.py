@@ -4,10 +4,20 @@ from unittest.mock import patch
 from abp_jobs import Jobs,merge_pages,SourceRunner
 
 class JobTests(unittest.TestCase):
+    def test_cached_reader_and_source_identity_must_both_match(self):
+        with tempfile.TemporaryDirectory() as directory:
+            job={'root':Path(directory),'sources':[{'name':'synthetic.pdf','sha256':'a'*64}]}
+            runner=SourceRunner(job,lambda **k:None)
+            runner.save(0,'native',{'pages':2,'status':'completed_native_stage'})
+            self.assertEqual(runner.load(0,'native')['pages'],2)
+            with patch('abp_jobs.READER_VERSION','different-reader'):
+                self.assertIsNone(runner.load(0,'native'))
+            job['sources'][0]['sha256']='b'*64
+            self.assertIsNone(runner.load(0,'native'))
     def test_short_image_sources_allow_both_page_passes_within_existing_caps(self):
         for count,remaining,expected in ((2,900,90),(20,900,120),(2,25,25)):
             with tempfile.TemporaryDirectory() as directory:
-                job={'root':Path(directory),'sources':[{'name':'synthetic.pdf'}]}
+                job={'root':Path(directory),'sources':[{'name':'synthetic.pdf','sha256':'a'*64}]}
                 with patch('abp_jobs.time.monotonic',return_value=100):
                     runner=SourceRunner(job,lambda **k:None);runner.deadline=100+remaining
                     result={'review_candidates':[],'coverage':[],'warnings':[]}

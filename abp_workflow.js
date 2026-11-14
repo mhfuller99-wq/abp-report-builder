@@ -52,19 +52,71 @@ function renderOutletTotals(){
  if(duplicates)box.append(workflowElement('p','Review '+duplicates+' repeated source positions before building. Repeated flow values alone are not treated as duplicates.'));
  if(new Set(diffusers.map(o=>o.source).filter(Boolean)).size>1)box.append(workflowElement('p','Multiple source documents contain outlet candidates. Review revisions and duplicates; no drawing is silently superseded.'));
 }
+let outletBatchUndo=null;
 renderOutlets=function(){
  workflowOriginalOutlets();const box=$('outlets');if(!diffusers.length)return;
  const totals=workflowElement('div');totals.id='outlet-totals';box.insertBefore(totals,box.children[2]);
  const table=box.querySelector('table'),rows=[...table.querySelectorAll('tr')].slice(1);
- rows.forEach((row,index)=>{const o=diffusers[index];row.lastElementChild.append(document.createElement('br'),workflowButton('View outlet '+(index+1)+' source',()=>viewSource(o.source,sourcePage(o.reference),o.position)));});
+ const batch=workflowElement('fieldset'),legend=workflowElement('legend','Assign reviewed fields to selected outlets');batch.append(legend);
+ batch.append(workflowElement('p','Select the individual physical outlets below. Assign only fields supported by the original source; blank batch fields leave existing values unchanged.'));
+ const inputs={};for(const key of ['system','location','size']){const label=workflowElement('label',({system:'Serving equipment',location:'Room / area',size:'Neck size (not face or branch size)'})[key]),input=document.createElement('input');input.maxLength=120;input.setAttribute('aria-label','Batch '+key);label.append(input);inputs[key]=input;batch.append(label);}
+ const evidenceLabel=workflowElement('label','Source evidence for this assignment'),evidenceInput=document.createElement('input');evidenceInput.maxLength=500;evidenceInput.setAttribute('aria-label','Batch source evidence');evidenceLabel.append(evidenceInput);batch.append(evidenceLabel);
+ const message=workflowElement('p');message.setAttribute('role','status');
+ batch.append(workflowButton('Apply to selected outlets',()=>{try{const indices=Array.from(table.querySelectorAll('[data-batch-outlet]')).filter(x=>x.checked).map(x=>Number(x.dataset.batchOutlet));const result=assignOutletBatch(diffusers,indices,Object.fromEntries(Object.entries(inputs).map(([k,v])=>[k,v.value])),evidenceInput.value);diffusers=result.outlets;outletBatchUndo=result.action;renderOutlets();workflowChanged();}catch(e){message.textContent=e.message;}}));
+ const undo=workflowButton('Undo last assignment',()=>{try{diffusers=undoOutletBatch(diffusers,outletBatchUndo);outletBatchUndo=null;renderOutlets();workflowChanged();}catch(e){message.textContent=e.message;}});undo.disabled=!outletBatchUndo;batch.append(undo,message);table.parentElement.insertBefore(batch,table);
+ table.querySelector('tr').prepend(workflowElement('th','Batch'));
+ rows.forEach((row,index)=>{
+  const o=diffusers[index],cell=workflowElement('td'),check=document.createElement('input');check.type='checkbox';check.dataset.batchOutlet=index;check.setAttribute('aria-label','Select outlet '+(index+1)+' for batch assignment');cell.append(check);row.prepend(cell);
+  row.lastElementChild.append(document.createElement('br'),workflowButton('View outlet '+(index+1)+' source',()=>viewSource(o.source,sourcePage(o.reference),o.position)));
+  if(o.review_notice)row.lastElementChild.append(workflowElement('p',o.review_notice));
+  if(o.latest_observation)row.lastElementChild.append(workflowElement('p','Latest source observation: '+Object.entries(o.latest_observation).map(([k,v])=>k+': '+(v??'UNREAD')).join(' · ')));
+ });
  // Display by serving system without changing original candidate indices.
  // Stable dataset mapping avoids interpreting identical CFM values as one outlet.
  const originalRows=[...table.querySelectorAll('tr')].slice(1);originalRows.forEach((row,i)=>row.dataset.outletIndex=i);
  originalRows.sort((a,b)=>String(diffusers[+a.dataset.outletIndex].system||'').localeCompare(String(diffusers[+b.dataset.outletIndex].system||''))||Number(a.dataset.outletIndex)-Number(b.dataset.outletIndex));
  for(const row of originalRows)table.append(row);renderOutletTotals();
 };
-renderReview=function(){workflowOriginalReview();renderReadiness();};
-renderImageReview=function(){workflowOriginalImageReview();$('image-review').querySelectorAll('fieldset').forEach((panel,index)=>{const c=imageReview[index];if(c)panel.append(workflowButton('View image candidate '+(index+1)+' source',()=>viewSource(c.source,c.page)));});};
+renderReview=function(){
+ workflowOriginalReview();
+ if(records.length){
+  const details=workflowElement('details'),summary=workflowElement('summary','Physical unit locations for shared equipment tags');details.append(summary);
+  details.append(workflowElement('p','Review Physical quantity in the submittal details above. If one printed tag represents multiple units, enter one distinct room or location per line. Each unit gets its own space on the applicable equipment tab; the printed tag stays unchanged.'));
+  records.forEach((r,i)=>{
+   const label=workflowElement('label',r.tag+' physical locations'),input=document.createElement('textarea');
+   input.value=(r.instance_locations||[]).join('\n');input.maxLength=12100;input.setAttribute('aria-label',r.tag+' physical locations');
+   input.oninput=()=>{r.instance_locations=input.value.split('\n').map(x=>x.trim()).filter(Boolean);r.status='UNVERIFIED';const status=document.querySelector('[data-status="'+i+'"]');if(status)status.value='UNVERIFIED';workflowChanged();};
+   label.append(input);details.append(label);
+  });$('review').append(details);
+ }
+ renderReadiness();
+};
+renderImageReview=function(){workflowOriginalImageReview();$('image-review').querySelectorAll('fieldset').forEach((panel,index)=>{
+ const c=imageReview[index];if(!c)return;
+ panel.append(workflowButton('View image candidate '+(index+1)+' source',()=>viewSource(c.source,c.page,c.position)));
+ if(c.accepted)return;
+ if(c.excluded){panel.append(workflowElement('p','Excluded after source review: '+c.exclusion_note),workflowButton('Reopen candidate',()=>{c.excluded=false;c.exclusion_note='';renderImageReview();workflowChanged();}));return;}
+ const label=workflowElement('label','Reason to exclude this candidate'),input=document.createElement('input');input.maxLength=500;input.setAttribute('aria-label','Candidate '+(index+1)+' exclusion reason');label.append(input);panel.append(label);
+ const status=workflowElement('p');status.setAttribute('role','status');panel.append(workflowButton('Exclude with source reason',()=>{if(input.value.trim().length<10){status.textContent='Enter a source-based reason of at least 10 characters.';return;}c.excluded=true;c.exclusion_note=input.value.trim();renderImageReview();workflowChanged();}),status);
+ });};
+let humanReviewNote='';
+function renderHumanReview(box){
+ const panel=workflowElement('details');panel.append(workflowElement('summary','Complete human source review'));
+ panel.append(workflowElement('p','Account for every source page, resolve equipment and image candidates, and review the final design inventory. This does not mark automatic scanning complete or certify field measurements.'));
+ const message=workflowElement('p');message.setAttribute('role','status');
+ for(const source of scanState.source_checkpoints){
+  const row=workflowElement('fieldset');row.append(workflowElement('legend',source.name));
+  const reviewed=humanPageReviews.filter(p=>p.source===source.name&&p.sha256===source.sha256);row.append(workflowElement('p',reviewed.length+' of '+(source.pages||'UNKNOWN')+' pages accounted for'));
+  const range=workflowElement('input');range.placeholder='1, 3-5';range.setAttribute('aria-label',source.name+' reviewed pages');const label=workflowElement('label','Reviewed page numbers');label.append(range);row.append(label);
+  const disposition=workflowElement('select');disposition.setAttribute('aria-label',source.name+' page disposition');for(const [value,text] of [['reviewed','Relevant design content reviewed'],['not_applicable','No applicable TAB design data']]){const option=workflowElement('option',text);option.value=value;disposition.append(option);}row.append(disposition);
+  const note=workflowElement('input');note.maxLength=500;note.setAttribute('aria-label',source.name+' page review note');const nl=workflowElement('label','What was checked on these pages');nl.append(note);row.append(nl);
+  row.append(workflowButton('Record page review',()=>{try{const pages=parseRetryPages(range.value);if(!pages||!source.pages||pages.some(p=>p>source.pages))throw Error('Enter explicit page numbers within this document.');if(note.value.trim().length<10)throw Error('Describe what was checked in at least 10 characters.');humanPageReviews=humanPageReviews.filter(p=>!(p.source===source.name&&p.sha256===source.sha256&&pages.includes(p.page)));for(const page of pages)humanPageReviews.push({source:source.name,sha256:source.sha256,page,disposition:disposition.value,note:note.value.trim()});humanSourceReview=null;workflowSave();renderReadiness();}catch(e){message.textContent=e.message;}}));
+  if(reviewed.length){const list=workflowElement('details');list.append(workflowElement('summary','Recorded page decisions'));for(const p of reviewed.sort((a,b)=>a.page-b.page))list.append(workflowElement('p','Page '+p.page+' · '+p.disposition.replaceAll('_',' ')+' · '+p.note));row.append(list);}panel.append(row);
+ }
+ const label=workflowElement('label','Final review basis, differences and deliberate blanks'),input=workflowElement('textarea');input.maxLength=1000;input.value=humanReviewNote;input.setAttribute('aria-label','Final source review basis');input.oninput=()=>{humanReviewNote=input.value;};label.append(input);panel.append(label);
+ const confirm=workflowElement('input');confirm.type='checkbox';const confirmLabel=workflowElement('label');confirmLabel.append(confirm,document.createTextNode(' I compared the final inventory with all applicable source pages, resolved differences, and accounted for missing design information.'));panel.append(confirmLabel);
+ panel.append(workflowButton('Approve reviewed design inventory',()=>{try{if(!confirm.checked)throw Error('Confirm the completed source review first.');humanSourceReview=makeSourceReview(workflowOriginalPayload(),humanPageReviews,humanReviewNote);workflowSave();renderReadiness();}catch(e){message.textContent=e.message;}}),message);box.append(panel);
+}
 function renderReadiness(){
  const box=$('readiness');if(!box)return;box.replaceChildren();
  const verified=records.filter(r=>r.status==='VERIFIED').length,unresolved=records.filter(r=>!['VERIFIED','EXCLUDED'].includes(r.status));
@@ -76,7 +128,7 @@ function renderReadiness(){
   const link=workflowElement('a','Review image candidates');link.href='#image-review';box.append(link);
  }
  if(assessment.problems)box.append(workflowElement('p',assessment.problems+' office comparison findings require review below. Missing IDs, differences and unsupported values remain unresolved.'));
- box.append(workflowElement('p',scanStateBlocked(scanState)?'Source coverage is incomplete or outdated. Review the omissions and acknowledge a partial report before building.':'Source extraction still requires manual review; it is never certified as a complete takeoff.'));
+ box.append(workflowElement('p',sourceReviewApproved(workflowOriginalPayload())?'DESIGN INVENTORY REVIEWED BY A PERSON. Automatic coverage stays separately recorded; this is not field certification.':scanStateBlocked(scanState)?'Source coverage is incomplete or outdated. Review the omissions and acknowledge a partial report before building.':'Source extraction still requires manual review; it is never certified as a complete takeoff.'));
  for(const record of unresolved){
   const row=workflowElement('div');row.className='readiness-row';
   const missing=['design_cfm','esp'].filter(k=>record[k]===undefined||record[k]===null||record[k]==='');
@@ -84,6 +136,7 @@ function renderReadiness(){
    if(record.source&&/\.pdf$/i.test(record.source))row.append(workflowButton('View '+record.tag+' source',()=>viewSource(record.source,sourcePage(record.reference))));box.append(row);
  }
  if(scanState.source_checkpoints.length){
+  renderHumanReview(box);
   const heading=workflowElement('h4','Source coverage and page retries');box.append(heading);
   scanState.source_checkpoints.forEach(c=>{
    const row=workflowElement('div');row.className='source-checkpoint';
@@ -123,6 +176,8 @@ async function retrySource(name,stage,pages){
  workflowSave();await followWorkflowJob();
 }
 function applyScanResult(data,retrySourceName){
+ const nextOutlets=retrySourceName?reconcileReviewedOutlets(diffusers,data.diffusers||[],data.image_review||[],retrySourceName):(data.diffusers||[]);
+ outletBatchUndo=null;
  scanState=validateScanState({status:data.scan_status||'unknown',complete_takeoff:false,source_checkpoints:data.source_checkpoints||[],warnings:data.warnings||[]});renderScanReview();
  const fresh=(data.records||[]).map(r=>{const next={...r};applyProposed(next);return next;});
  if(retrySourceName){
@@ -132,10 +187,11 @@ function applyScanResult(data,retrySourceName){
    return affected?{...r,...old,candidates:r.candidates,occurrences:r.occurrences,proposed:r.proposed,text_proposed:r.text_proposed,flags:r.flags,status:'UNVERIFIED'}:old;
   });
   for(const old of prior.values())records.push({...old,status:'UNVERIFIED'});
-  const key=o=>JSON.stringify([o.source,o.reference,o.position||[],o.type,o.size,o.design_cfm]);const old=new Map(diffusers.map(o=>[key(o),o]));
-  diffusers=(data.diffusers||[]).map(o=>old.has(key(o))?old.get(key(o)):o);
+  diffusers=nextOutlets;
  }else{records=fresh;diffusers=data.diffusers||[];}
- tags=records.map(r=>r.tag);imageReview=data.image_review||[];imageCoverage=data.image_coverage||[];imageCoverageTruncated=data.image_coverage_truncated===true;
+ tags=records.map(r=>r.tag);imageReview=data.image_review||[];
+ if(retrySourceName)for(const candidate of imageReview)if(candidate.kind==='diffuser'&&diffusers.some(o=>samePhysicalOutlet(o,outletFromImage(candidate))))candidate.accepted=true;
+imageCoverage=data.image_coverage||[];imageCoverageTruncated=data.image_coverage_truncated===true;
  scanJobId=data.job_id;sourceManifest=data.source_manifest||[];
  renderReview();renderOutlets();renderImageReview();renderImageCoverage();
  $('scanstatus').textContent=(data.scan_status==='incomplete'?'SCAN INCOMPLETE. Completed results retained. ':'Source results ready for review. ')+scanCandidateSummary(records,diffusers,imageReview)+(retrySourceName?'Retried '+retrySourceName+'; affected equipment requires fresh verification. ':'')+(data.warnings||[]).join(' | ');
@@ -192,6 +248,7 @@ function renderComparison(){
  wrap.append(table);box.append(wrap);
 }
 function restoreWorkflow(saved){
+ humanSourceReview=null;humanReviewNote='';humanPageReviews=Array.isArray(saved.review?.human_page_reviews)?saved.review.human_page_reviews:[];
  const data=validateSavedReview(saved.review,[...document.querySelectorAll('.template input')].map(x=>x.value),unitForms,savedTagPattern);
  scanState=validateScanState(data.scan_state);renderScanReview();records=data.records;tags=records.map(r=>r.tag);diffusers=data.diffusers||[];imageReview=data.image_review||[];imageCoverage=data.image_coverage||[];imageCoverageTruncated=data.image_coverage_truncated===true;
  $('project').value=data.project;$('location').value=data.location;$('standard').value=data.standard;document.querySelectorAll('.template input').forEach(x=>x.checked=data.templates.includes(x.value));
@@ -241,10 +298,10 @@ function installWorkflow(){
   }
   try{if(workflowBusy)return;if(!templatesReady)throw Error('Wait for report worksheets to load.');const payload=workflowOriginalPayload();
    if(emptySourceReport(payload.records,payload.diffusers,scanState))throw Error('No reviewed equipment or included outlets. The source takeoff is empty; retry the schedules or add source-reviewed equipment before building a job report.');
-   if(scanBuildBlocked(scanState,payload.scan_acknowledgement))throw Error(scanStateNotice()+'Review source omissions and enter a fresh partial-report acknowledgment.');
+   if(!sourceReviewApproved(payload)&&scanBuildBlocked(scanState,payload.scan_acknowledgement))throw Error(scanStateNotice()+'Review source omissions and enter a fresh partial-report acknowledgment.');
    if(!payload.project.trim())throw Error('Enter a project name.');if(!payload.templates.length)throw Error('Select at least one worksheet.');
    $('status').textContent='Submitting report build…';
-   workflowJob={...(await readApiJson(await fetch('/api/jobs/build',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)}))),project:payload.project,partial:!!payload.scan_acknowledgement};
+   workflowJob={...(await readApiJson(await fetch('/api/jobs/build',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)}))),project:payload.project,partial:!!payload.scan_acknowledgement&&!sourceReviewApproved(payload)};
    workflowSave();await followWorkflowJob();
   }catch(e){$('status').textContent=e.message;workflowControls(false);}
  };

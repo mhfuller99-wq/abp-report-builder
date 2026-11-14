@@ -1,0 +1,14 @@
+const fs=require('fs'),vm=require('vm'),assert=require('assert');
+const c=vm.createContext({});vm.runInContext(fs.readFileSync(__dirname+'/abp_ui.js','utf8'),c);
+const state={status:'incomplete',complete_takeoff:false,warnings:['Image page incomplete'],source_checkpoints:[{name:'test.pdf',sha256:'a'.repeat(64),pages:2,native_status:'completed_native_stage',image_status:'incomplete'}]};
+const p={project:'TEST',location:'TEST',standard:'Commercial',templates:['Exhaust Fans _Sm._.xlsx'],scan_state:state,records:[{tag:'EF-7',status:'VERIFIED',design_cfm:90}],diffusers:[],image_review:[]};
+const pages=[1,2].map(page=>({source:'test.pdf',sha256:'a'.repeat(64),page,disposition:'reviewed',note:'Checked original drawing and schedule.'}));
+const note='Reviewed all design data; motor ratings absent from sources remain blank.';
+p.source_review=c.makeSourceReview(p,pages,note);assert(c.sourceReviewApproved(p));assert.equal(state.status,'incomplete');assert.equal(state.complete_takeoff,false);
+p.records[0].design_cfm=100;assert(!c.sourceReviewApproved(p));p.records[0].design_cfm=90;
+assert.throws(()=>c.makeSourceReview(p,pages.slice(1),note));assert.throws(()=>c.makeSourceReview(p,[...pages,pages[0]],note));
+p.image_review=[{kind:'equipment',tag:'EF-8',page:1,source:'test.pdf'}];assert.throws(()=>c.makeSourceReview(p,pages,note));
+p.image_review[0].excluded=true;p.image_review[0].exclusion_note='Duplicate reference shown on a detail.';p.source_review=c.makeSourceReview(p,pages,note);assert(c.sourceReviewApproved(p));
+p.image_review[0].excluded=false;assert(!c.sourceReviewApproved(p));
+assert(!c.sourceReviewApproved({...p,source_review:null,scan_acknowledgement:{acknowledged:true,note,scan_state:state}}));
+console.log('Human page review and resolved inventory are required separately; changed sources, edits and pending candidates invalidate approval.');
