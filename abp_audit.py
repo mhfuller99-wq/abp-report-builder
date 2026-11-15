@@ -46,7 +46,6 @@ def group_plan(origins):
 def measurement_cells(master,filename):
     if filename in ('NOTES','PROJECT INFO'):return set()
     from abp_reference import reset_measurements
-    from abp_design import UNIT_FORMS
     probe=master.parent.copy_worksheet(master)
     sentinel='ABP_MEASUREMENT_PROBE_19'
     for row in probe:
@@ -54,9 +53,11 @@ def measurement_cells(master,filename):
             if not isinstance(cell,MergedCell) and cell.data_type!='f' and cell.value is None:cell.value=sentinel
     reset_measurements(probe)
     blanks={c.coordinate for row in probe for c in row if not isinstance(c,MergedCell) and c.value is None and master[c.coordinate].data_type!='f'}
-    # Nameplate/design inputs may be intentionally populated from reviewed sources.
-    for mapping in UNIT_FORMS.values():
-        for address in mapping.values():blanks.discard(address)
+    # Reference cleanup clears historical nameplate FLA. Reviewed design FLA is
+    # permitted only in these original forms. Never exempt an address merely
+    # because another worksheet uses that coordinate for a design input.
+    design_nameplates={'AIR MOVING EQUIPMENT':{'T6'},'EXHAUST FAN':{'U6'}}
+    blanks.difference_update(design_nameplates.get(filename,set()))
     master.parent.remove(probe)
     return blanks
 

@@ -3,7 +3,7 @@ from copy import copy
 from unittest.mock import patch
 from openpyxl import load_workbook
 import abp_server as app
-from abp_audit import audit_report
+from abp_audit import audit_report,measurement_cells
 from abp_fidelity import sheet_paths,NS
 
 class DownloadAuditTests(unittest.TestCase):
@@ -43,6 +43,20 @@ class DownloadAuditTests(unittest.TestCase):
     def test_actual_input_blocks_download(self):
         with self.assertRaisesRegex(ValueError,'measurement'):
             audit_report(self.changed(self.cell_change('H6','v','400')),self.origins)
+    def test_design_exemptions_are_local_to_the_original_form(self):
+        diffuser=load_workbook(app.LOOKUP['Supply Diffusers.xlsx']).active
+        blanks=measurement_cells(diffuser,diffuser.title)
+        self.assertTrue({f'{col}{row}' for col in ('F','H') for row in range(6,27)} <= blanks)
+        # H6 is a model on the standard fan but an actual diffuser reading.
+        # Motor design FLA is allowed only on the matching original form.
+        for filename,design,actual,label in [
+                ('Air Moving Equipment.xlsx','T6','T17','N6'),
+                ('Exhaust Fans _Std._.xlsx','U6','U17','O6')]:
+            master=load_workbook(app.LOOKUP[filename]).active
+            self.assertEqual(master[label].value.strip(),'FULL LOAD AMPS')
+            cells=measurement_cells(master,master.title)
+            self.assertNotIn(design,cells)
+            self.assertIn(actual,cells)
     def test_changed_format_blocks_download(self):
         with self.assertRaisesRegex(ValueError,'formatting changed'):audit_report(self.changed(self.cell_change('G6','style','')),self.origins)
     def test_missing_traverse_blocks_download(self):
