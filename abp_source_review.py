@@ -7,7 +7,7 @@ inventory, template or project change. It does not certify field measurements.
 import copy,re
 from abp_job import NUMERIC_FIELDS,TEXT_FIELDS
 from abp_outlet_instances import outlet_instance_errors
-from abp_components import COMPONENT_FIELDS,component_errors
+from abp_components import COMPONENT_FIELDS,component_errors,is_component
 from abp_exhaust import EXHAUST_FIELDS,exhaust_errors
 
 AIR_PATH_FIELDS=('tag','kind','status','source','source_sha256','reference','location','note')
@@ -101,7 +101,7 @@ def source_review_errors(payload):
     if actual!=expected:errors.append('Every uploaded page must be accounted for against its source hash')
     records=payload.get('records',[]);outlets=payload.get('diffusers',[])
     errors.extend(outlet_instance_errors(outlets))
-    supply_units={str(r.get('tag','')).strip().upper() for r in records if r.get('status')=='VERIFIED'
+    supply_units={str(r.get('tag','')).strip().upper() for r in records if r.get('status')=='VERIFIED' and not is_component(r)
                   and r.get('template') not in ('Exhaust Fans _Sm._.xlsx','Exhaust Fans _Std._.xlsx','Kitchen Hood.xlsx','Chiller - Air Cooled.xlsx','Chiller - Water Cooled.xlsx')}
     supply_units.update(p.get('tag','') for p in payload.get('air_paths',[]) if p.get('status')=='VERIFIED' and p.get('kind')=='passive_supply')
     if any(r.get('status') not in ('VERIFIED','EXCLUDED') for r in records):errors.append('Resolve every equipment review row')

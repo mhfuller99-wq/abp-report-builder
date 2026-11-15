@@ -184,15 +184,16 @@ function renderManualSourceEntry(box,wasOpen,previousPanel){
   if(options)for(const [value,title] of options){const option=workflowElement('option',title);option.value=value;el.append(option);}
   fields[name]=el;label.append(el);parent.append(label);return el;
  }
- field('kind','Item kind',panel,[['equipment','Equipment'],['component','Integral exhaust component'],['outlet','Supply outlet'],['exhaust','Exhaust grille']]);
+ field('kind','Item kind',panel,[['equipment','Equipment'],['component','Integral exhaust component'],['supply_fans','Multiple supply fan motors'],['outlet','Supply outlet'],['exhaust','Exhaust grille']]);
  field('source','Source document',panel,[['','Choose original source'],...scanState.source_checkpoints.filter(s=>s.pages&&s.sha256).map(s=>[s.name,s.name])]);
  field('page','Source page');
  const equipment=workflowElement('fieldset'),outlet=workflowElement('fieldset');equipment.append(workflowElement('legend','Equipment identification'));outlet.append(workflowElement('legend','One physical supply outlet'));outlet.hidden=true;panel.append(equipment,outlet);
  field('tag','Equipment ID',equipment);field('template','Original equipment form',equipment,[['','Choose form'],...Object.keys(unitForms).map(name=>[name,worksheetLabel(name)])]);
- const component=workflowElement('fieldset');component.hidden=true;component.append(workflowElement('legend','Exhaust fan inside an air unit'),workflowElement('p','Enter the parent equipment ID. Its EXHAUST label is derived for the test form. Confirm the component and its own design values on the source; parent values are not copied.'));panel.append(component);
+ const component=workflowElement('fieldset');component.hidden=true;component.append(workflowElement('legend','Fans inside an air unit'),workflowElement('p','Enter the parent equipment ID. Component labels are derived for original test forms. Confirm the physical fan count and each fan’s own motor data; parent values are not copied. For multiple supply motors, keep airflow and coil data on the parent and clear its single-motor ratings before creating the group.'));panel.append(component);
  field('component_of','Parent equipment ID',component);
+ const countField=field('supply_fan_count','Number of supply fans on the original source',component);countField.type='number';countField.min=2;countField.max=20;countField.step=1;countField.parentElement.hidden=true;
  for(const [name,title] of [['type','Outlet type'],['design_cfm','Design CFM'],['system','Serving equipment or passive path ID'],['location','Room / area'],['size','Neck size, if supported'],['locator','Distinct physical locator'],['x','PDF X coordinate (optional)'],['y','PDF Y coordinate (optional)']])field(name,title,outlet);
- fields.kind.onchange=()=>{equipment.hidden=fields.kind.value!=='equipment';outlet.hidden=!['outlet','exhaust'].includes(fields.kind.value);component.hidden=fields.kind.value!=='component';outlet.querySelector('legend').textContent=fields.kind.value==='exhaust'?'One physical exhaust inlet — assign its exhaust fan':'One physical supply outlet';};
+ fields.kind.onchange=()=>{equipment.hidden=fields.kind.value!=='equipment';outlet.hidden=!['outlet','exhaust'].includes(fields.kind.value);component.hidden=!['component','supply_fans'].includes(fields.kind.value);countField.parentElement.hidden=fields.kind.value!=='supply_fans';outlet.querySelector('legend').textContent=fields.kind.value==='exhaust'?'One physical exhaust inlet — assign its exhaust fan':'One physical supply outlet';};
  field('note','Source evidence');const confirmation=workflowElement('input');confirmation.type='checkbox';confirmation.setAttribute('aria-label','Manual item source and duplicates checked');const label=workflowElement('label');label.append(confirmation,document.createTextNode(' I checked this physical item on the original page and checked the existing review for duplicates.'));panel.append(label);
  const message=workflowElement('p');message.setAttribute('role','status');
  panel.append(workflowButton('Add source-reviewed item',()=>{
@@ -201,10 +202,11 @@ function renderManualSourceEntry(box,wasOpen,previousPanel){
    const input={...Object.fromEntries(Object.entries(fields).map(([key,el])=>[key,el.value])),confirmed:confirmation.checked};
    const entry=input.kind==='exhaust'?{kind:'exhaust',item:makeExhaustOutlet(input,scanState,records,diffusers,exhaustOutlets)}:manualSourceEntry(input,scanState,records,diffusers,unitForms,savedTagPattern,airPaths);
    if(entry.kind==='equipment'){records=[...records,entry.item];tags=records.map(r=>r.tag);const check=[...document.querySelectorAll('.template input')].find(x=>x.value===entry.item.template);if(check)check.checked=true;}
+   else if(entry.kind==='equipment_group'){records=entry.records;tags=records.map(r=>r.tag);const check=[...document.querySelectorAll('.template input')].find(x=>x.value==='Air Moving Equipment.xlsx');if(check)check.checked=true;}
    else if(entry.kind==='exhaust'){exhaustOutlets=[...exhaustOutlets,entry.item];const check=[...document.querySelectorAll('.template input')].find(x=>x.value===exhaustTemplate);if(check)check.checked=true;}
    else diffusers=[...diffusers,entry.item];
    humanSourceReview=null;outletBatchUndo=null;outletRepeatUndo=null;renderReview();renderOutlets();workflowSave();updateWorkspace();renderReadiness(true);
-   $('job-status').textContent=entry.kind==='equipment'?'Equipment added from your source review. Enter supported design values and verify its review row.':entry.kind==='exhaust'?'Exhaust grille added unchecked. Review its source and fan connection in Exhaust grilles before including it.':'One physical outlet added from your source review. Check its fields, then include it in the supply sheet.';
+   $('job-status').textContent=entry.kind==='equipment_group'?'Supply fan motor forms added. Enter each motor’s supported ratings, then verify the parent and every fan. Whole-unit airflow stays on the parent.':entry.kind==='equipment'?'Equipment added from your source review. Enter supported design values and verify its review row.':entry.kind==='exhaust'?'Exhaust grille added unchecked. Review its source and fan connection in Exhaust grilles before including it.':'One physical outlet added from your source review. Check its fields, then include it in the supply sheet.';
   }catch(e){message.textContent=e.message;}
  }),message);
  for(const control of panel.querySelectorAll('input,textarea,select,button'))control.disabled=workflowBusy;

@@ -1,4 +1,4 @@
-const reviewNumericFields=['quantity','design_cfm','osa_cfm','osa_min_cfm','esp','total_sp','motor_hp','motor_volts','motor_phase','motor_fla','motor_rpm','design_gpm','cooling_edb','cooling_ewb','cooling_ldb','cooling_lwb','heating_cfm','heating_edb','heating_ldb','heating_input_btu','heating_output_btu','cooling_total_btu','cooling_sensible_btu','electric_heating_edb','electric_heating_ldb','heater_volts','heater_phase','heater_amps','heater_stages','heating_ewt','heating_lwt','water_dp_ft'];
+const reviewNumericFields=['quantity','supply_fan_count','design_cfm','osa_cfm','osa_min_cfm','esp','total_sp','motor_hp','motor_volts','motor_phase','motor_fla','motor_rpm','design_gpm','cooling_edb','cooling_ewb','cooling_ldb','cooling_lwb','heating_cfm','heating_edb','heating_ldb','heating_input_btu','heating_output_btu','cooling_total_btu','cooling_sensible_btu','electric_heating_edb','electric_heating_ldb','heater_volts','heater_phase','heater_amps','heater_stages','heating_ewt','heating_lwt','water_dp_ft'];
 const reviewEvidenceFields=['selected_cfm','heater_kw'];
 const reviewTextFields=['manufacturer','model','unit_type','service','equipment_location','area_served','heating_type'];
 const exhaustFields=['include','type','size','system','location','design_cfm','source','reference','source_sha256','evidence','position','position_coordinate_space','manual_locator','quantity','quantity_unresolved','exclusion_note'];
@@ -54,21 +54,30 @@ function makeExhaustOutlet(input,state,records,supply,exhaust){
  const errors=exhaustOutletErrors({records,diffusers:supply,exhaust_outlets:[...exhaust,item],scan_state:state,templates:[exhaustTemplate]},false);
  if(errors.length)throw Error(errors.join('. '));return item;
 }
-const componentFields=['component_of','component_kind','component_source_sha256','component_note'];
+const componentFields=['component_of','component_kind','component_source_sha256','component_note','component_index','component_count'];
+const motorFields=['motor_hp','motor_volts','motor_phase','motor_fla','motor_rpm'];
+function supplyFanCount(v){return Number.isInteger(v)&&v>=2&&v<=20?v:typeof v==='string'&&/^(?:[2-9]|1\d|20)$/.test(v.trim())?Number(v):null;}
 function isEquipmentComponent(record){return componentFields.some(key=>Object.hasOwn(record,key));}
 function equipmentComponentErrors(payload,requireVerified=true,checkSources=true){
  const records=payload.records===undefined?[]:payload.records;if(!Array.isArray(records)||records.some(r=>!r||typeof r!=='object'||Array.isArray(r)))return ['Invalid equipment component inventory'];
  const errors=[],seen=new Set(),one=value=>[undefined,null,'',1,'1'].includes(value);
  for(const r of records){
   if(!isEquipmentComponent(r))continue;
+  if(![undefined,null,''].includes(r.supply_fan_count))errors.push('Only the parent air unit can declare a supply fan count');
   const parent=r.component_of;
   if(typeof parent!=='string'||parent.length>70||!/^(RTU|AHU|MAU|MUA|DOAS|PKU|HP|AC|FCU|BCU)-[A-Z0-9]+(?:[.-][A-Z0-9]+)*$/.test(parent)){errors.push('Choose the printed ID of the parent air unit');continue;}
-  if(r.component_kind!=='integral_exhaust'||r.tag!==parent+' EXHAUST')errors.push('Integral exhaust labels must be derived from their parent unit');
-  if(seen.has(parent))errors.push('Only one integral exhaust review is allowed per parent unit');seen.add(parent);
+  const supply=r.component_kind==='integral_supply',index=r.component_index,count=r.component_count;
+  if(supply){
+   if(!Number.isInteger(index)||!Number.isInteger(count)||supplyFanCount(count)===null||index<1||index>count)errors.push('Supply fan forms need a source-confirmed count from 2 to 20 and a distinct index');
+   if(r.tag!==parent+' SUPPLY FAN '+index)errors.push('Supply fan labels must be derived from their parent and index');
+   if([...reviewNumericFields,'heater_kw'].some(k=>k!=='quantity'&&!motorFields.includes(k)&&![undefined,null,''].includes(r[k])))errors.push('Internal supply motor forms cannot copy or divide whole-unit airflow, pressure or coil data');
+  }else if(r.component_kind!=='integral_exhaust'||r.tag!==parent+' EXHAUST'||['component_index','component_count'].some(k=>Object.hasOwn(r,k)))errors.push('Integral exhaust labels must be derived from their parent unit');
+  const identity=JSON.stringify([parent,supply?'supply':'exhaust',supply?String(index):'']);
+  if(seen.has(identity))errors.push('Duplicate component role or supply fan index');seen.add(identity);
   const parents=records.filter(p=>p.tag===parent);
   if(parents.length!==1||isEquipmentComponent(parents[0])||parents[0].template!=='Air Moving Equipment.xlsx'||!one(parents[0].quantity))errors.push('An integral exhaust component needs one unambiguous parent air unit');
   else if(requireVerified&&r.status!=='EXCLUDED'&&parents[0].status!=='VERIFIED')errors.push('Verify the parent air unit before its integral exhaust component');
-  if(r.template!=='Exhaust Fans _Std._.xlsx'||![undefined,null,''].includes(r.coil_template)||!one(r.quantity)||(r.instance_locations!=null&&(!Array.isArray(r.instance_locations)||r.instance_locations.length)))errors.push('Use one original standard exhaust form for the linked component');
+  if(r.template!==(supply?'Air Moving Equipment.xlsx':'Exhaust Fans _Std._.xlsx')||(supply?r.coil_template!=='':![undefined,null,''].includes(r.coil_template))||!one(r.quantity)||(r.instance_locations!=null&&(!Array.isArray(r.instance_locations)||r.instance_locations.length)))errors.push('Use one applicable original form without a companion coil for each linked component');
   if(!['UNVERIFIED','VERIFIED','EXCLUDED'].includes(r.status))errors.push('Invalid equipment component review status');
   if(requireVerified&&!['VERIFIED','EXCLUDED'].includes(r.status))errors.push('Verify or exclude every integral exhaust component');
   if(typeof r.component_note!=='string'||r.component_note.trim().length<20||r.component_note.trim().length>500)errors.push('Record 20–500 characters of source evidence for the integral exhaust component');
@@ -76,8 +85,22 @@ function equipmentComponentErrors(payload,requireVerified=true,checkSources=true
   if(typeof r.source!=='string'||r.source.length<1||r.source.length>160||!page||typeof r.component_source_sha256!=='string'||!/^[a-f0-9]{64}$/.test(r.component_source_sha256)){errors.push('Integral exhaust components need their original source hash and page');continue;}
   if(checkSources){const checkpoints=payload.scan_state?.source_checkpoints;
    const sources=(Array.isArray(checkpoints)?checkpoints:[]).filter(s=>s&&s.name===r.source&&s.sha256===r.component_source_sha256);
-   if(sources.length!==1||!Number.isInteger(sources[0].pages)||Number(page[1])>sources[0].pages)errors.push('Integral exhaust source changed or is missing; review it against the current source');}
+   if(sources.length!==1||!Number.isInteger(sources[0].pages)||Number(page[1])>sources[0].pages)errors.push((supply?'Supply fan':'Integral exhaust')+' source changed or is missing; review it against the current source');}
  }
+ const parents=new Map(records.filter(r=>!isEquipmentComponent(r)&&typeof r.tag==='string').map(r=>[r.tag,r])),groups=new Map();
+ for(const r of records)if(r.component_kind==='integral_supply'){const key=String(r.component_of);groups.set(key,[...(groups.get(key)||[]),r]);}
+ for(const p of parents.values())if(![undefined,null,''].includes(p.supply_fan_count)&&!groups.has(p.tag))groups.set(p.tag,[]);
+ for(const [tag,children] of groups){
+  const parent=parents.get(tag),count=parent?supplyFanCount(parent.supply_fan_count):null;
+  if(!parent||parent.template!=='Air Moving Equipment.xlsx'||count===null){errors.push('Record the source-confirmed supply fan count on one parent air unit');continue;}
+  const indices=children.map(r=>r.component_index);
+  if(children.length!==count||new Set(indices).size!==count||indices.some(i=>!Number.isInteger(i)||i<1||i>count)||children.some(r=>r.component_count!==count))errors.push('Supply fan motor forms are missing or duplicated; account for every declared fan');
+  if(new Set(children.map(r=>JSON.stringify([r.source,r.reference,r.component_source_sha256]))).size!==1)errors.push('Each supply fan group must retain the same original count source');
+  if(motorFields.some(k=>![undefined,null,''].includes(parent[k])))errors.push('Put each motor rating on its own supply fan form; the parent has multiple motors');
+  if(requireVerified&&children.some(r=>r.status!==(parent.status==='EXCLUDED'?'EXCLUDED':'VERIFIED')))errors.push('Verify every supply fan motor form or exclude its parent and the entire fan group');
+ }
+ const componentTags=new Set(records.filter(isEquipmentComponent).map(r=>r.tag));
+ if(Array.isArray(payload.diffusers)&&payload.diffusers.some(o=>o&&o.include===true&&componentTags.has(o.system)))errors.push('Assign supply outlets to the parent air unit, not its internal motor-test forms');
  return [...new Set(errors)];
 }
 function mergeSourceFiles(current,incoming){
@@ -90,7 +113,7 @@ function mergeSourceFiles(current,incoming){
   if(files.reduce((n,f)=>n+f.size,0)>200000000)throw Error('Combined source documents exceed 200 MB. Remove a file before adding more.');
   return files;
 }
-function fieldLabel(key){return ({quantity:'Physical quantity under this printed tag',exhaust_cfm:'Hood exhaust CFM',supply_cfm:'Hood supply CFM (evidence only)',makeup_air_cfm:'Hood makeup CFM (evidence only)',heater_volts:'Heater design volts',heater_phase:'Heater phases (1 or 3)',heater_amps:'Heater design amps',heater_stages:'Heater stages',heating_type:'Heating type: ELECTRIC, GAS, or HOT WATER',heating_ewt:'Heating entering water temperature',heating_lwt:'Heating leaving water temperature',water_dp_ft:'Water pressure drop (ft)',cooling_edb:'Cooling entering dry bulb °F',cooling_ewb:'Cooling entering wet bulb °F',cooling_ldb:'Cooling leaving dry bulb °F',cooling_lwb:'Cooling leaving wet bulb °F',heating_edb:'Heating entering dry bulb °F',heating_ldb:'Heating leaving dry bulb °F',heating_cfm:'Heating CFM',heating_input_btu:'Heating input BTU/h',heating_output_btu:'Heating output BTU/h'})[key]||key.replaceAll('_',' ');}
+function fieldLabel(key){return ({quantity:'Physical quantity under this printed tag',supply_fan_count:'Supply fans inside this one air unit (use Multiple supply fan motors)',exhaust_cfm:'Hood exhaust CFM',supply_cfm:'Hood supply CFM (evidence only)',makeup_air_cfm:'Hood makeup CFM (evidence only)',heater_volts:'Heater design volts',heater_phase:'Heater phases (1 or 3)',heater_amps:'Heater design amps',heater_stages:'Heater stages',heating_type:'Heating type: ELECTRIC, GAS, or HOT WATER',heating_ewt:'Heating entering water temperature',heating_lwt:'Heating leaving water temperature',water_dp_ft:'Water pressure drop (ft)',cooling_edb:'Cooling entering dry bulb °F',cooling_ewb:'Cooling entering wet bulb °F',cooling_ldb:'Cooling leaving dry bulb °F',cooling_lwb:'Cooling leaving wet bulb °F',heating_edb:'Heating entering dry bulb °F',heating_ldb:'Heating leaving dry bulb °F',heating_cfm:'Heating CFM',heating_input_btu:'Heating input BTU/h',heating_output_btu:'Heating output BTU/h'})[key]||key.replaceAll('_',' ');}
 function reviewCoverage(records, outlets) {
   if(!records.length&&!outlets.length)return 'No equipment or outlets extracted. This is an empty takeoff; review the source documents before building a job report.';
   const populated=records.filter(r=>r.status==='VERIFIED'&&r.template&&!isEquipmentComponent(r)).length;
@@ -295,9 +318,13 @@ function reconcileReviewedOutlets(previous,native,images,retried){
 }
 function reconcileReviewedEquipment(previous,fresh,retried,recovering=false){
  const prior=new Map(previous.map(r=>[r.tag,r]));
+ const affectedSource=r=>recovering||r.source===retried||(r.occurrences||[]).some(c=>c.source===retried)||(r.candidates||[]).some(c=>c.source===retried);
+ // A fan-count source belongs to the whole linked group, even when the parent
+ // itself was recognized in a different document. Re-review its count as well.
+ const affectedParents=new Set(previous.filter(r=>isEquipmentComponent(r)&&affectedSource(r)).map(r=>r.component_of));
  const result=fresh.map(r=>{
   const old=prior.get(r.tag);if(!old)return r;prior.delete(r.tag);
-  const affected=recovering||old.source===retried||(old.occurrences||[]).some(c=>c.source===retried)||(r.candidates||[]).some(c=>c.source===retried);
+  const affected=affectedSource(old)||affectedSource(r)||affectedParents.has(old.tag)||affectedParents.has(old.component_of);
   return affected?{...r,...old,candidates:r.candidates,occurrences:r.occurrences,proposed:r.proposed,text_proposed:r.text_proposed,flags:r.flags,status:'UNVERIFIED'}:old;
  });
  for(const old of prior.values())result.push({...old,status:'UNVERIFIED',flags:[...(old.flags||[]),'Prior equipment was not recovered. Check its original source before verification.']});
@@ -382,6 +409,19 @@ function manualSourceEntry(input,state,records,outlets,forms,tagPattern,paths=[]
  const note=text(input.note,500);if(note.length<10)throw Error('Describe the source evidence in at least 10 characters.');
  const provenance={source:source.name,reference:'page '+page,evidence:'MANUAL SOURCE ENTRY: '+note,
   review_history:[{kind:'manual_source_entry',source:source.name,sha256:source.sha256,page,note}]};
+ if(input.kind==='supply_fans'){
+  const count=supplyFanCount(input.supply_fan_count),parent=text(input.component_of);
+  if(count===null)throw Error('Enter the source-confirmed supply fan count from 2 to 20.');
+  if(records.length+count>500)throw Error('Equipment review is limited to 500 rows.');
+  const parents=records.filter(r=>r.tag===parent&&!isEquipmentComponent(r)&&r.status!=='EXCLUDED');
+  if(parents.length!==1||parents[0].template!=='Air Moving Equipment.xlsx')throw Error('Choose one parent air unit before adding its supply fan motors.');
+  if(records.some(r=>r.component_of===parent&&r.component_kind==='integral_supply'))throw Error('This parent already has a supply fan group. Review its existing motor forms.');
+  const items=Array.from({length:count},(_,i)=>({...provenance,tag:parent+' SUPPLY FAN '+(i+1),component_of:parent,component_kind:'integral_supply',component_index:i+1,component_count:count,component_source_sha256:source.sha256,component_note:note,
+    template:'Air Moving Equipment.xlsx',coil_template:'',status:'UNVERIFIED',candidates:[],proposed:{},flags:['INTERNAL SUPPLY MOTOR FORM: review this fan’s own motor ratings. Whole-unit airflow and coil data stay on the parent.']}));
+  const result=records.map(r=>r===parents[0]?{...r,supply_fan_count:count,status:'UNVERIFIED'}:r).concat(items);
+  const errors=equipmentComponentErrors({records:result,scan_state:state},false);
+  if(errors.length)throw Error(errors.join('. '));return {kind:'equipment_group',records:result};
+ }
  if(input.kind==='component'){
   if(records.length>=500)throw Error('Equipment review is limited to 500 rows.');
   const parent=text(input.component_of),item={...provenance,tag:parent+' EXHAUST',component_of:parent,component_kind:'integral_exhaust',component_source_sha256:source.sha256,component_note:note,
@@ -402,7 +442,7 @@ function manualSourceEntry(input,state,records,outlets,forms,tagPattern,paths=[]
  const type=text(input.type),system=text(input.system),location=text(input.location),size=text(input.size),locator=text(input.locator);
  const cfm=Number(input.design_cfm);
  if(!type||!location||!locator||String(input.design_cfm??'').trim()===''||!Number.isFinite(cfm)||cfm<=0||cfm>1000000)throw Error('Enter the physical outlet type, room, locator and positive design CFM.');
- const unit=records.find(r=>String(r.tag).toUpperCase()===system&&r.status!=='EXCLUDED');
+ const unit=records.find(r=>String(r.tag).toUpperCase()===system&&r.status!=='EXCLUDED'&&!isEquipmentComponent(r));
  const passive=paths.find(p=>p.tag===system&&p.status==='VERIFIED');
  if(!(unit&&!['Exhaust Fans _Sm._.xlsx','Exhaust Fans _Std._.xlsx','Kitchen Hood.xlsx','Chiller - Air Cooled.xlsx','Chiller - Water Cooled.xlsx'].includes(unit.template))&&(!passive||airPathErrors({air_paths:[passive],records,scan_state:state}).length))throw Error('Assign this outlet to supply equipment or a verified passive supply path.');
  let position;
@@ -486,7 +526,7 @@ function sourceReviewErrors(payload){
  if((payload.image_review||[]).some(c=>c.accepted!==true&&!(c.excluded===true&&typeof c.exclusion_note==='string'&&c.exclusion_note.trim().length>=10&&c.exclusion_note.trim().length<=500)))errors.push('Resolve every image candidate: add it or exclude it with a reason');
  if(!(payload.records||[]).some(r=>r.status==='VERIFIED')&&!(payload.diffusers||[]).some(o=>o.include===true))errors.push('The reviewed inventory is empty');
  if((payload.diffusers||[]).some(o=>o.include===true)&&!(payload.templates||[]).includes('Supply Diffusers.xlsx'))errors.push('Include the Supply Diffusers worksheet for the included outlets');
- const supplyUnits=new Set((payload.records||[]).filter(r=>r.status==='VERIFIED'&&!['Exhaust Fans _Sm._.xlsx','Exhaust Fans _Std._.xlsx','Kitchen Hood.xlsx','Chiller - Air Cooled.xlsx','Chiller - Water Cooled.xlsx'].includes(r.template)).map(r=>String(r.tag||'').trim().toUpperCase()));
+ const supplyUnits=new Set((payload.records||[]).filter(r=>r.status==='VERIFIED'&&!isEquipmentComponent(r)&&!['Exhaust Fans _Sm._.xlsx','Exhaust Fans _Std._.xlsx','Kitchen Hood.xlsx','Chiller - Air Cooled.xlsx','Chiller - Water Cooled.xlsx'].includes(r.template)).map(r=>String(r.tag||'').trim().toUpperCase()));
  for(const path of payload.air_paths||[])if(path.status==='VERIFIED'&&path.kind==='passive_supply')supplyUnits.add(path.tag);
  for(const outlet of payload.diffusers||[]){if(outlet.include!==true){if(typeof outlet.exclusion_note!=='string'||outlet.exclusion_note.trim().length<10||outlet.exclusion_note.trim().length>500)errors.push('Every unchecked outlet needs a source-based exclusion reason; unchecked is not reviewed');continue;}
   if(!supplyUnits.has(String(outlet.system||'').trim().toUpperCase()))errors.push('Every included supply outlet must belong to verified supply equipment or a source-reviewed passive supply path');

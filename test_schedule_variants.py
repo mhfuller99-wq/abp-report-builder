@@ -7,6 +7,28 @@ from abp_schedule import parse_page,resolve_proposed
 def w(x,y,text):return (x,y,x+len(text)*4,y+9,text,0,0,0)
 
 class ScheduleVariants(unittest.TestCase):
+    def test_stacked_sa_flow_has_column_evidence_and_never_counts_internal_fans(self):
+        def c(x,y,t):return w(x-len(t)*2,y,t)
+        words=[w(10,70,'MARK'),w(10,105,'RTU-8')]
+        for x,role,value in [(150,'SA','2700'),(210,'OA','550'),(270,'EA','400')]:
+            words += [c(x,55,role),c(x,67,'FLOW'),c(x,79,'(CFM)'),c(x,105,value)]
+        words += [c(330,67,'FAN'),c(330,79,'QTY'),c(330,105,'3')]
+        row=schedule_candidates(words,3,'synthetic.pdf')[0]
+        self.assertEqual(row['values']['design_cfm'],2700);self.assertEqual(row['values']['osa_cfm'],550)
+        self.assertNotIn('quantity',row['values']);self.assertNotIn('motor_hp',row['values'])
+        evidence=[w[4] for w in row['value_words']['design_cfm']]
+        self.assertTrue({'SA','FLOW','(CFM)','2700','RTU-8'}<=set(evidence))
+        for bad in ('OA','EA','RA','UNKNOWN'):
+            changed=[(*a[:4],bad,*a[5:]) if a[4]=='SA' else a for a in words]
+            self.assertNotIn('design_cfm',schedule_candidates(changed,3,'synthetic.pdf')[0]['values'])
+        missing=[a for a in words if not (a[4]=='FLOW' and abs((a[0]+a[2])/2-150)<1)]
+        self.assertNotIn('design_cfm',schedule_candidates(missing,3,'synthetic.pdf')[0]['values'])
+        duplicate=words+[c(400,55,'SA'),c(400,67,'FLOW'),c(400,79,'(CFM)'),c(400,105,'3100')]
+        self.assertNotIn('design_cfm',schedule_candidates(duplicate,3,'synthetic.pdf')[0]['values'])
+        unit_count=words+[c(460,67,'UNIT'),c(460,79,'QTY'),c(460,105,'2')]
+        self.assertEqual(schedule_candidates(unit_count,3,'synthetic.pdf')[0]['values']['quantity'],2)
+        self.assertEqual(schedule_candidates(words+[w(600,70,'ACTUAL')],3,'synthetic.pdf'),[])
+
     def test_indoor_ductless_identity_does_not_choose_maximum_airflow(self):
         words=[w(10,10,'INDOOR DUCTLESS UNIT SCHEDULE'),w(10,60,'MARK'),
             w(150,35,'COOLING DATA'),w(300,35,'HEATING DATA'),

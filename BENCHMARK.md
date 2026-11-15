@@ -85,3 +85,12 @@ writer preserves that design. The older similarly named pack file contains a fan
 form and cannot substitute for it. A suite can bind `required_exhaust_template`
 by name and SHA in addition to checking the downloaded workbook. Manual exhaust
 entries remain manual work and cannot turn a failed raw scan into a raw pass.
+
+Multiple supply motors are linked `report_components` with kind `integral_supply`,
+an explicit `component_index`, and the source-confirmed `component_count`.
+The parent's reviewed `supply_fan_count` witnesses missing groups after retries
+and restores. Each motor retains its own original Air Moving Equipment form;
+whole-unit airflow, pressure, coils and traverses remain on the parent. A motor
+form never inherits or divides unit airflow. Source-count changes invalidate
+the parent and its linked forms, and every declared motor must be reviewed.
+The independent benchmark counts physical equipment and component forms separately.

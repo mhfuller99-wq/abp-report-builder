@@ -10,8 +10,9 @@ from abp_benchmark import same,page,point,same_annotation
 # Independent copy of the report-input approval contract. Deliberately do not
 # call the application's approval function while auditing that same function.
 RECORD_INPUTS=('tag status template coil_template source reference instance_locations quantity design_cfm osa_cfm osa_min_cfm esp total_sp motor_hp motor_volts motor_phase motor_fla motor_rpm design_gpm cooling_edb cooling_ewb cooling_ldb cooling_lwb heating_cfm heating_edb heating_ldb heating_input_btu heating_output_btu cooling_total_btu cooling_sensible_btu electric_heating_edb electric_heating_ldb heater_volts heater_phase heater_amps heater_stages heater_kw heating_ewt heating_lwt water_dp_ft manufacturer model unit_type service equipment_location area_served heating_type').split()
-COMPONENT_INPUTS='component_of component_kind component_source_sha256 component_note'.split()
+COMPONENT_INPUTS='component_of component_kind component_source_sha256 component_note component_index component_count'.split()
 RECORD_INPUTS+=COMPONENT_INPUTS
+RECORD_INPUTS.append('supply_fan_count')
 OUTLET_INPUTS='include type size system location design_cfm source reference position quantity quantity_unresolved quantity_candidates exclusion_note repeat_resolution repeat_instance manual_locator'.split()
 AIR_PATH_INPUTS='tag kind status source source_sha256 reference location note'.split()
 EXHAUST_INPUTS='include type size system location design_cfm source reference source_sha256 evidence position position_coordinate_space manual_locator quantity quantity_unresolved exclusion_note'.split()
@@ -86,19 +87,35 @@ def evaluate_reviewed(project,review):
         index,record=choices[0];used_records.add(index)
         if expected['tag'] in component_tags:
             parent=expected.get('component_of')
+            supply=expected.get('component_kind')=='integral_supply'
+            kind='integral_supply' if supply else 'integral_exhaust'
+            label=str(parent)+' SUPPLY FAN '+str(expected.get('component_index')) if supply else str(parent)+' EXHAUST'
+            form='Air Moving Equipment.xlsx' if supply else 'Exhaust Fans _Std._.xlsx'
             parents=[r for r in records if r.get('tag')==parent and not any(k in r for k in COMPONENT_INPUTS)]
-            if (record.get('component_of')!=parent or record.get('component_kind')!='integral_exhaust'
-                    or expected.get('component_kind')!='integral_exhaust' or record['tag']!=str(parent)+' EXHAUST'
-                    or record.get('template')!='Exhaust Fans _Std._.xlsx' or record.get('coil_template') not in (None,'')
+            if (record.get('component_of')!=parent or record.get('component_kind')!=kind
+                    or expected.get('component_kind')!=kind or record['tag']!=label
+                    or record.get('template')!=form or (record.get('coil_template')!='' if supply else record.get('coil_template') not in (None,''))
                     or record.get('instance_locations') not in (None,[])
                     or len(parents)!=1 or parents[0].get('template')!='Air Moving Equipment.xlsx'
                     or not same_reviewed(physical_quantity(parents[0]),1)):
                 error('invalid_reviewed_component_parent',tag=record['tag'])
+            if supply:
+                count=expected.get('component_count');index=expected.get('component_index')
+                if (type(count) is not int or not 2<=count<=20 or type(index) is not int or not 1<=index<=count
+                        or type(record.get('component_index')) is not int or record.get('component_index')!=index
+                        or type(record.get('component_count')) is not int or record.get('component_count')!=count
+                        or len(parents)!=1 or not same_reviewed(parents[0].get('supply_fan_count'),count)):
+                    error('invalid_reviewed_supply_fan_membership',tag=record['tag'])
+                if len(parents)==1 and any(parents[0].get(k) not in (None,'') for k in ('motor_hp','motor_volts','motor_phase','motor_fla','motor_rpm')):
+                    error('ambiguous_parent_motor_values',tag=parent)
+                if any(record.get(k) not in (None,'') for k in ('design_cfm','osa_cfm','osa_min_cfm','esp','total_sp','heating_cfm','heating_edb','heating_ldb','cooling_edb','cooling_ewb','cooling_ldb','cooling_lwb')):
+                    error('whole_unit_data_on_motor_form',tag=record['tag'])
             if (record.get('source')!=expected['source'] or page(record)!=expected['page']
                     or record.get('component_source_sha256')!=sources.get(expected['source'])
                     or not isinstance(record.get('component_note'),str) or not 20<=len(record['component_note'].strip())<=500):
                 error('unsupported_reviewed_component_source',tag=record['tag'])
         elif any(k in record for k in COMPONENT_INPUTS):error('unexpected_component_metadata',tag=record['tag'])
+        if record.get('supply_fan_count') not in (None,'') and 'supply_fan_count' not in expected.get('reviewed_values',{}):error('unsupported_parent_fan_count',tag=record['tag'])
         for key,value in expected.get('reviewed_values',expected.get('values',{})).items():
             if not same_reviewed(record.get(key),value):error('wrong_reviewed_equipment_field',tag=expected['tag'],field=key,expected=value,actual=record.get(key))
         quantity=expected.get('quantity',1)

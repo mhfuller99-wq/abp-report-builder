@@ -263,6 +263,11 @@ def schedule_candidates(words, page_number, name):
 
         def take(pattern, field, scale=1):
             anchors = phrases(header, pattern)
+            if field == 'quantity':
+                # Internal fan/motor counts do not count whole equipment units.
+                anchors=[a for a in anchors if not any(w[4].upper() in {'FAN','MOTOR','COMPRESSOR'}
+                    and (abs(center(w)-center(a))<20 and 0<a[1]-w[1]<38
+                         or abs(a[1]-w[1])<3 and 0<=a[0]-w[2]<18) for w in header)]
             if field.startswith('heater_'):
                 motor = phrases(header, r'(?:MOTOR|FAN) (?:VOLTS?|VOLTAGE|PHASE|PH|AMPS|FLA|KW)')
                 anchors = [a for a in anchors if not any(abs(a[1]-b[1]) < 3 and b[0] <= a[0] and b[2] >= a[2] for b in motor)]
@@ -365,6 +370,25 @@ def schedule_candidates(words, page_number, name):
                     if field not in values:
                         values[field] = float(choices[0][4].replace(',', ''))
                         value_words[field] = [tagword, choices[0]] + [w for w in header if abs(center(w)-center(anchor)) < 30 and 0 <= anchor[1]-w[1] < 38]
+                        return True
+            return False
+        # Three-line SA / FLOW / (CFM) columns are common in compact rooftop
+        # schedules. Require all three labels aligned in one unambiguous column.
+        # OA, EA and RA columns cannot satisfy the supply-air target.
+        vertical_flows=[]
+        for units in header:
+            if not re.fullmatch(r'\(?CFM\)?',units[4],re.I):continue
+            roles=[w for w in header if w[4].upper() in {'SA','S.A.','OA','O.A.','EA','E.A.','RA','R.A.'}
+                   and abs(center(w)-center(units))<12 and 10<units[1]-w[1]<42]
+            flows=[w for w in header if w[4].upper()=='FLOW' and abs(center(w)-center(units))<12
+                   and 3<units[1]-w[1]<22]
+            if len(roles)==len(flows)==1 and 3<flows[0][1]-roles[0][1]<22:
+                vertical_flows.append((roles[0][4].upper().replace('.',''),units,[roles[0],flows[0],units]))
+        for role,field in [('SA','design_cfm'),('OA','osa_cfm')]:
+            choices=[(anchor,evidence) for label,anchor,evidence in vertical_flows if label==role]
+            if len(choices)==1:
+                anchor,evidence=choices[0]
+                if below(anchor,field):value_words[field]+=evidence
         for anchor in phrases(header, r'CFM|AIRFLOW|ESP|E\.S\.P\.|HP'):
             context = ' '.join(w[4].upper() for w in sorted(header,key=lambda w:(w[1],w[0]))
                                if abs(center(w)-center(anchor)) < 30 and 0 <= anchor[1]-w[1] < 38)

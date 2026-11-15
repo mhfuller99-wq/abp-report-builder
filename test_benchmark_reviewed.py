@@ -95,6 +95,47 @@ class ReviewedBenchmarkTests(unittest.TestCase):
         project['known_report_omissions']=[{'kind':'EXHAUST GRILLES','count':2}]
         self.assertFalse(evaluate_reviewed(project,review)['reviewed_inventory_pass'])
 
+    def test_multiple_supply_motors_require_complete_source_bound_group(self):
+        project,raw,review=reviewed_example()
+        project['expected']['equipment'][0]['reviewed_values']={
+            **project['expected']['equipment'][0]['values'],'supply_fan_count':2}
+        review['records'][0]['supply_fan_count']=2
+        project['expected']['report_components']=[]
+        for index in (1,2):
+            tag='RTU-1 SUPPLY FAN '+str(index)
+            project['expected']['report_components'].append({'tag':tag,'component_of':'RTU-1',
+                'component_kind':'integral_supply','component_index':index,'component_count':2,
+                'source':'plan.pdf','page':2,'values':{'motor_hp':2},
+                'must_withhold':['design_cfm','osa_cfm','esp','motor_rpm','motor_fla']})
+            review['records'].append({'tag':tag,'component_of':'RTU-1','component_kind':'integral_supply',
+                'component_index':index,'component_count':2,'source':'plan.pdf','reference':'page 2',
+                'component_source_sha256':'a'*64,'component_note':'Original schedule identifies two individual supply fan motors.',
+                'status':'VERIFIED','template':'Air Moving Equipment.xlsx','coil_template':'','motor_hp':2})
+        def approve(value):
+            value['source_review']['inventory']['records']=[
+                {k:v for k,v in r.items() if k!='candidates'} for r in value['records']]
+        approve(review)
+        checked=evaluate_reviewed(project,review)
+        self.assertTrue(checked['reviewed_inventory_pass'],checked['errors'])
+        self.assertEqual(checked['physical_equipment_count'],1)
+        self.assertEqual(checked['component_form_count'],2)
+        self.assertFalse(evaluate(project,raw)['candidate_checks_pass'])
+        mutations=[lambda p:p['records'].pop(),lambda p:p['records'].__setitem__(slice(1,3),[]),
+            lambda p:p['records'].append(copy.deepcopy(p['records'][1])),
+            lambda p:p['records'][0].update(supply_fan_count=3),lambda p:p['records'][0].update(supply_fan_count=True),
+            lambda p:p['records'][0].pop('supply_fan_count'),lambda p:p['records'][0].update(motor_hp=2),
+            lambda p:p['records'][1].update(component_index=2),lambda p:p['records'][1].update(component_index=True),
+            lambda p:p['records'][1].update(component_count=3),lambda p:p['records'][1].update(status='EXCLUDED'),
+            lambda p:p['records'][1].update(component_source_sha256='b'*64),lambda p:p['records'][1].update(reference='page 1'),
+            lambda p:p['records'][1].update(design_cfm=150),lambda p:p['records'][1].update(osa_cfm=50),
+            lambda p:p['records'][1].update(esp=.5),lambda p:p['records'][1].update(motor_rpm=900),
+            lambda p:p['records'][1].update(coil_template='Coil DX GAS HT.xlsx'),lambda p:p['records'][1].update(motor_hp=3)]
+        for mutate in mutations:
+            changed=copy.deepcopy(review);mutate(changed);approve(changed)
+            self.assertFalse(evaluate_reviewed(project,changed)['reviewed_inventory_pass'])
+        changed=copy.deepcopy(review);changed['records'][0]['supply_fan_count']='2';approve(changed)
+        self.assertTrue(evaluate_reviewed(project,changed)['reviewed_inventory_pass'])
+
     def test_passive_path_requires_independent_component_source_and_approval(self):
         project,_,review=reviewed_example()
         project['expected']['associated_components']=[{'tag':'L-7','kind':'PASSIVE SUPPLY INLET'}]
