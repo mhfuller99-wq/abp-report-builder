@@ -70,15 +70,31 @@ def audit_report(data,origins):
     if set(report.sheetnames)!={p[0] for p in plan}:fail('worksheet grouping changed')
     if not any(s.startswith('DUCT TRAVERSE RECT') for s in report.sheetnames) or not any(s.startswith('DUCT TRAVERSE RND') for s in report.sheetnames):fail('required traverse sheets are missing')
     with zipfile.ZipFile(io.BytesIO(data)) as archive:
+        output_parts={n:archive.read(n) for n in archive.namelist()}
         artwork={hashlib.sha256(archive.read(n)).digest() for n in archive.namelist() if '/media/' in n}
+    from abp_fidelity import sheet_paths,NS
+    output_paths=sheet_paths(output_parts)
     for title,source,original,pages in plan:
         master_book=load_workbook(io.BytesIO(source),keep_links=False);master=master_book[original];ws=report[title]
+        with zipfile.ZipFile(io.BytesIO(source)) as archive:
+            source_parts={n:archive.read(n) for n in archive.namelist()}
+        def xml_rows(parts,path):
+            root=ET.fromstring(parts[path])
+            return {int(row.get('r')):{k:v for k,v in row.attrib.items() if k not in ('r','s')}
+                    for row in root.find('{'+NS+'}sheetData')}
+        original_rows=xml_rows(source_parts,sheet_paths(source_parts)[original])
+        output_rows=xml_rows(output_parts,output_paths[title])
         height=master.max_row;colors=palette(master_book.loaded_theme);styles={};merges=set()
         if ws.max_row!=height*pages:fail(title+' page extent changed')
         for key,dim in master.column_dimensions.items():
             actual=ws.column_dimensions[key]
             if (actual.width,actual.hidden)!=(dim.width,dim.hidden):fail(title+' column dimensions changed')
         if ws.page_setup!=master.page_setup or ws.page_margins!=master.page_margins:fail(title+' print settings changed')
+        if original=='NOTES':
+            for page in range(pages):
+                for cell in master[3]:
+                    if isinstance(cell.value,str) and ws.cell(3+height*page,cell.column).value!=cell.value.upper():
+                        fail(title+' column label changed')
         blank=measurement_cells(master,original)
         for page in range(pages):
             off=height*page;stats['forms']+=1
@@ -88,6 +104,9 @@ def audit_report(data,origins):
                 dim=master.row_dimensions[r]
                 actual=ws.row_dimensions[r+off]
                 if (actual.height,actual.hidden)!=(dim.height,True if r in compact else dim.hidden):fail(title+' row dimensions changed')
+                expected_row=dict(original_rows.get(r,{}))
+                if r in compact:expected_row['hidden']='1'
+                if output_rows.get(r+off,{})!=expected_row:fail(title+' row print metadata changed')
             for area in master.merged_cells.ranges:
                 c1,r1,c2,r2=range_boundaries(str(area));merges.add(f'{get_column_letter(c1)}{r1+off}:{get_column_letter(c2)}{r2+off}')
             for row in master:

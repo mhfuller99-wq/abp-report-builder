@@ -59,6 +59,22 @@ class DownloadAuditTests(unittest.TestCase):
             self.assertIn(actual,cells)
     def test_changed_format_blocks_download(self):
         with self.assertRaisesRegex(ValueError,'formatting changed'):audit_report(self.changed(self.cell_change('G6','style','')),self.origins)
+    def test_row_pagination_flags_are_checked_independently_of_height(self):
+        def edit(files,paths):
+            path=paths['DUCT TRAVERSE RND'];root=ET.fromstring(files[path])
+            row=root.find('{'+NS+'}sheetData').find('{'+NS+'}row')
+            row.set('customHeight','1')
+            files[path]=ET.tostring(root)
+        with self.assertRaisesRegex(ValueError,'row print metadata changed'):
+            audit_report(self.changed(edit),self.origins)
+    def test_erased_notes_column_label_blocks_download(self):
+        def edit(files,paths):
+            path=paths['NOTES'];root=ET.fromstring(files[path])
+            cell=next(c for c in root.iter('{'+NS+'}c') if c.get('r')=='A3')
+            for child in list(cell):cell.remove(child)
+            cell.attrib.pop('t',None);files[path]=ET.tostring(root)
+        with self.assertRaisesRegex(ValueError,'column label changed'):
+            audit_report(self.changed(edit),self.origins)
     def test_missing_traverse_blocks_download(self):
         def edit(files,paths):
             root=ET.fromstring(files['xl/workbook.xml']);sheets=root.find('{'+NS+'}sheets')

@@ -278,7 +278,9 @@ def _reset_measurements_legacy(ws):
         for address in ('B29','I29','Q29','X29'):
             clear_value(ws[address])
     if kind == 'NOTES':
-        for row in ws.iter_rows(min_row=3, max_row=min(39, ws.max_row)):
+        # Row 3 contains the original DATE / DESIGNATION / COMMENT / STATUS
+        # labels. Clear the note entries below it, not the form headings.
+        for row in ws.iter_rows(min_row=4, max_row=min(39, ws.max_row)):
             for c in row:
                 clear_value(c)
 def reset_measurements(ws):
