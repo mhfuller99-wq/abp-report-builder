@@ -72,6 +72,35 @@ class EquipmentIdentityTests(unittest.TestCase):
         self.assertIsNone(dx.cell(height+5, 5).value)
         self.assertIsNone(dx.cell(height+6, 5).value)
 
+    def test_reviewed_form_fields_keep_original_pressure_and_temperature_meaning(self):
+        records=[dict(tag='EF-1',template='Exhaust Fans _Std._.xlsx',status='VERIFIED',
+                      design_cfm=150,total_sp=.31,esp=.19,unit_type='ROOF FAN',equipment_location='ROOF'),
+                 dict(tag='BCU-1',template='Fan Coil Units WTR.xlsx',status='VERIFIED',design_cfm=600,
+                      cooling_edb=76,cooling_ewb=63,cooling_ldb=55,cooling_lwb=54,
+                      heating_edb=70,heating_ldb=91,heating_ewt=140,heating_lwt=120),
+                 dict(tag='CH-1',template='Chiller - Air Cooled.xlsx',status='VERIFIED',design_gpm=30,
+                      equipment_location='YARD',unit_type='AIR COOLED',service='CHILLED WATER')]
+        output=load_workbook(io.BytesIO(build({'project':'Original form input regression',
+                                             'templates':[r['template'] for r in records],'records':records})))
+        fan=output['EXHAUST FAN']
+        self.assertIn('TOTAL S.P.',fan['B20'].value);self.assertIn('EXTERNAL S.P.',fan['B21'].value)
+        self.assertEqual(fan['H20'].value,.31);self.assertEqual(fan['H21'].value,.19)
+        self.assertEqual(fan['H9'].value,'ROOF FAN');self.assertEqual(fan['H12'].value,'ROOF')
+        original_fan=load_workbook(LOOKUP['Exhaust Fans _Std._.xlsx']).active
+        # Actual static pressures are original calculations, not input cells.
+        for address in ('K20','K21'):
+            self.assertEqual(fan[address].value,original_fan[address].value)
+        for address in ('B29','I29','Q29','X29'):
+            self.assertIsNone(fan[address].value)
+        water=output['FAN COIL UNITS WTR']
+        for row,value in [(15,76),(16,63),(17,55),(18,54),(28,70),(29,91),(31,140),(32,120)]:
+            self.assertEqual(water.cell(row,3).value,value)
+            self.assertIsNone(water.cell(row,4).value)
+        chiller=output['CHILLER - AIR COOLED']
+        self.assertEqual(chiller['C4'].value,'YARD')
+        self.assertEqual(chiller['C8'].value,'AIR COOLED')
+        self.assertEqual(chiller['C9'].value,'CHILLED WATER')
+
 
 if __name__ == '__main__':
     unittest.main()

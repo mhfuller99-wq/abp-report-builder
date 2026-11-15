@@ -114,15 +114,15 @@ UNIT_FORMS={
     'Unit Heater GAS.xlsx':{'tag':'C3','manufacturer':'C5','model':'C6','area_served':'C4','heating_cfm':'C10','heating_edb':'C12','heating_ldb':'C13'},
     'Unit Heater WTR.xlsx':{'tag':'C3','manufacturer':'C5','model':'C6','area_served':'C4','heating_cfm':'C10','heating_edb':'C12','heating_ldb':'C13','heating_ewt':'C17','heating_lwt':'C18','design_gpm':'C20','water_dp_ft':'C21'},
     'Air Moving Equipment.xlsx':{'tag':'G3','design_cfm':'G17','osa_cfm':'G18','total_sp':'G20','esp':'G21','motor_hp':'T4','motor_volts':'T5','motor_phase':'X5','motor_fla':'T6','motor_rpm':'T7','service':'G10','area_served':'G11','equipment_location':'G12','unit_type':'G9'},
-    'Exhaust Fans _Std._.xlsx':{'tag':'H3','manufacturer':'H5','model':'H6','design_cfm':'H17','esp':'H21','motor_hp':'U4','motor_volts':'U5','motor_phase':'Y5','motor_fla':'U6','motor_rpm':'U7','service':'H10','area_served':'H11'},
+    'Exhaust Fans _Std._.xlsx':{'tag':'H3','manufacturer':'H5','model':'H6','design_cfm':'H17','total_sp':'H20','esp':'H21','motor_hp':'U4','motor_volts':'U5','motor_phase':'Y5','motor_fla':'U6','motor_rpm':'U7','unit_type':'H9','service':'H10','area_served':'H11','equipment_location':'H12'},
     'Exhaust Fans _Sm._.xlsx':{'tag':'C3','manufacturer':'C4','model':'C5','service':'C6','area_served':'C7','design_cfm':'C10','esp':'C11'},
-    'Fan Coil Units WTR.xlsx':{'tag':'C3','manufacturer':'C5','model':'C6','design_cfm':'C11','osa_cfm':'C12','area_served':'C4'},
+    'Fan Coil Units WTR.xlsx':{'tag':'C3','manufacturer':'C5','model':'C6','design_cfm':'C11','osa_cfm':'C12','area_served':'C4','cooling_edb':'C15','cooling_ewb':'C16','cooling_ldb':'C17','cooling_lwb':'C18','heating_edb':'C28','heating_ldb':'C29','heating_ewt':'C31','heating_lwt':'C32'},
     'Fan Coil Units DX.xlsx':{'tag':'C3','manufacturer':'C5','model':'C6','area_served':'C4','design_cfm':'C11','osa_cfm':'C12','cooling_edb':'C16','cooling_ewb':'C17','cooling_ldb':'C18','cooling_lwb':'C19','heating_edb':'C26','heating_ldb':'C27'},
     # Printed labels are DX COOLING and GAS HEATING. BTU rows are formulas.
     'Fan Coil Units DX GAS.xlsx':{'tag':'C3','manufacturer':'C5','model':'C6','area_served':'C4','design_cfm':'C11','osa_cfm':'C12','cooling_edb':'C16','cooling_ewb':'C17','cooling_ldb':'C18','cooling_lwb':'C19','heating_edb':'C26','heating_ldb':'C27'},
     'Fan Coil Units DX ELE.xlsx':{'tag':'C3','manufacturer':'C5','model':'C6','area_served':'C4','design_cfm':'C11','osa_cfm':'C12','cooling_edb':'C15','cooling_ewb':'C16','cooling_ldb':'C17','cooling_lwb':'C18','heating_edb':'C24','heating_ldb':'C25'},
     'Kitchen Hood.xlsx':{'tag':'D3','manufacturer':'D4','model':'D5','design_cfm':'D6'},
-    'Chiller - Air Cooled.xlsx':{'tag':'C3','manufacturer':'C5','model':'C6','design_gpm':'C17'},
+    'Chiller - Air Cooled.xlsx':{'tag':'C3','manufacturer':'C5','model':'C6','equipment_location':'C4','unit_type':'C8','service':'C9','design_gpm':'C17'},
 }
 TEXT_CELLS={'manufacturer','model','service','area_served','equipment_location','unit_type'}
 
