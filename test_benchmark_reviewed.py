@@ -29,6 +29,30 @@ def reviewed_example():
 
 
 class ReviewedBenchmarkTests(unittest.TestCase):
+    def test_linked_form_has_its_own_source_values_and_does_not_double_count_parent(self):
+        project,raw,review=reviewed_example()
+        child={'tag':'RTU-1 EXHAUST','component_of':'RTU-1','component_kind':'integral_exhaust',
+            'template':'Exhaust Fans _Std._.xlsx','status':'VERIFIED','design_cfm':60,'esp':.2,
+            'source':'plan.pdf','reference':'page 2','component_source_sha256':'a'*64,
+            'component_note':'Separate integral exhaust performance listed in the rooftop schedule.'}
+        project['expected']['report_components']=[{'tag':child['tag'],'component_of':'RTU-1','component_kind':'integral_exhaust',
+            'source':'plan.pdf','page':2,'values':{'design_cfm':60,'esp':.2},'must_withhold':['motor_fla']}]
+        self.assertFalse(evaluate(project,raw)['candidate_checks_pass'])
+        self.assertFalse(evaluate_reviewed(project,review)['reviewed_inventory_pass'])
+        review['records'].append(child);review['templates'].append(child['template'])
+        review['source_review']['inventory']['templates']=copy.deepcopy(review['templates'])
+        review['source_review']['inventory']['records'].append(copy.deepcopy(child))
+        checked=evaluate_reviewed(project,review)
+        self.assertTrue(checked['reviewed_inventory_pass'],checked['errors'])
+        self.assertEqual(checked['physical_equipment_count'],1);self.assertEqual(checked['component_form_count'],1)
+        for key,value in [('component_of','RTU-9'),('component_kind','return'),('component_source_sha256','b'*64),
+                          ('reference','page 1'),('component_note','ok'),('design_cfm',61),('motor_fla',5)]:
+            changed=copy.deepcopy(review);changed['records'][1][key]=value
+            changed['source_review']['inventory']['records'][1][key]=value
+            self.assertFalse(evaluate_reviewed(project,changed)['reviewed_inventory_pass'],key)
+        project['known_report_omissions']=[{'kind':'EXHAUST GRILLES','count':2}]
+        self.assertFalse(evaluate_reviewed(project,review)['reviewed_inventory_pass'])
+
     def test_passive_path_requires_independent_component_source_and_approval(self):
         project,_,review=reviewed_example()
         project['expected']['associated_components']=[{'tag':'L-7','kind':'PASSIVE SUPPLY INLET'}]

@@ -184,13 +184,15 @@ function renderManualSourceEntry(box,wasOpen,previousPanel){
   if(options)for(const [value,title] of options){const option=workflowElement('option',title);option.value=value;el.append(option);}
   fields[name]=el;label.append(el);parent.append(label);return el;
  }
- field('kind','Item kind',panel,[['equipment','Equipment'],['outlet','Supply outlet']]);
+ field('kind','Item kind',panel,[['equipment','Equipment'],['component','Integral exhaust component'],['outlet','Supply outlet']]);
  field('source','Source document',panel,[['','Choose original source'],...scanState.source_checkpoints.filter(s=>s.pages&&s.sha256).map(s=>[s.name,s.name])]);
  field('page','Source page');
  const equipment=workflowElement('fieldset'),outlet=workflowElement('fieldset');equipment.append(workflowElement('legend','Equipment identification'));outlet.append(workflowElement('legend','One physical supply outlet'));outlet.hidden=true;panel.append(equipment,outlet);
  field('tag','Equipment ID',equipment);field('template','Original equipment form',equipment,[['','Choose form'],...Object.keys(unitForms).map(name=>[name,worksheetLabel(name)])]);
+ const component=workflowElement('fieldset');component.hidden=true;component.append(workflowElement('legend','Exhaust fan inside an air unit'),workflowElement('p','Enter the parent equipment ID. Its EXHAUST label is derived for the test form. Confirm the component and its own design values on the source; parent values are not copied.'));panel.append(component);
+ field('component_of','Parent equipment ID',component);
  for(const [name,title] of [['type','Outlet type'],['design_cfm','Design CFM'],['system','Serving equipment or passive path ID'],['location','Room / area'],['size','Neck size, if supported'],['locator','Distinct physical locator'],['x','PDF X coordinate (optional)'],['y','PDF Y coordinate (optional)']])field(name,title,outlet);
- fields.kind.onchange=()=>{equipment.hidden=fields.kind.value!=='equipment';outlet.hidden=fields.kind.value!=='outlet';};
+ fields.kind.onchange=()=>{equipment.hidden=fields.kind.value!=='equipment';outlet.hidden=fields.kind.value!=='outlet';component.hidden=fields.kind.value!=='component';};
  field('note','Source evidence');const confirmation=workflowElement('input');confirmation.type='checkbox';confirmation.setAttribute('aria-label','Manual item source and duplicates checked');const label=workflowElement('label');label.append(confirmation,document.createTextNode(' I checked this physical item on the original page and checked the existing review for duplicates.'));panel.append(label);
  const message=workflowElement('p');message.setAttribute('role','status');
  panel.append(workflowButton('Add source-reviewed item',()=>{

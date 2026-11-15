@@ -19,6 +19,7 @@ from abp_scan import scan as bounded_pdf_scan, ScanIncomplete
 from abp_review_gate import partial_review_allowed, partial_review_lines
 from abp_ocr_candidates import reconcile_diffuser_sources,retain_image_quantity_guards
 from abp_inventory import validate_inventory, expand_instances
+from abp_components import is_component,component_errors
 from abp_source_review import source_review_approved,air_path_errors
 
 ROOT=Path(__file__).resolve().parent
@@ -633,11 +634,13 @@ def validate_payload(payload):
     if not isinstance(selected,list) or not selected or any(not isinstance(t,str) for t in selected) or len(selected)!=len(set(selected)) or any(t not in LOOKUP for t in selected):raise ValueError('Choose valid, unique templates')
     records=payload.get('records',[])
     if not isinstance(records,list) or len(records)>MAX_RECORDS:raise ValueError('Invalid review records')
+    linked_errors=component_errors(payload)
+    if linked_errors:raise ValueError('; '.join(linked_errors))
     seen=set()
     for r in records:
         if not isinstance(r,dict):raise ValueError('Invalid equipment record')
-        tag=canonical_tag(str(r.get('tag','')))
-        if not REVIEW_TAGS.fullmatch(tag) or tag in seen:raise ValueError('Invalid or duplicate equipment tag: '+tag)
+        tag=r['tag'] if is_component(r) else canonical_tag(str(r.get('tag','')))
+        if (not is_component(r) and not REVIEW_TAGS.fullmatch(tag)) or tag in seen:raise ValueError('Invalid or duplicate equipment tag: '+tag)
         seen.add(tag)
         if str(r.get('status','UNVERIFIED')) not in ('UNVERIFIED','VERIFIED','EXCLUDED'):raise ValueError('Invalid review status')
         if 'template' in r and (not isinstance(r['template'],str) or r['template'] and r['template'] not in UNIT_FORMS):raise ValueError(f'{tag}: unknown unit report form')
@@ -785,7 +788,7 @@ def build(payload):
     if not isinstance(selected,list) or not selected:raise ValueError('Choose at least one template')
     if any(t not in LOOKUP for t in selected):raise ValueError('Unknown template selection')
     wb=Workbook();wb.remove(wb.active)
-    records=sorted([{**r,'tag':canonical_tag(r['tag'])} for r in payload.get('records',[])],key=lambda r:[int(t) if t.isdigit() else t for t in re.split(r'(\d+)',r['tag'])])
+    records=sorted([{**r,'tag':r['tag'] if is_component(r) else canonical_tag(r['tag'])} for r in payload.get('records',[])],key=lambda r:[int(t) if t.isdigit() else t for t in re.split(r'(\d+)',r['tag'])])
     if not isinstance(records,list):raise ValueError('Invalid review records')
     records=expand_instances(records)
     requested=[name for name in selected if not banned_initial_template(name)]

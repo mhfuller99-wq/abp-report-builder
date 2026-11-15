@@ -10,6 +10,8 @@ from abp_benchmark import same,page,same_annotation
 # Independent copy of the report-input approval contract. Deliberately do not
 # call the application's approval function while auditing that same function.
 RECORD_INPUTS=('tag status template coil_template source reference instance_locations quantity design_cfm osa_cfm osa_min_cfm esp total_sp motor_hp motor_volts motor_phase motor_fla motor_rpm design_gpm cooling_edb cooling_ewb cooling_ldb cooling_lwb heating_cfm heating_edb heating_ldb heating_input_btu heating_output_btu cooling_total_btu cooling_sensible_btu electric_heating_edb electric_heating_ldb heater_volts heater_phase heater_amps heater_stages heater_kw heating_ewt heating_lwt water_dp_ft manufacturer model unit_type service equipment_location area_served heating_type').split()
+COMPONENT_INPUTS='component_of component_kind component_source_sha256 component_note'.split()
+RECORD_INPUTS+=COMPONENT_INPUTS
 OUTLET_INPUTS='include type size system location design_cfm source reference position quantity quantity_unresolved quantity_candidates exclusion_note repeat_resolution repeat_instance manual_locator'.split()
 AIR_PATH_INPUTS='tag kind status source source_sha256 reference location note'.split()
 
@@ -62,10 +64,26 @@ def evaluate_reviewed(project,review):
             if item.get(key) not in (None,''):error('unsupported_reviewed_outlet_field',id=expected['id'],field=key)
     for index in set(range(len(actual)))-used:error('unexpected_reviewed_outlet',index=index)
     records=[r for r in review.get('records',[]) if r.get('status')=='VERIFIED'];used_records=set()
-    for expected in known.get('equipment',[]):
+    component_tags={c['tag'] for c in known.get('report_components',[])}
+    for expected in known.get('equipment',[])+known.get('report_components',[]):
         choices=[(i,r) for i,r in enumerate(records) if r.get('tag')==expected['tag']]
         if len(choices)!=1:error('missing_or_duplicate_reviewed_equipment',tag=expected['tag'],count=len(choices));continue
         index,record=choices[0];used_records.add(index)
+        if expected['tag'] in component_tags:
+            parent=expected.get('component_of')
+            parents=[r for r in records if r.get('tag')==parent and not any(k in r for k in COMPONENT_INPUTS)]
+            if (record.get('component_of')!=parent or record.get('component_kind')!='integral_exhaust'
+                    or expected.get('component_kind')!='integral_exhaust' or record['tag']!=str(parent)+' EXHAUST'
+                    or record.get('template')!='Exhaust Fans _Std._.xlsx' or record.get('coil_template') not in (None,'')
+                    or record.get('instance_locations') not in (None,[])
+                    or len(parents)!=1 or parents[0].get('template')!='Air Moving Equipment.xlsx'
+                    or not same_reviewed(parents[0].get('quantity') or 1,1)):
+                error('invalid_reviewed_component_parent',tag=record['tag'])
+            if (record.get('source')!=expected['source'] or page(record)!=expected['page']
+                    or record.get('component_source_sha256')!=sources.get(expected['source'])
+                    or not isinstance(record.get('component_note'),str) or not 20<=len(record['component_note'].strip())<=500):
+                error('unsupported_reviewed_component_source',tag=record['tag'])
+        elif any(k in record for k in COMPONENT_INPUTS):error('unexpected_component_metadata',tag=record['tag'])
         for key,value in expected.get('reviewed_values',expected.get('values',{})).items():
             if not same_reviewed(record.get(key),value):error('wrong_reviewed_equipment_field',tag=expected['tag'],field=key,expected=value,actual=record.get(key))
         quantity=expected.get('quantity',1)
@@ -103,8 +121,10 @@ def evaluate_reviewed(project,review):
     if any(p.get('disposition') not in ('reviewed','not_applicable') or len(str(p.get('note','')).strip())<10 for p in reviewed_pages):error('human_page_decision_missing')
     truth_complete=project.get('truth_status')=='complete' and known.get('outlet_inventory_complete') is True and known.get('equipment_inventory_complete') is True
     if not truth_complete or project.get('unresolved_source_questions'):error('independent_source_truth_incomplete')
+    for gap in project.get('known_report_omissions',[]):error('unresolved_report_omission',detail=gap)
     return {'reviewed_inventory_pass':not errors,'errors':errors,'matched_outlets':len(matches),
             'included_outlets':len(actual),'verified_equipment_records':len(records),
-            'physical_equipment_count':sum(int(r.get('quantity') or 1) for r in records),
+            'physical_equipment_count':sum(int(r.get('quantity') or 1) for r in records if not any(k in r for k in COMPONENT_INPUTS)),
+            'component_form_count':sum(1 for r in records if any(k in r for k in COMPONENT_INPUTS)),
             'manual_assignment_events':sum(len(r.get('review_history',[])) for r in actual),
             'scope':'Reviewed source inventory only. Raw extraction scores and exact website workbook audit remain separate.'}

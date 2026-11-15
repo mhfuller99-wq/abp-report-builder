@@ -120,7 +120,7 @@ def evaluate(project,review):
         if c.get('kind')=='equipment':
             if c.get('include') or c.get('values') or c.get('status')!='UNVERIFIED':error('image_equipment_auto_verified',tag=c.get('tag'))
             equipment.append({**c,'values':c.get('review_values',{})})
-    for expected in known.get('equipment',[]):
+    for expected in known.get('equipment',[])+known.get('report_components',[]):
         found=[c for c in equipment if c.get('tag')==expected['tag'] and c.get('source')==expected['source'] and page(c)==expected['page']]
         # Deliberately unknown design values do not waive the physical unit.
         if not found:error('missing_equipment',tag=expected['tag'],source=expected['source'],page=expected['page'])
@@ -132,12 +132,13 @@ def evaluate(project,review):
     for tag in known.get('excluded_equipment',[]):
         if tag in tags:error('associated_or_existing_unit_counted',tag=tag)
     if known.get('equipment_inventory_complete'):
-        for tag in tags-{c['tag'] for c in known.get('equipment',[])}:
+        for tag in tags-{c['tag'] for c in known.get('equipment',[])+known.get('report_components',[])}:
             error('unexpected_equipment',tag=tag)
     state=review.get('scan_state',{})
     if state.get('complete_takeoff') is not False:error('unsupported_complete_claim')
     if state.get('status') not in ('incomplete','review_required'):error('missing_review_status')
     for need in project.get('unresolved_source_questions',[]):manual.append({'source_question':need})
+    for gap in project.get('known_report_omissions',[]):manual.append({'report_omission':gap})
     truth_complete=(project.get('truth_status')=='complete'
                     and known.get('outlet_inventory_complete') is True
                     and known.get('equipment_inventory_complete') is True)

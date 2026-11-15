@@ -7,6 +7,7 @@ inventory, template or project change. It does not certify field measurements.
 import copy,re
 from abp_job import NUMERIC_FIELDS,TEXT_FIELDS
 from abp_outlet_instances import outlet_instance_errors
+from abp_components import COMPONENT_FIELDS,component_errors
 
 AIR_PATH_FIELDS=('tag','kind','status','source','source_sha256','reference','location','note')
 PASSIVE_TAG=re.compile(r'(?:L|LOUVER|LOUVRE|OA|INTAKE|TRANSFER|PASSIVE)-[A-Z0-9]+(?:[.-][A-Z0-9]+)*$')
@@ -47,7 +48,7 @@ def air_path_errors(payload, *, require_verified=True, check_sources=True):
 
 
 def inventory_snapshot(payload):
-    record_keys=('tag','status','template','coil_template','source','reference','instance_locations',*NUMERIC_FIELDS,*TEXT_FIELDS)
+    record_keys=('tag','status','template','coil_template','source','reference','instance_locations',*NUMERIC_FIELDS,*TEXT_FIELDS,*COMPONENT_FIELDS)
     outlet_keys=('include','type','size','system','location','design_cfm','source','reference','position','quantity','quantity_unresolved','quantity_candidates','exclusion_note','repeat_resolution','repeat_instance','manual_locator')
     def project(rows,keys):return [{k:r[k] for k in keys if k in r} for r in rows]
     snapshot={'project':payload.get('project',''),'location':payload.get('location',''),
@@ -69,7 +70,7 @@ def source_review_errors(payload):
         return ['Invalid source review inventory']
     if not isinstance(state.get('source_checkpoints',[]),list) or any(not isinstance(c,dict) for c in state.get('source_checkpoints',[])):
         return ['Invalid source checkpoints']
-    errors=air_path_errors(payload)
+    errors=air_path_errors(payload)+component_errors(payload)
     if review.get('version')!=1 or review.get('approved') is not True:errors.append('Human source review has not been approved')
     if state.get('status') not in ('incomplete','review_required') or state.get('complete_takeoff') is not False:
         errors.append('Sources are unscanned, outdated or unknown')
