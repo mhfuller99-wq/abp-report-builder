@@ -4,7 +4,7 @@ This evaluator imports no scanner, review gate or workbook writer. It compares
 the website export against frozen source answers. It never edits either export.
 """
 import math,re
-from abp_benchmark import same,page,point
+from abp_benchmark import same,page,same_annotation
 
 
 # Independent copy of the report-input approval contract. Deliberately do not
@@ -48,7 +48,7 @@ def evaluate_reviewed(project,review):
     known=project['expected'];actual=[d for d in review.get('diffusers',[]) if d.get('include') is True];used=set()
     for expected in known.get('outlets',[]):
         choices=[i for i,item in enumerate(actual) if item.get('source')==expected['source'] and page(item)==expected['page']
-            and point(item) is not None and math.dist(point(item),expected['position'])<=expected.get('tolerance_points',6)
+            and same_annotation(item,expected)
             and (expected.get('instance_locator') is None or item.get('repeat_instance',{}).get('locator')==expected['instance_locator'])]
         if len(choices)!=1:error('missing_or_duplicate_reviewed_outlet',id=expected['id'],count=len(choices));continue
         index=choices[0]

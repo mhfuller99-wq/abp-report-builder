@@ -30,6 +30,17 @@ class BenchmarkTests(unittest.TestCase):
     def test_same_total_wrong_physical_values_fails(self):
         p,r=example();r['diffusers'][0]['design_cfm'],r['diffusers'][1]['design_cfm']=200,100
         self.assertEqual(len(evaluate(p,r)['errors']),2)
+    def test_type_corner_and_airflow_center_share_only_a_bounded_annotation(self):
+        p,r=example();r['diffusers'][0].update(position=[95,80],evidence_box=[95,80,108,105])
+        self.assertTrue(evaluate(p,r)['candidate_checks_pass'])
+        for box in ([0,0,1200,1200],[95,80,108,98],[95,float('nan'),108,105]):
+            changed=copy.deepcopy(r);changed['diffusers'][0]['evidence_box']=box
+            self.assertFalse(evaluate(p,changed)['candidate_checks_pass'])
+        r['diffusers'][0]['type']='WRONG';self.assertFalse(evaluate(p,r)['candidate_checks_pass'])
+    def test_annotation_box_never_turns_one_candidate_into_two_physical_outlets(self):
+        p,r=example();p['expected']['outlets'][1]['position']=[102,100]
+        r['diffusers']=r['diffusers'][:1];r['diffusers'][0].update(position=[95,80],evidence_box=[95,80,108,105])
+        self.assertIn('shared_physical_candidate',[e['code'] for e in evaluate(p,r)['errors']])
     def test_missing_extra_duplicate_and_wrong_page_fail(self):
         for mutation in ('missing','extra','duplicate','page','coordinates'):
             p,r=example()

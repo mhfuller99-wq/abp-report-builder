@@ -40,6 +40,25 @@ def point(item):
     return p if all(type(v) in (int,float) and math.isfinite(v) for v in p) else None
 
 
+def same_annotation(item,expected):
+    """Compare a point anchor or its bounded, same-coordinate callout box.
+
+    Native readers can anchor the type's corner while independent reviewers
+    mark the airflow center. Both must belong to one small annotation. This
+    never accepts a whole-page region or expands a repeated physical count.
+    """
+    pos=point(item)
+    if pos is None:return False
+    target=expected['position']
+    if math.dist(pos,target)<=expected.get('tolerance_points',6):return True
+    box=item.get('evidence_box')
+    if not isinstance(box,list) or len(box)!=4 or any(type(v) not in (int,float) or not math.isfinite(v) for v in box):return False
+    x0,y0,x1,y1=box
+    if not (0<x1-x0<=120 and 0<y1-y0<=120):return False
+    return (x0-1<=pos[0]<=x1+1 and y0-1<=pos[1]<=y1+1
+            and x0<=target[0]<=x1 and y0<=target[1]<=y1)
+
+
 def outlets(review):
     result=[]
     for item in review.get('diffusers',[]):result.append({**item,'lane':'native'})
@@ -68,9 +87,7 @@ def evaluate(project,review):
     for expected in known.get('outlets',[]):
         choices=[]
         for i,item in enumerate(actual):
-            pos=point(item)
-            if (item.get('source')==expected['source'] and page(item)==expected['page'] and pos is not None
-                    and math.dist(pos,expected['position'])<=expected.get('tolerance_points',6)):
+            if (item.get('source')==expected['source'] and page(item)==expected['page'] and same_annotation(item,expected)):
                 choices.append(i)
         if len(choices)!=1:
             error('missing_outlet' if not choices else 'duplicate_or_ambiguous_outlet',id=expected['id'],candidates=choices)

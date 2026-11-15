@@ -29,6 +29,13 @@ def reviewed_example():
 
 
 class ReviewedBenchmarkTests(unittest.TestCase):
+    def test_reviewed_annotation_anchor_uses_the_original_callout_box(self):
+        project,raw,review=reviewed_example()
+        review['diffusers'][0].update(position=[95,80],evidence_box=[95,80,108,105])
+        review['source_review']['inventory']['diffusers'][0]['position']=[95,80]
+        self.assertTrue(evaluate_reviewed(project,review)['reviewed_inventory_pass'])
+        review['diffusers'][0]['evidence_box']=[0,0,1500,1500]
+        self.assertFalse(evaluate_reviewed(project,review)['reviewed_inventory_pass'])
     def test_browser_numeric_strings_keep_exact_value_comparison(self):
         for actual,expected in [('0.5',.5),('1075',1075),('57',57.0),('1.2e2',120)]:
             self.assertTrue(same_reviewed(actual,expected))

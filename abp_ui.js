@@ -238,7 +238,8 @@ function resolveRepeatedOutlet(outlets,index,locations,note,confirmed=false,revi
  const original=outlets[index];
  if(!original||original.repeat_resolution||original.repeat_instance)throw Error('This callout was already resolved; review its physical rows.');
  const count=reviewedCount===undefined?original.quantity:reviewedCount;
- if(!original.quantity_unresolved&&!(original.quantity>1))throw Error('This row has no repeated source annotation to resolve.');
+ const manualCount=!original.quantity_unresolved&&!(original.quantity>1);
+ if(manualCount&&reviewedCount===undefined)throw Error('Enter the repeated count you checked on the original source.');
  if(!Number.isInteger(count)||count<2||count>100)throw Error('A source-supported repeated count between 2 and 100 is required.');
  if(!Array.isArray(original.position)||original.position.length!==2||original.position.some(x=>!Number.isFinite(x))||!original.source||!original.reference)throw Error('The repeated callout needs an original source page and position.');
  if(!Array.isArray(locations)||locations.some(x=>typeof x!=='string'))throw Error('Enter one physical locator per line.');
@@ -248,7 +249,7 @@ function resolveRepeatedOutlet(outlets,index,locations,note,confirmed=false,revi
  if(outlets.length+count>500)throw Error('Resolving this count exceeds the 500-row review limit. Split the source set.');
  const group=JSON.stringify([original.source,original.reference,original.position]);
  if(outlets.some(o=>o.repeat_resolution?.group===group))throw Error('This source callout already has a physical resolution.');
- const parent={...original,quantity:count,include:false,exclusion_note:'AGGREGATE CALLOUT REPLACED BY '+count+' SOURCE-REVIEWED PHYSICAL ROWS.',repeat_resolution:{group,locators,note:note.trim(),source_quantity:original.quantity??null,source_quantity_candidates:original.quantity_candidates||[]}};
+ const parent={...original,quantity:count,include:false,exclusion_note:'AGGREGATE CALLOUT REPLACED BY '+count+' SOURCE-REVIEWED PHYSICAL ROWS.',repeat_resolution:{group,locators,note:note.trim(),source_quantity:manualCount?null:original.quantity??null,source_quantity_candidates:original.quantity_candidates||[],...(manualCount?{manual_count:true,scanned_quantity:original.quantity??null}:{})}};
  const children=locators.map((locator,i)=>{const item={...original,include:false,quantity:1,quantity_unresolved:false,repeat_instance:{group,index:i+1,locator},location:locator,exclusion_note:'',review_notice:'Manually resolved from a repeated source callout. Check this physical location and Include after source review.'};delete item.repeat_resolution;return item;});
  const result=outlets.map((o,i)=>i===index?parent:o).concat(children);
  return {outlets:result,action:{index,before:JSON.parse(JSON.stringify(original)),after:JSON.parse(JSON.stringify(parent)),children:JSON.parse(JSON.stringify(children)),start:outlets.length}};

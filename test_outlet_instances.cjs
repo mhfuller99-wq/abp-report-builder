@@ -26,6 +26,17 @@ const manual=c.resolveRepeatedOutlet([conflict],0,locations,note,true,20);
 assert.equal(manual.outlets[0].repeat_resolution.source_quantity,null);
 assert.deepEqual(clone(manual.outlets[0].repeat_resolution.source_quantity_candidates),[20,30]);
 assert.equal(c.outletInstanceErrors(manual.outlets).length,0);
+for(const scannedCount of [undefined,1]){
+ const missed={...original,quantity:scannedCount,quantity_unresolved:false};
+ assert.throws(()=>c.resolveRepeatedOutlet([missed],0,locations,note,true),/original source/);
+ const corrected=c.resolveRepeatedOutlet([missed],0,locations,note,true,20);
+ assert.equal(corrected.outlets[0].repeat_resolution.manual_count,true);
+ assert.equal(corrected.outlets[0].repeat_resolution.scanned_quantity,scannedCount??null);
+ assert.equal(corrected.outlets[0].repeat_resolution.source_quantity,null);
+ assert.equal(c.outletInstanceErrors(corrected.outlets).length,0);
+ assert(corrected.outlets.every(o=>o.include===false));
+ assert.deepEqual(clone(c.undoRepeatedOutlet(corrected.outlets,corrected.action)),clone([missed]));
+}
 const reviewed=clone(resolved.outlets);reviewed.slice(1).forEach(o=>o.include=true);
 const retry=c.reconcileReviewedOutlets(reviewed,[{...original,quantity:30}],[],'synthetic.pdf');
 assert.equal(retry.length,21);assert(retry.every(o=>o.include===false));
