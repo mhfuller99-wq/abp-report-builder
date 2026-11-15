@@ -11,7 +11,7 @@ from abp_outlet_instances import outlet_instance_errors
 
 def inventory_snapshot(payload):
     record_keys=('tag','status','template','coil_template','source','reference','instance_locations',*NUMERIC_FIELDS,*TEXT_FIELDS)
-    outlet_keys=('include','type','size','system','location','design_cfm','source','reference','position','quantity','quantity_unresolved','quantity_candidates','exclusion_note','repeat_resolution','repeat_instance')
+    outlet_keys=('include','type','size','system','location','design_cfm','source','reference','position','quantity','quantity_unresolved','quantity_candidates','exclusion_note','repeat_resolution','repeat_instance','manual_locator')
     def project(rows,keys):return [{k:r[k] for k in keys if k in r} for r in rows]
     return copy.deepcopy({'project':payload.get('project',''),'location':payload.get('location',''),
         'templates':payload.get('templates',[]),'standard':payload.get('standard','Commercial'),

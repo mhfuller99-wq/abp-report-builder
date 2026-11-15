@@ -28,6 +28,12 @@ class SourceReviewTests(unittest.TestCase):
         p.pop('scan_acknowledgement')
         with self.assertRaisesRegex(ValueError,'incomplete'):validate_api_scan_state(p)
 
+    def test_manual_physical_locator_is_bound_to_inventory_approval(self):
+        p=payload();p['diffusers']=[{'include':False,'manual_locator':'NORTH OUTLET','exclusion_note':'Confirmed existing return grille, not new supply.'}]
+        p['source_review']['inventory']=inventory_snapshot(p);self.assertTrue(source_review_approved(p))
+        p['diffusers'][0]['manual_locator']='SOUTH OUTLET'
+        self.assertFalse(source_review_approved(p))
+
     def test_missing_duplicate_wrong_hash_and_unreviewed_pages_block(self):
         cases=[lambda p:p['source_review']['pages'].pop(),
             lambda p:p['source_review']['pages'].append(copy.deepcopy(p['source_review']['pages'][0])),

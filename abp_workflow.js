@@ -167,13 +167,52 @@ function renderHumanReview(box,wasOpen){
  const confirm=workflowElement('input');confirm.type='checkbox';const confirmLabel=workflowElement('label');confirmLabel.append(confirm,document.createTextNode(' I compared the final inventory with all applicable source pages, resolved differences, and accounted for missing design information.'));panel.append(confirmLabel);
  panel.append(workflowButton('Approve reviewed design inventory',()=>{try{if(workflowBusy)throw Error('Wait for the current document job.');if(!confirm.checked)throw Error('Confirm the completed source review first.');humanSourceReview=makeSourceReview(workflowOriginalPayload(),humanPageReviews,humanReviewNote);workflowSave();renderReadiness(true);}catch(e){message.textContent=e.message;}}),message);for(const control of panel.querySelectorAll('input,textarea,select,button'))control.disabled=workflowBusy;box.append(panel);
 }
+function renderManualSourceEntry(box,wasOpen,previousPanel){
+ if(!['incomplete','review_required'].includes(scanState.status)||!scanState.source_checkpoints.length)return;
+ const sourceKey=JSON.stringify(scanState.source_checkpoints.map(s=>[s.name,s.sha256,s.pages]));
+ // Autosave can fire between two input events, when focus is temporarily on the
+ // document. Keep the actual draft controls until submission or sources change.
+ if(previousPanel?.dataset.sourceKey===sourceKey){for(const control of previousPanel.querySelectorAll('input,textarea,select,button'))control.disabled=workflowBusy;box.append(previousPanel);return;}
+ const panel=workflowElement('details');panel.id='manual-source-entry';panel.open=wasOpen;
+ panel.dataset.sourceKey=sourceKey;
+ panel.append(workflowElement('summary','Add equipment or a supply outlet missed by the scan'),workflowElement('p','Use the original source page. Added equipment starts unverified and added outlets start unchecked. Automatic scan coverage stays incomplete; finish the source review before building.'));
+ const fields={};
+ function field(name,title,parent=panel,options){
+  const label=workflowElement('label',title),el=workflowElement(options?'select':name==='note'?'textarea':'input');
+  el.setAttribute('aria-label','Manual '+title);if(!options)el.maxLength=name==='note'?500:120;
+  if(options)for(const [value,title] of options){const option=workflowElement('option',title);option.value=value;el.append(option);}
+  fields[name]=el;label.append(el);parent.append(label);return el;
+ }
+ field('kind','Item kind',panel,[['equipment','Equipment'],['outlet','Supply outlet']]);
+ field('source','Source document',panel,[['','Choose original source'],...scanState.source_checkpoints.filter(s=>s.pages&&s.sha256).map(s=>[s.name,s.name])]);
+ field('page','Source page');
+ const equipment=workflowElement('fieldset'),outlet=workflowElement('fieldset');equipment.append(workflowElement('legend','Equipment identification'));outlet.append(workflowElement('legend','One physical supply outlet'));outlet.hidden=true;panel.append(equipment,outlet);
+ field('tag','Equipment ID',equipment);field('template','Original equipment form',equipment,[['','Choose form'],...Object.keys(unitForms).map(name=>[name,worksheetLabel(name)])]);
+ for(const [name,title] of [['type','Outlet type'],['design_cfm','Design CFM'],['system','Serving equipment ID'],['location','Room / area'],['size','Neck size, if supported'],['locator','Distinct physical locator'],['x','PDF X coordinate (optional)'],['y','PDF Y coordinate (optional)']])field(name,title,outlet);
+ fields.kind.onchange=()=>{equipment.hidden=fields.kind.value!=='equipment';outlet.hidden=fields.kind.value!=='outlet';};
+ field('note','Source evidence');const confirmation=workflowElement('input');confirmation.type='checkbox';confirmation.setAttribute('aria-label','Manual item source and duplicates checked');const label=workflowElement('label');label.append(confirmation,document.createTextNode(' I checked this physical item on the original page and checked the existing review for duplicates.'));panel.append(label);
+ const message=workflowElement('p');message.setAttribute('role','status');
+ panel.append(workflowButton('Add source-reviewed item',()=>{
+  try{
+   if(workflowBusy)throw Error('Wait for the current document job.');
+   const entry=manualSourceEntry({...Object.fromEntries(Object.entries(fields).map(([key,el])=>[key,el.value])),confirmed:confirmation.checked},scanState,records,diffusers,unitForms,savedTagPattern);
+   if(entry.kind==='equipment'){records=[...records,entry.item];tags=records.map(r=>r.tag);const check=[...document.querySelectorAll('.template input')].find(x=>x.value===entry.item.template);if(check)check.checked=true;}
+   else diffusers=[...diffusers,entry.item];
+   humanSourceReview=null;outletBatchUndo=null;outletRepeatUndo=null;renderReview();renderOutlets();workflowSave();updateWorkspace();renderReadiness(true);
+   $('job-status').textContent=entry.kind==='equipment'?'Equipment added from your source review. Enter supported design values and verify its review row.':'One physical outlet added from your source review. Check its fields, then include it in the supply sheet.';
+  }catch(e){message.textContent=e.message;}
+ }),message);
+ for(const control of panel.querySelectorAll('input,textarea,select,button'))control.disabled=workflowBusy;
+ box.append(panel);
+}
 function renderReadiness(force=false){
  const box=$('readiness');if(!box)return;
  // A delayed inventory autosave must not erase a page note or confirmation
  // while the reviewer is using it. Approval still checks the current payload.
  const humanPanel=$('human-source-review');
- if(!force&&humanPanel?.open&&humanPanel.contains(document.activeElement))return;
- const humanOpen=humanPanel?.open===true;box.replaceChildren();
+ const manualPanel=$('manual-source-entry');
+ if(!force&&(humanPanel?.open&&humanPanel.contains(document.activeElement)||manualPanel?.open&&manualPanel.contains(document.activeElement)))return;
+ const humanOpen=humanPanel?.open===true,manualOpen=manualPanel?.open===true;box.replaceChildren();
  if(humanSourceReview&&!workflowBusy)$('scanstatus').textContent=sourceReviewApproved(workflowOriginalPayload())?'AUTOMATED SCAN: '+scanState.status.toUpperCase()+'. HUMAN SOURCE REVIEW APPROVED FOR THIS INVENTORY.':'Source or inventory changed after human approval. Recheck the changes and approve the reviewed design inventory again.';
  const verified=records.filter(r=>r.status==='VERIFIED').length,unresolved=records.filter(r=>!['VERIFIED','EXCLUDED'].includes(r.status));
  const assessment=sourceReadiness(records,diffusers,imageReview,officeComparison?compareOfficeDesign(officeComparison,records,diffusers):null);
@@ -192,7 +231,7 @@ function renderReadiness(force=false){
    if(record.source&&/\.pdf$/i.test(record.source))row.append(workflowButton('View '+record.tag+' source',()=>viewSource(record.source,sourcePage(record.reference))));box.append(row);
  }
  if(scanState.source_checkpoints.length){
-  renderHumanReview(box,humanOpen);
+  renderManualSourceEntry(box,manualOpen,force?null:manualPanel);renderHumanReview(box,humanOpen);
   const heading=workflowElement('h4','Source coverage and page retries');box.append(heading);
   if(records.length||diffusers.length){
    const recovery=workflowElement('div');recovery.id='source-recovery';

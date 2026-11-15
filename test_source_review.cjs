@@ -19,4 +19,7 @@ p.diffusers[0].include=true;Object.assign(p.diffusers[0],{system:'AHU-1',locatio
 p.records.push({tag:'AHU-1',status:'VERIFIED',template:'Air Moving Equipment.xlsx',design_cfm:100});
 assert.throws(()=>c.makeSourceReview(p,pages,note),/Supply Diffusers/);
 p.templates.push('Supply Diffusers.xlsx');p.source_review=c.makeSourceReview(p,pages,note);assert(c.sourceReviewApproved(p));
+p.diffusers[0].manual_locator='NORTH OUTLET';assert(!c.sourceReviewApproved(p));
+p.source_review=c.makeSourceReview(p,pages,note);assert(c.sourceReviewApproved(p));
+p.diffusers[0].manual_locator='SOUTH OUTLET';assert(!c.sourceReviewApproved(p));
 console.log('Human page review and resolved inventory are required separately; changed sources, edits and pending candidates invalidate approval.');

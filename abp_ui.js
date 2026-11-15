@@ -285,9 +285,42 @@ function outletInstanceErrors(outlets){
 
 
 let humanSourceReview=null,humanPageReviews=[],humanReviewNote='';
+function manualSourceEntry(input,state,records,outlets,forms,tagPattern){
+ if(!['incomplete','review_required'].includes(state.status)||state.complete_takeoff!==false)throw Error('Scan the current source files before adding a source-reviewed item.');
+ const source=(state.source_checkpoints||[]).find(s=>s.name===input.source),page=Number(input.page);
+ if(!source||! /^[a-f0-9]{64}$/.test(source.sha256||'')||!Number.isInteger(page)||page<1||!Number.isInteger(source.pages)||page>source.pages)throw Error('Choose an original source and a page within that document.');
+ if(input.confirmed!==true)throw Error('Check the physical item, source page and duplicates before adding it.');
+ const text=(value,limit=120)=>{const s=String(value??'').trim().toUpperCase();if(s.length>limit)throw Error('A manual entry exceeds its text limit.');return s;};
+ const note=text(input.note,500);if(note.length<10)throw Error('Describe the source evidence in at least 10 characters.');
+ const provenance={source:source.name,reference:'page '+page,evidence:'MANUAL SOURCE ENTRY: '+note,
+  review_history:[{kind:'manual_source_entry',source:source.name,sha256:source.sha256,page,note}]};
+ if(input.kind==='equipment'){
+  if(records.length>=500)throw Error('Equipment review is limited to 500 rows.');
+  const tag=text(input.tag);if(!tagPattern.test(tag))throw Error('Enter a supported equipment ID exactly as shown on the source.');
+  if(records.some(r=>String(r.tag).toUpperCase()===tag))throw Error('That equipment ID already has a review row. Edit it or record its physical quantity there.');
+  if(!Object.hasOwn(forms,input.template))throw Error('Choose the applicable original equipment form.');
+  return {kind:'equipment',item:{...provenance,tag,template:input.template,status:'UNVERIFIED',candidates:[],proposed:{},flags:['MANUAL SOURCE ENTRY: design inputs still need review.']}};
+ }
+ if(input.kind!=='outlet')throw Error('Choose equipment or supply outlet.');
+ if(outlets.length>=500)throw Error('Outlet review is limited to 500 rows.');
+ const type=text(input.type),system=text(input.system),location=text(input.location),size=text(input.size),locator=text(input.locator);
+ const cfm=Number(input.design_cfm);
+ if(!type||!location||!locator||String(input.design_cfm??'').trim()===''||!Number.isFinite(cfm)||cfm<=0||cfm>1000000)throw Error('Enter the physical outlet type, room, locator and positive design CFM.');
+ const unit=records.find(r=>String(r.tag).toUpperCase()===system&&r.status!=='EXCLUDED');
+ if(!unit||['Exhaust Fans _Sm._.xlsx','Exhaust Fans _Std._.xlsx','Kitchen Hood.xlsx','Chiller - Air Cooled.xlsx','Chiller - Water Cooled.xlsx'].includes(unit.template))throw Error('Assign this supply outlet to a supply equipment row in the review.');
+ let position;
+ if(String(input.x??'').trim()!==''||String(input.y??'').trim()!==''){
+  position=[input.x,input.y].map(v=>String(v??'').trim()===''?NaN:Number(v));
+  if(position.some(v=>!Number.isFinite(v)||v<0||v>100000))throw Error('Enter both valid PDF point coordinates, or leave both blank.');
+ }
+ if(outlets.some(o=>o.source===source.name&&sourcePageNumber(o.reference)===page&&(
+    position&&Array.isArray(o.position)&&Math.hypot(position[0]-o.position[0],position[1]-o.position[1])<1||o.manual_locator===locator)))throw Error('This source position or physical locator already has an outlet row. Review the existing row.');
+ return {kind:'outlet',item:{...provenance,type,system,location,size,design_cfm:cfm,include:false,quantity:1,manual_locator:locator,...(position?{position,position_coordinate_space:'displayed_pdf_points'}:{})}};
+}
+function sourcePageNumber(reference){return Number(/\bpage (\d+)\b/i.exec(reference||'')?.[1]||0);}
 function sourceInventorySnapshot(payload){
  const recordKeys=['tag','status','template','coil_template','source','reference','instance_locations',...reviewNumericFields,'heater_kw',...reviewTextFields];
- const outletKeys=['include','type','size','system','location','design_cfm','source','reference','position','quantity','quantity_unresolved','quantity_candidates','exclusion_note','repeat_resolution','repeat_instance'];
+ const outletKeys=['include','type','size','system','location','design_cfm','source','reference','position','quantity','quantity_unresolved','quantity_candidates','exclusion_note','repeat_resolution','repeat_instance','manual_locator'];
  const project=(rows,keys)=>rows.map(r=>Object.fromEntries(keys.filter(k=>Object.hasOwn(r,k)).map(k=>[k,r[k]])));
  return {project:payload.project||'',location:payload.location||'',templates:payload.templates||[],standard:payload.standard||'Commercial',records:project(payload.records||[],recordKeys),diffusers:project(payload.diffusers||[],outletKeys),image_decisions:(payload.image_review||[]).map(r=>({accepted:r.accepted??false,excluded:r.excluded??false,exclusion_note:r.exclusion_note||'',tag:r.tag||'',source:r.source||'',page:r.page??null,position:r.position??null}))};
 }

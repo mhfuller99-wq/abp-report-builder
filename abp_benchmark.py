@@ -53,6 +53,9 @@ def evaluate(project,review):
     """Score per physical outlet/field, not aggregate totals; never waive omissions."""
     errors=[];manual=[];matches=[]
     def error(code,**kw):errors.append({'code':code,**kw})
+    for item in review.get('records',[])+review.get('diffusers',[]):
+        if item.get('manual_locator') or any(h.get('kind')=='manual_source_entry' for h in item.get('review_history',[]) if isinstance(h,dict)):
+            error('manual_source_entry_in_raw',tag=item.get('tag'),source=item.get('source'))
     sources={s['name']:s['sha256'] for s in project['sources']}
     checkpoints=review.get('scan_state',{}).get('source_checkpoints',[])
     observed={s['name']:s.get('sha256') for s in checkpoints}

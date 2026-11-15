@@ -23,6 +23,10 @@ class BenchmarkTests(unittest.TestCase):
     def test_raw_candidate_pass_is_not_workbook_pass(self):
         p,r=example();result=evaluate(p,r)
         self.assertTrue(result['candidate_checks_pass']);self.assertFalse(result['workbook_verified'])
+    def test_manual_source_rows_cannot_be_counted_as_raw_extraction(self):
+        for key in ('records','diffusers'):
+            p,r=example();r[key][0]['review_history']=[{'kind':'manual_source_entry','note':'Source checked by reviewer'}]
+            self.assertIn('manual_source_entry_in_raw',[e['code'] for e in evaluate(p,r)['errors']])
     def test_same_total_wrong_physical_values_fails(self):
         p,r=example();r['diffusers'][0]['design_cfm'],r['diffusers'][1]['design_cfm']=200,100
         self.assertEqual(len(evaluate(p,r)['errors']),2)
