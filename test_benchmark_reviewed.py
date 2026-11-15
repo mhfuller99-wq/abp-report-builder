@@ -1,7 +1,7 @@
 import copy,json,tempfile,unittest
 from pathlib import Path
 from abp_benchmark import evaluate,run_suite,digest
-from abp_benchmark_reviewed import evaluate_reviewed
+from abp_benchmark_reviewed import evaluate_reviewed,same_reviewed
 from test_benchmark import example
 
 
@@ -29,6 +29,20 @@ def reviewed_example():
 
 
 class ReviewedBenchmarkTests(unittest.TestCase):
+    def test_browser_numeric_strings_keep_exact_value_comparison(self):
+        for actual,expected in [('0.5',.5),('1075',1075),('57',57.0),('1.2e2',120)]:
+            self.assertTrue(same_reviewed(actual,expected))
+        for actual in ('',' ',True,'NaN','Infinity','120 V','1,200','121'):
+            self.assertFalse(same_reviewed(actual,120))
+        self.assertFalse(same_reviewed('001','1'))
+        project,raw,review=reviewed_example()
+        review['records'][0]['design_cfm']='300'
+        review['source_review']['inventory']['records'][0]['design_cfm']='300'
+        self.assertTrue(evaluate_reviewed(project,review)['reviewed_inventory_pass'])
+        review['records'][0]['design_cfm']='301'
+        review['source_review']['inventory']['records'][0]['design_cfm']='301'
+        self.assertFalse(evaluate_reviewed(project,review)['reviewed_inventory_pass'])
+
     def test_reviewed_success_does_not_erase_missing_raw_fields(self):
         project,raw,review=reviewed_example()
         raw['records'][0]['candidates'][0]['values'].pop('esp')

@@ -11,4 +11,12 @@ p.image_review=[{kind:'equipment',tag:'EF-8',page:1,source:'test.pdf'}];assert.t
 p.image_review[0].excluded=true;p.image_review[0].exclusion_note='Duplicate reference shown on a detail.';p.source_review=c.makeSourceReview(p,pages,note);assert(c.sourceReviewApproved(p));
 p.image_review[0].excluded=false;assert(!c.sourceReviewApproved(p));
 assert(!c.sourceReviewApproved({...p,source_review:null,scan_acknowledgement:{acknowledged:true,note,scan_state:state}}));
+p.image_review=[];p.diffusers=[{include:false,type:'A',source:'test.pdf',reference:'page 1'}];
+assert.throws(()=>c.makeSourceReview(p,pages,note),/unchecked outlet/);
+p.diffusers[0].exclusion_note='Confirmed return grille; excluded from supply takeoff.';
+p.source_review=c.makeSourceReview(p,pages,note);assert(c.sourceReviewApproved(p));
+p.diffusers[0].include=true;Object.assign(p.diffusers[0],{system:'AHU-1',location:'ROOM A',design_cfm:100});
+p.records.push({tag:'AHU-1',status:'VERIFIED',template:'Air Moving Equipment.xlsx',design_cfm:100});
+assert.throws(()=>c.makeSourceReview(p,pages,note),/Supply Diffusers/);
+p.templates.push('Supply Diffusers.xlsx');p.source_review=c.makeSourceReview(p,pages,note);assert(c.sourceReviewApproved(p));
 console.log('Human page review and resolved inventory are required separately; changed sources, edits and pending candidates invalidate approval.');

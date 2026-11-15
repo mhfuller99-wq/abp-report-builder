@@ -11,6 +11,8 @@ class GroupedTests(unittest.TestCase):
         records=[{'tag':f'RTU-{i}','status':'VERIFIED','design_cfm':i*1000,'osa_cfm':i*100} for i in range(1,4)]
         data=build({'project':'Grouped','templates':['Air Moving Equipment.xlsx'],'records':records})
         w=load_workbook(io.BytesIO(data));s=load_workbook(LOOKUP['Air Moving Equipment.xlsx']).active;d=w[s.title]
+        self.assertEqual(w.active.title,'PROJECT INFO')
+        self.assertEqual([ws.title for ws in w if ws.sheet_view.tabSelected],['PROJECT INFO'])
         self.assertEqual(d.max_row,126)
         self.assertEqual([b.id for b in d.row_breaks.brk],[42,84])
         self.assertIn('$Y$126',str(d.print_area))

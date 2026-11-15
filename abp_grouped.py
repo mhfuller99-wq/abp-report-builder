@@ -172,6 +172,17 @@ def group_template_sheets(data, origins):
         name=ET.SubElement(names,q('definedName'),name='_xlnm.Print_Area',localSheetId=str(new_order.index(target)))
         name.text="'"+target.replace("'","''")+"'!$A$1:$"+get_column_letter(col)+'$'+str(row)
     files['xl/workbook.xml']=ET.tostring(workbook,encoding='utf-8',xml_declaration=True)
+    # Master workbooks each carry their selected tab. Copying that UI state to
+    # every sheet opens the report in Excel's grouped-edit mode. Select only
+    # the first report tab without touching cell data, formulas or print layout.
+    for view in workbook.findall('.//'+q('workbookView')):
+        view.set('activeTab','0');view.set('firstSheet','0')
+    for index,path in enumerate(sheet_paths(files).values()):
+        root=ET.fromstring(files[path])
+        for view in root.findall('./'+q('sheetViews')+'/'+q('sheetView')):
+            view.set('tabSelected','1' if index==0 else '0')
+        files[path]=ET.tostring(root,encoding='utf-8',xml_declaration=True)
+    files['xl/workbook.xml']=ET.tostring(workbook,encoding='utf-8',xml_declaration=True)
     out=io.BytesIO()
     with zipfile.ZipFile(out,'w',zipfile.ZIP_DEFLATED) as z:
         for name,value in files.items():z.writestr(name,value)

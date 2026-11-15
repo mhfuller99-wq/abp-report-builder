@@ -10,7 +10,7 @@ from abp_job import NUMERIC_FIELDS,TEXT_FIELDS
 
 def inventory_snapshot(payload):
     record_keys=('tag','status','template','coil_template','source','reference','instance_locations',*NUMERIC_FIELDS,*TEXT_FIELDS)
-    outlet_keys=('include','type','size','system','location','design_cfm','source','reference','position','quantity','quantity_unresolved')
+    outlet_keys=('include','type','size','system','location','design_cfm','source','reference','position','quantity','quantity_unresolved','exclusion_note')
     def project(rows,keys):return [{k:r[k] for k in keys if k in r} for r in rows]
     return copy.deepcopy({'project':payload.get('project',''),'location':payload.get('location',''),
         'templates':payload.get('templates',[]),'standard':payload.get('standard','Commercial'),
@@ -63,8 +63,14 @@ def source_review_errors(payload):
     if any(c.get('accepted') is not True and not (c.get('excluded') is True and isinstance(c.get('exclusion_note'),str) and 10<=len(c['exclusion_note'].strip())<=500) for c in payload.get('image_review',[])):
         errors.append('Resolve every image candidate: add it or exclude it with a reason')
     if not any(r.get('status')=='VERIFIED' for r in records) and not any(o.get('include') is True for o in outlets):errors.append('The reviewed inventory is empty')
+    if any(o.get('include') is True for o in outlets) and 'Supply Diffusers.xlsx' not in payload.get('templates',[]):
+        errors.append('Include the Supply Diffusers worksheet for the included outlets')
     for outlet in outlets:
-        if outlet.get('include') is not True:continue
+        if outlet.get('include') is not True:
+            note=outlet.get('exclusion_note')
+            if not isinstance(note,str) or not 10<=len(note.strip())<=500:
+                errors.append('Every unchecked outlet needs a source-based exclusion reason; unchecked is not reviewed')
+            continue
         if str(outlet.get('system','')).strip().upper() not in supply_units:
             errors.append('Every included supply outlet must belong to a verified supply unit in this inventory')
         if outlet.get('quantity_unresolved') or outlet.get('quantity',1)!=1:errors.append('Resolve repeated outlet quantities into physical rows before approval')

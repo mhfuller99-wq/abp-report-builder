@@ -54,8 +54,27 @@ class SourceReviewTests(unittest.TestCase):
         p['diffusers'][0]['quantity_unresolved']=False;p['source_review']['inventory']=inventory_snapshot(p)
         self.assertFalse(source_review_approved(p))
         p['records'].append({'tag':'AHU-7','status':'VERIFIED','template':'Air Moving Equipment.xlsx','design_cfm':100})
+        p['templates'].append('Supply Diffusers.xlsx')
         p['source_review']['inventory']=inventory_snapshot(p)
         self.assertTrue(source_review_approved(p))
+
+    def test_unchecked_outlets_require_a_reason_and_included_outlets_require_the_sheet(self):
+        p=payload();p['diffusers']=[{'include':False,'type':'A','source':'synthetic.pdf','reference':'page 1'}]
+        p['source_review']['inventory']=inventory_snapshot(p)
+        self.assertFalse(source_review_approved(p))
+        p['diffusers'][0]['exclusion_note']='Confirmed return grille on the original plan, not supply.'
+        p['source_review']['inventory']=inventory_snapshot(p)
+        self.assertTrue(source_review_approved(p))
+        p['diffusers'][0].update(include=True,system='AHU-7',location='ROOM A',design_cfm=100)
+        p['records'].append({'tag':'AHU-7','status':'VERIFIED','template':'Air Moving Equipment.xlsx','design_cfm':100})
+        p['templates'].append('Air Moving Equipment.xlsx')
+        p['source_review']['inventory']=inventory_snapshot(p)
+        self.assertFalse(source_review_approved(p))
+        p['templates'].append('Supply Diffusers.xlsx');p['source_review']['inventory']=inventory_snapshot(p)
+        self.assertTrue(source_review_approved(p));validate_payload(p)
+        p['templates'].remove('Supply Diffusers.xlsx')
+        p.pop('scan_state');p.pop('source_review')
+        with self.assertRaisesRegex(ValueError,'Supply Diffusers'):validate_payload(p)
 
 
 if __name__=='__main__':unittest.main()

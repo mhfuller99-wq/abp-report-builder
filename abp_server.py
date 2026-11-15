@@ -663,6 +663,8 @@ def validate_payload(payload):
             raise ValueError(f'{tag}: heating type must be ELECTRIC, GAS, or HOT WATER')
         if r.get('heater_phase') not in (None,'') and float(r['heater_phase']) not in (1,3):
             raise ValueError(f'{tag}: heater phase must be 1 or 3')
+        if r.get('motor_phase') not in (None,'') and (isinstance(r['motor_phase'],bool) or float(r['motor_phase']) not in (1,3)):
+            raise ValueError(f'{tag}: motor phase must be 1 or 3')
         if r.get('heater_stages') not in (None,'') and (float(r['heater_stages'])<1 or not float(r['heater_stages']).is_integer()):
             raise ValueError(f'{tag}: heater stages must be a positive integer')
         if r.get('osa_min_cfm') not in (None,''):
@@ -672,9 +674,12 @@ def validate_payload(payload):
     validate_inventory(records)
     outlets=payload.get('diffusers',[])
     if not isinstance(outlets,list) or len(outlets)>500:raise ValueError('Invalid supply outlets')
+    if any(isinstance(item,dict) and item.get('include') is not False for item in outlets) and 'Supply Diffusers.xlsx' not in selected:
+        raise ValueError('Include the Supply Diffusers worksheet for the included outlets')
     for item in outlets:
         if not isinstance(item,dict):raise ValueError('Invalid supply outlet')
         if 'include' in item and not isinstance(item['include'],bool):raise ValueError('Invalid outlet inclusion choice')
+        if 'exclusion_note' in item and (not isinstance(item['exclusion_note'],str) or len(item['exclusion_note'])>500):raise ValueError('Invalid outlet exclusion reason')
         cfm=item.get('design_cfm')
         if cfm not in (None,''):
             try:n=float(cfm)

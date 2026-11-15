@@ -67,6 +67,11 @@ renderOutlets=function(){
  table.querySelector('tr').prepend(workflowElement('th','Batch'));
  rows.forEach((row,index)=>{
   const o=diffusers[index],cell=workflowElement('td'),check=document.createElement('input');check.type='checkbox';check.dataset.batchOutlet=index;check.setAttribute('aria-label','Select outlet '+(index+1)+' for batch assignment');cell.append(check);row.prepend(cell);
+  const inclusion=row.querySelector('input[aria-label="Include outlet '+(index+1)+' in supply sheet"]');
+  const exclusion=workflowElement('label','Reason this outlet is excluded'),reason=document.createElement('input');
+  reason.maxLength=500;reason.value=o.exclusion_note||'';reason.setAttribute('aria-label','Outlet '+(index+1)+' exclusion reason');
+  reason.oninput=()=>{o.exclusion_note=reason.value;workflowChanged();};exclusion.append(reason);exclusion.hidden=o.include!==false;row.lastElementChild.append(exclusion);
+  inclusion.addEventListener('change',()=>{exclusion.hidden=inclusion.checked;if(inclusion.checked){const sheet=[...document.querySelectorAll('.template input')].find(x=>x.value==='Supply Diffusers.xlsx');if(sheet)sheet.checked=true;updateWorkspace();}});
   row.lastElementChild.append(document.createElement('br'),workflowButton('View outlet '+(index+1)+' source',()=>viewSource(o.source,sourcePage(o.reference),o.position)));
   if(o.review_notice)row.lastElementChild.append(workflowElement('p',o.review_notice));
   if(o.latest_observation)row.lastElementChild.append(workflowElement('p','Latest source observation: '+Object.entries(o.latest_observation).map(([k,v])=>k+': '+(v??'UNREAD')).join(' · ')));
@@ -78,6 +83,7 @@ renderOutlets=function(){
  for(const row of originalRows)table.append(row);renderOutletTotals();
 };
 renderReview=function(){
+ const expanded=[...$('review').querySelectorAll('details[open]')].map(d=>d.querySelector('summary')?.textContent);
  workflowOriginalReview();
  if(records.length){
   const details=workflowElement('details'),summary=workflowElement('summary','Physical unit locations for shared equipment tags');details.append(summary);
@@ -89,6 +95,7 @@ renderReview=function(){
    label.append(input);details.append(label);
   });$('review').append(details);
  }
+ for(const detail of $('review').querySelectorAll('details'))if(expanded.includes(detail.querySelector('summary')?.textContent))detail.open=true;
  renderReadiness();
 };
 renderImageReview=function(){workflowOriginalImageReview();$('image-review').querySelectorAll('fieldset').forEach((panel,index)=>{
