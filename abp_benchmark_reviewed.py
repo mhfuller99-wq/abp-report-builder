@@ -4,7 +4,7 @@ This evaluator imports no scanner, review gate or workbook writer. It compares
 the website export against frozen source answers. It never edits either export.
 """
 import math,re
-from abp_benchmark import same,page,same_annotation
+from abp_benchmark import same,page,point,same_annotation
 
 
 # Independent copy of the report-input approval contract. Deliberately do not
@@ -14,6 +14,20 @@ COMPONENT_INPUTS='component_of component_kind component_source_sha256 component_
 RECORD_INPUTS+=COMPONENT_INPUTS
 OUTLET_INPUTS='include type size system location design_cfm source reference position quantity quantity_unresolved quantity_candidates exclusion_note repeat_resolution repeat_instance manual_locator'.split()
 AIR_PATH_INPUTS='tag kind status source source_sha256 reference location note'.split()
+EXHAUST_INPUTS='include type size system location design_cfm source reference source_sha256 evidence position position_coordinate_space manual_locator quantity quantity_unresolved exclusion_note'.split()
+
+
+def physical_quantity(record):
+    value=record.get('quantity')
+    return 1 if value is None or value=='' else value
+
+
+def quantity_count(record):
+    value=physical_quantity(record)
+    if isinstance(value,bool):return 0
+    try:number=float(value)
+    except (ValueError,TypeError,OverflowError):return 0
+    return int(number) if math.isfinite(number) and 1<=number<=500 and number.is_integer() else 0
 
 
 def same_reviewed(actual,expected):
@@ -39,6 +53,7 @@ def approved_inventory_matches(review,approval):
             'exclusion_note':r.get('exclusion_note',''),'tag':r.get('tag',''),'source':r.get('source',''),
             'page':r.get('page'),'position':r.get('position')} for r in review.get('image_review',[])]}
     if review.get('air_paths'):expected['air_paths']=inputs(review['air_paths'],AIR_PATH_INPUTS)
+    if review.get('exhaust_outlets'):expected['exhaust_outlets']=inputs(review['exhaust_outlets'],EXHAUST_INPUTS)
     return approval.get('inventory')==expected
 
 
@@ -77,7 +92,7 @@ def evaluate_reviewed(project,review):
                     or record.get('template')!='Exhaust Fans _Std._.xlsx' or record.get('coil_template') not in (None,'')
                     or record.get('instance_locations') not in (None,[])
                     or len(parents)!=1 or parents[0].get('template')!='Air Moving Equipment.xlsx'
-                    or not same_reviewed(parents[0].get('quantity') or 1,1)):
+                    or not same_reviewed(physical_quantity(parents[0]),1)):
                 error('invalid_reviewed_component_parent',tag=record['tag'])
             if (record.get('source')!=expected['source'] or page(record)!=expected['page']
                     or record.get('component_source_sha256')!=sources.get(expected['source'])
@@ -87,11 +102,46 @@ def evaluate_reviewed(project,review):
         for key,value in expected.get('reviewed_values',expected.get('values',{})).items():
             if not same_reviewed(record.get(key),value):error('wrong_reviewed_equipment_field',tag=expected['tag'],field=key,expected=value,actual=record.get(key))
         quantity=expected.get('quantity',1)
-        if not same_reviewed(record.get('quantity') or 1,quantity):error('wrong_physical_quantity',tag=expected['tag'],expected=quantity,actual=record.get('quantity'))
+        if not same_reviewed(physical_quantity(record),quantity):error('wrong_physical_quantity',tag=expected['tag'],expected=quantity,actual=record.get('quantity'))
         if 'instance_locations' in expected and sorted(record.get('instance_locations',[]))!=sorted(expected['instance_locations']):error('wrong_physical_locations',tag=expected['tag'])
         for key in expected.get('must_withhold',[]):
             if record.get(key) not in (None,''):error('unsupported_reviewed_equipment_field',tag=expected['tag'],field=key)
     for index in set(range(len(records)))-used_records:error('unexpected_reviewed_equipment',tag=records[index].get('tag'))
+    exhaust_rows=review.get('exhaust_outlets',[]);exhaust=[r for r in exhaust_rows if r.get('include') is True]
+    used_exhaust=set();exhaust_matches=[];locators=set()
+    for expected in known.get('exhaust_outlets',[]):
+        choices=[i for i,item in enumerate(exhaust) if item.get('source')==expected['source']
+                 and page(item)==expected['page'] and same_annotation(item,expected)]
+        if len(choices)!=1:error('missing_or_duplicate_reviewed_exhaust',id=expected['id'],count=len(choices));continue
+        index=choices[0]
+        if index in used_exhaust:error('shared_physical_exhaust',id=expected['id']);continue
+        used_exhaust.add(index);item=exhaust[index];exhaust_matches.append(expected['id'])
+        for key,value in {**expected['values'],**expected.get('review_fields',{})}.items():
+            if not same_reviewed(item.get(key),value):error('wrong_reviewed_exhaust_field',id=expected['id'],field=key,expected=value,actual=item.get(key))
+        for key in expected.get('must_withhold',[]):
+            if item.get(key) not in (None,''):error('unsupported_reviewed_exhaust_field',id=expected['id'],field=key)
+    for index in set(range(len(exhaust)))-used_exhaust:error('unexpected_reviewed_exhaust',index=index)
+    for item in exhaust_rows:
+        if (set(item)-set(EXHAUST_INPUTS+['review_history','review_notice','latest_observation'])
+                or type(item.get('include')) is not bool or type(item.get('quantity')) is not int
+                or item.get('quantity')!=1 or item.get('quantity_unresolved') is not False):error('invalid_reviewed_exhaust_row')
+        if (item.get('source_sha256')!=sources.get(item.get('source'))
+                or not any(c['name']==item.get('source') and type(page(item)) is int and 1<=page(item)<=c.get('pages',0) for c in checkpoints)
+                or not isinstance(item.get('evidence'),str) or not 20<=len(item['evidence'].strip())<=500):error('unsupported_reviewed_exhaust_source')
+        locator=item.get('manual_locator')
+        if not isinstance(locator,str) or not 1<=len(locator.strip())<=120:error('missing_exhaust_physical_locator')
+        key=(item.get('source'),page(item),str(locator))
+        if key in locators:error('duplicate_exhaust_physical_locator')
+        locators.add(key)
+        if item.get('include') is True:
+            fans=[r for r in records if r.get('tag')==item.get('system') and r.get('template') in ('Exhaust Fans _Std._.xlsx','Exhaust Fans _Sm._.xlsx')]
+            if len(fans)!=1:error('unverified_exhaust_connection',system=item.get('system'))
+        elif not isinstance(item.get('exclusion_note'),str) or not 10<=len(item['exclusion_note'].strip())<=500:error('unresolved_exhaust_candidate')
+    if exhaust and ('Exhaust Grills.xlsx' not in review.get('templates',[]) or known.get('exhaust_outlet_inventory_complete') is not True):error('exhaust_template_or_truth_missing')
+    for item in exhaust:
+        for supply in actual:
+            a,b=point(item),point(supply)
+            if item.get('source')==supply.get('source') and page(item)==page(supply) and a and b and math.dist(a,b)<1:error('outlet_in_both_supply_and_exhaust')
     # Passive components are frozen separately from physical powered units.
     # A path must be supported by independent component and outlet evidence.
     expected_paths={c['tag'] for c in known.get('associated_components',[]) if c.get('kind')=='PASSIVE SUPPLY INLET'}
@@ -124,7 +174,8 @@ def evaluate_reviewed(project,review):
     for gap in project.get('known_report_omissions',[]):error('unresolved_report_omission',detail=gap)
     return {'reviewed_inventory_pass':not errors,'errors':errors,'matched_outlets':len(matches),
             'included_outlets':len(actual),'verified_equipment_records':len(records),
-            'physical_equipment_count':sum(int(r.get('quantity') or 1) for r in records if not any(k in r for k in COMPONENT_INPUTS)),
+            'matched_exhaust_outlets':len(exhaust_matches),'included_exhaust_outlets':len(exhaust),
+            'physical_equipment_count':sum(quantity_count(r) for r in records if not any(k in r for k in COMPONENT_INPUTS)),
             'component_form_count':sum(1 for r in records if any(k in r for k in COMPONENT_INPUTS)),
             'manual_assignment_events':sum(len(r.get('review_history',[])) for r in actual),
             'scope':'Reviewed source inventory only. Raw extraction scores and exact website workbook audit remain separate.'}

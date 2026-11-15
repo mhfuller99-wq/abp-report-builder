@@ -8,6 +8,7 @@ import copy,re
 from abp_job import NUMERIC_FIELDS,TEXT_FIELDS
 from abp_outlet_instances import outlet_instance_errors
 from abp_components import COMPONENT_FIELDS,component_errors
+from abp_exhaust import EXHAUST_FIELDS,exhaust_errors
 
 AIR_PATH_FIELDS=('tag','kind','status','source','source_sha256','reference','location','note')
 PASSIVE_TAG=re.compile(r'(?:L|LOUVER|LOUVRE|OA|INTAKE|TRANSFER|PASSIVE)-[A-Z0-9]+(?:[.-][A-Z0-9]+)*$')
@@ -59,6 +60,7 @@ def inventory_snapshot(payload):
             'exclusion_note':r.get('exclusion_note',''),'tag':r.get('tag',''),'source':r.get('source',''),
             'page':r.get('page'),'position':r.get('position')} for r in payload.get('image_review',[])]}
     if payload.get('air_paths'):snapshot['air_paths']=project(payload['air_paths'],AIR_PATH_FIELDS)
+    if payload.get('exhaust_outlets'):snapshot['exhaust_outlets']=project(payload['exhaust_outlets'],EXHAUST_FIELDS)
     return copy.deepcopy(snapshot)
 
 
@@ -66,11 +68,11 @@ def source_review_errors(payload):
     state=payload.get('scan_state') or {};review=payload.get('source_review')
     if not isinstance(review,dict):return ['Human source review has not been approved']
     if not isinstance(state,dict) or any(not isinstance(payload.get(key,[]),list) or
-            any(not isinstance(row,dict) for row in payload.get(key,[])) for key in ('records','diffusers','image_review','air_paths')):
+            any(not isinstance(row,dict) for row in payload.get(key,[])) for key in ('records','diffusers','image_review','air_paths','exhaust_outlets')):
         return ['Invalid source review inventory']
     if not isinstance(state.get('source_checkpoints',[]),list) or any(not isinstance(c,dict) for c in state.get('source_checkpoints',[])):
         return ['Invalid source checkpoints']
-    errors=air_path_errors(payload)+component_errors(payload)
+    errors=air_path_errors(payload)+component_errors(payload)+exhaust_errors(payload)
     if review.get('version')!=1 or review.get('approved') is not True:errors.append('Human source review has not been approved')
     if state.get('status') not in ('incomplete','review_required') or state.get('complete_takeoff') is not False:
         errors.append('Sources are unscanned, outdated or unknown')

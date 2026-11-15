@@ -239,7 +239,7 @@ def _reset_measurements_legacy(ws):
                 break
         actual_cols = [c.column for c in ws[rownum] if str(c.value).strip().upper() == 'ACTUAL']
         if kind == 'EXHAUST GRILL':
-            actual_cols += [c.column for c in ws[rownum] if str(c.value).strip().upper() == 'INITIAL']
+            actual_cols += [c.column for c in ws[rownum] if str(c.value).strip().upper() in ('INITIAL','PRELIMINARY')]
         for col in actual_cols:
             for row in ws.iter_rows(min_row=rownum + 1, max_row=end, min_col=col, max_col=col):
                 c = row[0]
@@ -252,7 +252,7 @@ def _reset_measurements_legacy(ws):
     for row in ws:
         for c in row:
             label = str(c.value or '').strip().upper()
-            if label.startswith(('SERIAL #', 'SERIAL NUMBER', 'TECHNICIAN:', 'TEST DATE:')):
+            if label.startswith(('SERIAL #', 'SERIAL NUMBER', 'TECHNICIAN:', 'TEST DATE:')) or kind=='EXHAUST GRILL' and label in ('TESTED BY:','DATE:'):
                 limit=ws.max_column
                 if label.startswith('SERIAL'):
                     motor_labels=[x.column for cells in ws.iter_rows(min_row=1,max_row=3) for x in cells

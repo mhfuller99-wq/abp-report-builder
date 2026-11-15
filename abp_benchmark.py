@@ -73,7 +73,7 @@ def evaluate(project,review):
     errors=[];manual=[];matches=[]
     def error(code,**kw):errors.append({'code':code,**kw})
     if review.get('air_paths'):error('manual_air_paths_in_raw')
-    for item in review.get('records',[])+review.get('diffusers',[]):
+    for item in review.get('records',[])+review.get('diffusers',[])+review.get('exhaust_outlets',[]):
         if item.get('manual_locator') or any(h.get('kind')=='manual_source_entry' for h in item.get('review_history',[]) if isinstance(h,dict)):
             error('manual_source_entry_in_raw',tag=item.get('tag'),source=item.get('source'))
     sources={s['name']:s['sha256'] for s in project['sources']}
@@ -112,6 +112,25 @@ def evaluate(project,review):
     for item in actual:
         if item.get('include'):error('raw_outlet_auto_included')
         if item['lane']=='image' and (item.get('values') or item.get('status')!='UNVERIFIED'):error('image_outlet_auto_verified')
+    # Exhaust inlets are an independent physical inventory, never supply matches.
+    exhaust=review.get('exhaust_outlets',[]);used_exhaust=set();exhaust_matches=[]
+    for expected in known.get('exhaust_outlets',[]):
+        choices=[i for i,item in enumerate(exhaust) if item.get('source')==expected['source']
+                 and page(item)==expected['page'] and same_annotation(item,expected)]
+        if len(choices)!=1:error('missing_or_duplicate_exhaust_outlet',id=expected['id'],candidates=choices);continue
+        i=choices[0]
+        if i in used_exhaust:error('shared_physical_exhaust_candidate',id=expected['id']);continue
+        used_exhaust.add(i);item=exhaust[i];exhaust_matches.append(expected['id'])
+        for field,value in expected['values'].items():
+            if not same(item.get(field),value):error('wrong_exhaust_field',id=expected['id'],field=field,expected=value,actual=item.get(field))
+        for field,value in expected.get('review_fields',{}).items():
+            if item.get(field) in (None,''):manual.append({'id':expected['id'],'field':field,'expected':value,'actual':item.get(field)})
+            elif not same(item.get(field),value):error('wrong_exhaust_review_field',id=expected['id'],field=field,expected=value,actual=item.get(field))
+        for field in expected.get('must_withhold',[]):
+            if item.get(field) not in (None,''):error('unsupported_exhaust_field',id=expected['id'],field=field)
+    for i,item in enumerate(exhaust):
+        if item.get('include'):error('raw_exhaust_auto_included',candidate=i)
+        if i not in used_exhaust:error('unexpected_exhaust_outlet',candidate=i)
     equipment=[]
     for r in review.get('records',[]):
         if r.get('status')!='UNVERIFIED':error('raw_equipment_auto_verified',tag=r.get('tag'))
@@ -145,6 +164,7 @@ def evaluate(project,review):
     return {'project_id':project['id'],'split':project['split'],'candidate_checks_pass':not errors,
             'truth_complete':truth_complete,'errors':errors,'manual_review':manual,'physical_matches':matches,
             'outlet_counts':{'expected':len(known.get('outlets',[])),'actual':len(actual),'matched':len(matches)},
+            'exhaust_outlet_counts':{'expected':len(known.get('exhaust_outlets',[])),'actual':len(exhaust),'matched':len(exhaust_matches)},
             'equipment_tags':sorted(tags),
             'automatic_report_ready':not errors and truth_complete and not manual,
             'workbook_verified':False,'scope':'Raw extraction only; workbook/formula acceptance is a separate required stage.'}
@@ -213,6 +233,10 @@ def run_suite(suite_path,index_path,commit):
                     raise ValueError('Workbook or original template evidence missing or changed')
                 if any(digest(t['path'])!=t['sha256'] for t in templates):
                     raise ValueError('Original template changed after audit')
+                exhaust_master=project['expected'].get('required_exhaust_template')
+                if exhaust_master and not any(str(t['path']).replace('\\','/').rsplit('/',1)[-1]==exhaust_master['name']
+                        and t['sha256']==exhaust_master['sha256'] for t in templates):
+                    raise ValueError('Required original exhaust grille template is missing or changed')
                 required=('original_formulas_preserved','blank_actuals','original_layout_preserved','grouped_equipment','required_traverses')
                 if acceptance=='reviewed_workflow':
                     required+=('exact_design_values','all_caps','diffuser_totals_adjacent','no_unnecessary_comments','no_unexplained_omissions')

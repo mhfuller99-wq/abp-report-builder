@@ -184,7 +184,7 @@ function renderManualSourceEntry(box,wasOpen,previousPanel){
   if(options)for(const [value,title] of options){const option=workflowElement('option',title);option.value=value;el.append(option);}
   fields[name]=el;label.append(el);parent.append(label);return el;
  }
- field('kind','Item kind',panel,[['equipment','Equipment'],['component','Integral exhaust component'],['outlet','Supply outlet']]);
+ field('kind','Item kind',panel,[['equipment','Equipment'],['component','Integral exhaust component'],['outlet','Supply outlet'],['exhaust','Exhaust grille']]);
  field('source','Source document',panel,[['','Choose original source'],...scanState.source_checkpoints.filter(s=>s.pages&&s.sha256).map(s=>[s.name,s.name])]);
  field('page','Source page');
  const equipment=workflowElement('fieldset'),outlet=workflowElement('fieldset');equipment.append(workflowElement('legend','Equipment identification'));outlet.append(workflowElement('legend','One physical supply outlet'));outlet.hidden=true;panel.append(equipment,outlet);
@@ -192,17 +192,19 @@ function renderManualSourceEntry(box,wasOpen,previousPanel){
  const component=workflowElement('fieldset');component.hidden=true;component.append(workflowElement('legend','Exhaust fan inside an air unit'),workflowElement('p','Enter the parent equipment ID. Its EXHAUST label is derived for the test form. Confirm the component and its own design values on the source; parent values are not copied.'));panel.append(component);
  field('component_of','Parent equipment ID',component);
  for(const [name,title] of [['type','Outlet type'],['design_cfm','Design CFM'],['system','Serving equipment or passive path ID'],['location','Room / area'],['size','Neck size, if supported'],['locator','Distinct physical locator'],['x','PDF X coordinate (optional)'],['y','PDF Y coordinate (optional)']])field(name,title,outlet);
- fields.kind.onchange=()=>{equipment.hidden=fields.kind.value!=='equipment';outlet.hidden=fields.kind.value!=='outlet';component.hidden=fields.kind.value!=='component';};
+ fields.kind.onchange=()=>{equipment.hidden=fields.kind.value!=='equipment';outlet.hidden=!['outlet','exhaust'].includes(fields.kind.value);component.hidden=fields.kind.value!=='component';outlet.querySelector('legend').textContent=fields.kind.value==='exhaust'?'One physical exhaust inlet — assign its exhaust fan':'One physical supply outlet';};
  field('note','Source evidence');const confirmation=workflowElement('input');confirmation.type='checkbox';confirmation.setAttribute('aria-label','Manual item source and duplicates checked');const label=workflowElement('label');label.append(confirmation,document.createTextNode(' I checked this physical item on the original page and checked the existing review for duplicates.'));panel.append(label);
  const message=workflowElement('p');message.setAttribute('role','status');
  panel.append(workflowButton('Add source-reviewed item',()=>{
   try{
    if(workflowBusy)throw Error('Wait for the current document job.');
-   const entry=manualSourceEntry({...Object.fromEntries(Object.entries(fields).map(([key,el])=>[key,el.value])),confirmed:confirmation.checked},scanState,records,diffusers,unitForms,savedTagPattern,airPaths);
+   const input={...Object.fromEntries(Object.entries(fields).map(([key,el])=>[key,el.value])),confirmed:confirmation.checked};
+   const entry=input.kind==='exhaust'?{kind:'exhaust',item:makeExhaustOutlet(input,scanState,records,diffusers,exhaustOutlets)}:manualSourceEntry(input,scanState,records,diffusers,unitForms,savedTagPattern,airPaths);
    if(entry.kind==='equipment'){records=[...records,entry.item];tags=records.map(r=>r.tag);const check=[...document.querySelectorAll('.template input')].find(x=>x.value===entry.item.template);if(check)check.checked=true;}
+   else if(entry.kind==='exhaust'){exhaustOutlets=[...exhaustOutlets,entry.item];const check=[...document.querySelectorAll('.template input')].find(x=>x.value===exhaustTemplate);if(check)check.checked=true;}
    else diffusers=[...diffusers,entry.item];
    humanSourceReview=null;outletBatchUndo=null;outletRepeatUndo=null;renderReview();renderOutlets();workflowSave();updateWorkspace();renderReadiness(true);
-   $('job-status').textContent=entry.kind==='equipment'?'Equipment added from your source review. Enter supported design values and verify its review row.':'One physical outlet added from your source review. Check its fields, then include it in the supply sheet.';
+   $('job-status').textContent=entry.kind==='equipment'?'Equipment added from your source review. Enter supported design values and verify its review row.':entry.kind==='exhaust'?'Exhaust grille added unchecked. Review its source and fan connection in Exhaust grilles before including it.':'One physical outlet added from your source review. Check its fields, then include it in the supply sheet.';
   }catch(e){message.textContent=e.message;}
  }),message);
  for(const control of panel.querySelectorAll('input,textarea,select,button'))control.disabled=workflowBusy;
@@ -233,6 +235,32 @@ function renderPassivePaths(box,previous){
  panel.append(workflowButton('Add passive supply path',()=>{try{if(workflowBusy)throw Error('Wait for the current document job.');const path=makePassivePath({...Object.fromEntries(Object.entries(fields).map(([key,el])=>[key,el.value])),confirmed:confirm.checked},scanState,records,airPaths);airPaths=[...airPaths,path];humanSourceReview=null;workflowSave();renderReadiness(true);}catch(e){status.textContent=e.message;}}),status);
  for(const el of panel.querySelectorAll('input,textarea,select,button'))el.disabled=workflowBusy;box.append(panel);
 }
+function renderExhaustGrilles(box,previous){
+ const panel=workflowElement('details');panel.id='exhaust-grille-review';panel.open=previous?.open||exhaustOutlets.length>0;
+ panel.append(workflowElement('summary','Exhaust grilles: '+exhaustOutlets.length+' source review rows'),workflowElement('p','These inlets use the original Exhaust Grills worksheet. Review the connected exhaust fan, room, neck size and design airflow. They do not populate Supply Diffusers. Automatic extraction remains separately recorded.'));
+ const totals=new Map();
+ for(const [index,o] of exhaustOutlets.entries()){
+  const row=workflowElement('fieldset');row.append(workflowElement('legend','Exhaust grille '+(index+1)+' · '+o.source+' · '+o.reference));
+  const label=workflowElement('label'),include=workflowElement('input');include.type='checkbox';include.checked=o.include===true;include.setAttribute('aria-label','Include exhaust grille '+(index+1));label.append(include,document.createTextNode(' Include this physical exhaust grille'));row.append(label);
+  const status=workflowElement('p');status.setAttribute('role','status');
+  const changed=()=>{humanSourceReview=null;workflowSave();};
+  include.onchange=()=>{o.include=include.checked;if(include.checked){const sheet=[...document.querySelectorAll('.template input')].find(x=>x.value===exhaustTemplate);if(sheet)sheet.checked=true;}changed();renderReadiness(true);updateWorkspace();};
+  for(const [key,title] of [['system','Exhaust fan ID'],['location','Room / area'],['type','Grille type'],['size','Neck size'],['design_cfm','Design CFM'],['manual_locator','Physical locator']]){
+   const label=workflowElement('label',title),input=workflowElement('input');input.type=key==='design_cfm'?'number':'text';input.maxLength=120;if(key==='design_cfm'){input.min=0;input.max=100000;input.step='any';}input.value=o[key]??'';input.setAttribute('aria-label','Exhaust grille '+(index+1)+' '+key);
+   input.oninput=()=>{o[key]=key==='design_cfm'?input.value:input.value.toUpperCase();o.include=false;include.checked=false;changed();};label.append(input);row.append(label);
+  }
+  for(const [key,title] of [['evidence','Original exhaust inlet evidence'],['exclusion_note','Reason if excluded']]){
+   const label=workflowElement('label',title),input=workflowElement('textarea');input.maxLength=500;input.value=o[key]||'';input.setAttribute('aria-label','Exhaust grille '+(index+1)+' '+key);input.oninput=()=>{o[key]=input.value;changed();};label.append(input);row.append(label);
+  }
+  if(o.review_notice)row.append(workflowElement('p',o.review_notice));
+  row.append(workflowButton('View exhaust grille '+(index+1)+' source',()=>viewSource(o.source,sourcePage(o.reference),o.position)),status);panel.append(row);
+  if(o.include){const total=totals.get(o.system)||{count:0,cfm:0};total.count++;total.cfm+=Number(o.design_cfm||0);totals.set(o.system,total);}
+ }
+ for(const [fan,total] of totals)panel.append(workflowElement('p',fan+': '+total.count+' included exhaust inlets · '+total.cfm+' design CFM'));
+ const errors=exhaustOutletErrors(workflowOriginalPayload());if(errors.length)panel.append(workflowElement('p',errors.join('. ')));
+ for(const el of panel.querySelectorAll('input,textarea,select,button'))el.disabled=workflowBusy;
+ box.append(panel);
+}
 function renderReadiness(force=false){
  const box=$('readiness');if(!box)return;
  // A delayed inventory autosave must not erase a page note or confirmation
@@ -240,7 +268,8 @@ function renderReadiness(force=false){
  const humanPanel=$('human-source-review');
  const manualPanel=$('manual-source-entry');
  const passivePanel=$('passive-path-review');
- if(!force&&(humanPanel?.open&&humanPanel.contains(document.activeElement)||manualPanel?.open&&manualPanel.contains(document.activeElement)))return;
+ const exhaustPanel=$('exhaust-grille-review');
+ if(!force&&(humanPanel?.open&&humanPanel.contains(document.activeElement)||manualPanel?.open&&manualPanel.contains(document.activeElement)||exhaustPanel?.open&&exhaustPanel.contains(document.activeElement)))return;
  const humanOpen=humanPanel?.open===true,manualOpen=manualPanel?.open===true;box.replaceChildren();
  if(humanSourceReview&&!workflowBusy)$('scanstatus').textContent=sourceReviewApproved(workflowOriginalPayload())?'AUTOMATED SCAN: '+scanState.status.toUpperCase()+'. HUMAN SOURCE REVIEW APPROVED FOR THIS INVENTORY.':'Source or inventory changed after human approval. Recheck the changes and approve the reviewed design inventory again.';
  const verified=records.filter(r=>r.status==='VERIFIED').length,unresolved=records.filter(r=>!['VERIFIED','EXCLUDED'].includes(r.status));
@@ -260,9 +289,9 @@ function renderReadiness(force=false){
    if(record.source&&/\.pdf$/i.test(record.source))row.append(workflowButton('View '+record.tag+' source',()=>viewSource(record.source,sourcePage(record.reference))));box.append(row);
  }
  if(scanState.source_checkpoints.length){
-  renderManualSourceEntry(box,manualOpen,force?null:manualPanel);renderPassivePaths(box,passivePanel);renderHumanReview(box,humanOpen);
+  renderManualSourceEntry(box,manualOpen,force?null:manualPanel);renderPassivePaths(box,passivePanel);renderExhaustGrilles(box,exhaustPanel);renderHumanReview(box,humanOpen);
   const heading=workflowElement('h4','Source coverage and page retries');box.append(heading);
-  if(records.length||diffusers.length){
+  if(records.length||diffusers.length||exhaustOutlets.length){
    const recovery=workflowElement('div');recovery.id='source-recovery';
    recovery.append(workflowElement('p','Saved reviews keep your edited values, but temporary source files can expire or disappear after a server restart. Reattach every original file below its original filename. Recovery checks the file contents and rescans to restore previews and page retries, while keeping reviewed values and worksheet choices. You must verify the refreshed observations and approve the inventory again.'));
    const button=workflowButton('Recover sources and keep reviewed values',async()=>{try{await recoverSources();}catch(e){$('job-status').textContent=e.message+' Your current review is preserved.';}});
@@ -320,13 +349,14 @@ async function recoverSources(){
 function applyScanResult(data,retrySourceName,recoverySources){
  if(recoverySources){recoverySourceIdentities(recoverySources,data.source_manifest||[]);recoverySourceIdentities(recoverySources,data.source_checkpoints||[]);}
  const preserving=Boolean(retrySourceName||recoverySources),affectedSources=recoverySources?recoverySources.map(s=>s.name):retrySourceName;
+ const nextExhaust=preserving?reconcileReviewedOutlets(exhaustOutlets,data.exhaust_outlets||[],[],affectedSources):(data.exhaust_outlets||[]);
  const nextOutlets=preserving?reconcileReviewedOutlets(diffusers,data.diffusers||[],data.image_review||[],affectedSources):(data.diffusers||[]);
  const fresh=(data.records||[]).map(r=>{const next={...r};applyProposed(next);return next;});
  const nextRecords=preserving?reconcileReviewedEquipment(records,fresh,retrySourceName,Boolean(recoverySources)):fresh;
  outletBatchUndo=null;
  outletRepeatUndo=null;humanSourceReview=null;
  scanState=validateScanState({status:data.scan_status||'unknown',complete_takeoff:false,source_checkpoints:data.source_checkpoints||[],warnings:data.warnings||[]});renderScanReview();
- records=nextRecords;diffusers=nextOutlets;airPaths=preserving?reconcileAirPaths(airPaths,affectedSources):[];
+ records=nextRecords;diffusers=nextOutlets;exhaustOutlets=nextExhaust;airPaths=preserving?reconcileAirPaths(airPaths,affectedSources):[];
  tags=records.map(r=>r.tag);imageReview=data.image_review||[];
  if(preserving)for(const candidate of imageReview)if(candidate.kind==='diffuser'&&diffusers.some(o=>samePhysicalOutlet(o,outletFromImage(candidate))))candidate.accepted=true;
 imageCoverage=data.image_coverage||[];imageCoverageTruncated=data.image_coverage_truncated===true;
@@ -355,7 +385,7 @@ async function followWorkflowJob(){
     if(status.kind==='scan'){
      if(finished.source_revision!==undefined&&finished.source_revision!==workflowSourceRevision){$('job-status').textContent='The source list changed after this scan started. Your review was preserved. Scan the new source list before building.';return;}
      const data=await readApiJson(await fetch('/api/jobs/'+status.id+'/result'));
-     if(!finished.retry_source&&!finished.recovery_sources&&(records.length||diffusers.length)&&!confirm('Replace the current review with these scan results? Cancel preserves your current review.')){
+     if(!finished.retry_source&&!finished.recovery_sources&&(records.length||diffusers.length||exhaustOutlets.length)&&!confirm('Replace the current review with these scan results? Cancel preserves your current review.')){
       $('job-status').textContent='Scan finished. Current review kept. Use Reconnect completed job to review its results.';$('reconnect-job').hidden=false;return;
      }
      applyScanResult(data,finished.retry_source,finished.recovery_sources);
@@ -394,7 +424,7 @@ function renderComparison(){
 function restoreWorkflow(saved){
  humanSourceReview=null;humanReviewNote=typeof saved.review?.human_review_note==='string'?saved.review.human_review_note:'';humanPageReviews=Array.isArray(saved.review?.human_page_reviews)?saved.review.human_page_reviews:[];
  const data=validateSavedReview(saved.review,[...document.querySelectorAll('.template input')].map(x=>x.value),unitForms,savedTagPattern);
- scanState=validateScanState(data.scan_state);renderScanReview();records=data.records;tags=records.map(r=>r.tag);diffusers=data.diffusers||[];airPaths=data.air_paths||[];imageReview=data.image_review||[];imageCoverage=data.image_coverage||[];imageCoverageTruncated=data.image_coverage_truncated===true;
+ scanState=validateScanState(data.scan_state);renderScanReview();records=data.records;tags=records.map(r=>r.tag);diffusers=data.diffusers||[];airPaths=data.air_paths||[];exhaustOutlets=data.exhaust_outlets||[];imageReview=data.image_review||[];imageCoverage=data.image_coverage||[];imageCoverageTruncated=data.image_coverage_truncated===true;
  $('project').value=data.project;$('location').value=data.location;$('standard').value=data.standard;document.querySelectorAll('.template input').forEach(x=>x.checked=data.templates.includes(x.value));
  scanJobId=typeof saved.scan_job_id==='string'&&/^[a-f0-9]{48}$/.test(saved.scan_job_id)?saved.scan_job_id:null;
  sourceManifest=Array.isArray(saved.source_manifest)?saved.source_manifest.filter(s=>typeof s.name==='string'&&s.name.length<=160).slice(0,100):[];

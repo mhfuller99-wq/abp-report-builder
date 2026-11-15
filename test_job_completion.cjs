@@ -3,7 +3,7 @@ const workflow=fs.readFileSync(__dirname+'/abp_workflow.js','utf8');
 const nodes={};for(const id of ['reconnect-job','job-status','template-recommendations'])nodes[id]={};
 let applied=0,saved=0;const requests=[];
 const context=vm.createContext({$:id=>nodes[id],workflowJob:{id:'finished',source_revision:1},workflowSourceRevision:1,
- records:[],diffusers:[],workflowControls:()=>{},readApiJson:async value=>value,
+ records:[],diffusers:[],exhaustOutlets:[],workflowControls:()=>{},readApiJson:async value=>value,
  fetch:async path=>{requests.push(path);return path.endsWith('/result')?{records:[{tag:'AHU-1'}]}:{id:'finished',kind:'scan',status:'done'};},
  applyScanResult:()=>applied++,workflowRecommendations:async()=>{throw Error('Temporary suggestion service failure');},
  workflowSave:()=>saved++,updateWorkspace:()=>{},renderComparison:()=>{},confirm:()=>{throw Error('Unexpected replacement confirmation');}});

@@ -1,6 +1,59 @@
 const reviewNumericFields=['quantity','design_cfm','osa_cfm','osa_min_cfm','esp','total_sp','motor_hp','motor_volts','motor_phase','motor_fla','motor_rpm','design_gpm','cooling_edb','cooling_ewb','cooling_ldb','cooling_lwb','heating_cfm','heating_edb','heating_ldb','heating_input_btu','heating_output_btu','cooling_total_btu','cooling_sensible_btu','electric_heating_edb','electric_heating_ldb','heater_volts','heater_phase','heater_amps','heater_stages','heating_ewt','heating_lwt','water_dp_ft'];
 const reviewEvidenceFields=['selected_cfm','heater_kw'];
 const reviewTextFields=['manufacturer','model','unit_type','service','equipment_location','area_served','heating_type'];
+const exhaustFields=['include','type','size','system','location','design_cfm','source','reference','source_sha256','evidence','position','position_coordinate_space','manual_locator','quantity','quantity_unresolved','exclusion_note'];
+const exhaustTemplate='Exhaust Grills.xlsx';
+function exhaustOutletErrors(payload,requireReview=true,checkSources=true){
+ if(!payload||typeof payload!=='object'||Array.isArray(payload))return ['Invalid exhaust grille inventory'];
+ const outlets=payload.exhaust_outlets===undefined?[]:payload.exhaust_outlets;
+ if(!Array.isArray(outlets)||outlets.length>500)return ['Invalid exhaust grille inventory'];
+ const records=payload.records===undefined?[]:payload.records,errors=[],seen=new Set(),sources=payload.scan_state?.source_checkpoints||[];
+ const object=x=>x!==null&&typeof x==='object'&&!Array.isArray(x);
+ if(!Array.isArray(records)||records.some(r=>!object(r)))return ['Invalid equipment inventory for exhaust grilles'];
+ const supply=payload.diffusers===undefined?[]:payload.diffusers,templates=payload.templates===undefined?[]:payload.templates;
+ if(!Array.isArray(supply)||supply.some(r=>!object(r)))return ['Invalid supply inventory for exhaust grille comparison'];
+ if(!Array.isArray(templates))return ['Invalid exhaust grille worksheet selection'];
+ for(const o of outlets){
+  if(!o||typeof o!=='object'||Array.isArray(o)||Object.keys(o).some(k=>![...exhaustFields,'review_history','review_notice','latest_observation'].includes(k))){errors.push('Invalid exhaust grille fields; measurements are not design inputs');continue;}
+  if(typeof o.include!=='boolean')errors.push('Choose whether to include each exhaust grille');
+  for(const [key,limit] of [['type',120],['size',120],['system',120],['location',120],['source',160],['reference',80],['manual_locator',120]])if(typeof (o[key]??'')!=='string'||(o[key]||'').length>limit)errors.push('Invalid exhaust grille text');
+  if(o.quantity!==1||o.quantity_unresolved!==false)errors.push('Each exhaust grille row must identify one physical inlet');
+  if(!['number','string'].includes(typeof o.design_cfm)||typeof o.design_cfm==='string'&&!/^[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?$/.test(o.design_cfm.trim())||!Number.isFinite(Number(o.design_cfm))||Number(o.design_cfm)<=0||Number(o.design_cfm)>100000)errors.push('Exhaust grille design CFM must be positive and no more than 100000');
+  const match=typeof o.reference==='string'&&/^page ([1-9]\d{0,2})$/.exec(o.reference);
+  if(typeof o.source_sha256!=='string'||!/^[a-f0-9]{64}$/.test(o.source_sha256)||!match)errors.push('Exhaust grilles need their original source hash and page');
+  else if(checkSources){const found=(Array.isArray(sources)?sources:[]).filter(s=>s&&s.name===o.source&&s.sha256===o.source_sha256);
+   if(found.length!==1||!Number.isInteger(found[0].pages)||Number(match[1])>found[0].pages)errors.push('Exhaust grille source changed or is missing; review the original source again');}
+  if(typeof o.evidence!=='string'||o.evidence.trim().length<20||o.evidence.trim().length>500)errors.push('Record 20–500 characters of exhaust inlet source evidence');
+  if(['type','system','location','manual_locator'].some(k=>typeof o[k]!=='string'||!o[k].trim()))errors.push('Exhaust grilles need a type, exhaust fan, room and distinct physical locator');
+  if(typeof o.type==='string'&&/^(SAG|SAD|SAR|RAG|SUPPLY|RETURN)(\W|\d|$)/i.test(o.type))errors.push('Supply and return devices do not belong on the exhaust grille sheet');
+  if(o.position!=null&&(!Array.isArray(o.position)||o.position.length!==2||o.position.some(v=>typeof v!=='number'||!Number.isFinite(v)||v<0||v>100000)||o.position_coordinate_space!=='displayed_pdf_points'))errors.push('Invalid exhaust grille source position');
+  const key=JSON.stringify([o.source,o.reference,o.manual_locator]);if(seen.has(key))errors.push('Duplicate physical exhaust grille locator');seen.add(key);
+  if(o.include===true){const fans=records.filter(r=>r.tag===o.system&&['Exhaust Fans _Std._.xlsx','Exhaust Fans _Sm._.xlsx'].includes(r.template)&&r.status!=='EXCLUDED');
+   if(fans.length!==1||requireReview&&fans[0].status!=='VERIFIED')errors.push('Every included exhaust grille must belong to one verified exhaust fan');}
+  else if(requireReview&&(typeof o.exclusion_note!=='string'||o.exclusion_note.trim().length<10||o.exclusion_note.trim().length>500))errors.push('Every unchecked exhaust grille needs a source-based exclusion reason');
+ }
+ const included=outlets.filter(o=>o&&o.include===true),physical=[...included,...supply.filter(o=>o.include===true)];
+ if(included.length&&!templates.includes(exhaustTemplate))errors.push('Include the original Exhaust Grills worksheet for the exhaust inlets');
+ for(const [i,a] of included.entries())for(const b of physical.slice(i+1))if(a.source===b.source&&a.reference===b.reference&&Array.isArray(a.position)&&Array.isArray(b.position)&&a.position.length===2&&b.position.length===2&&[...a.position,...b.position].every(n=>typeof n==='number'&&Number.isFinite(n))&&Math.hypot(a.position[0]-b.position[0],a.position[1]-b.position[1])<1)errors.push('One physical inlet cannot be included twice or as both supply and exhaust');
+ return [...new Set(errors)];
+}
+function makeExhaustOutlet(input,state,records,supply,exhaust){
+ if(!['incomplete','review_required'].includes(state.status)||state.complete_takeoff!==false)throw Error('Scan the current sources before adding an exhaust grille.');
+ if(input.confirmed!==true)throw Error('Confirm the original physical exhaust inlet, its fan connection and duplicates.');
+ const source=(state.source_checkpoints||[]).find(s=>s.name===input.source);if(!source)throw Error('Choose the original source document.');
+ const text=value=>String(value??'').trim().toUpperCase(),note=text(input.note);
+ const item={include:false,type:text(input.type),size:text(input.size),system:text(input.system),location:text(input.location),manual_locator:text(input.locator),design_cfm:Number(input.design_cfm),
+  source:source.name,reference:'page '+Number(input.page),source_sha256:source.sha256,evidence:note,quantity:1,quantity_unresolved:false,
+  review_history:[{kind:'manual_source_entry',source:source.name,sha256:source.sha256,page:Number(input.page),note}]};
+ if(String(input.x??'').trim()||String(input.y??'').trim()){
+  if(!String(input.x??'').trim()||!String(input.y??'').trim())throw Error('Enter both source coordinates or leave both blank.');
+  item.position=[Number(input.x),Number(input.y)];item.position_coordinate_space='displayed_pdf_points';
+ }
+ if(!records.some(r=>r.tag===item.system&&r.status!=='EXCLUDED'&&['Exhaust Fans _Std._.xlsx','Exhaust Fans _Sm._.xlsx'].includes(r.template)))throw Error('Assign the grille to its source-confirmed exhaust fan.');
+ if(item.position&&exhaust.some(o=>o.source===item.source&&o.reference===item.reference&&Array.isArray(o.position)&&o.position.length===2&&o.position.every(Number.isFinite)&&Math.hypot(o.position[0]-item.position[0],o.position[1]-item.position[1])<1))throw Error('This physical exhaust inlet already has a review row.');
+ const errors=exhaustOutletErrors({records,diffusers:supply,exhaust_outlets:[...exhaust,item],scan_state:state,templates:[exhaustTemplate]},false);
+ if(errors.length)throw Error(errors.join('. '));return item;
+}
 const componentFields=['component_of','component_kind','component_source_sha256','component_note'];
 function isEquipmentComponent(record){return componentFields.some(key=>Object.hasOwn(record,key));}
 function equipmentComponentErrors(payload,requireVerified=true,checkSources=true){
@@ -93,6 +146,9 @@ function validateSavedReview(data, templates, forms, tagPattern) {
   const object=x=>x!==null&&typeof x==='object'&&!Array.isArray(x);
   const numeric=x=>(typeof x==='number'||typeof x==='string'&&x.trim()!=='')&&Number.isFinite(Number(x))&&Number(x)>=0&&Number(x)<=1000000;
   const fields=reviewNumericFields;
+  if(Array.isArray(data?.templates)&&data.templates.includes('Exhaust Grilles.xlsx.xlsx'))data={...data,
+   templates:[...new Set(data.templates.map(t=>t==='Exhaust Grilles.xlsx.xlsx'?exhaustTemplate:t))],source_review:null,
+   template_migration_notice:'The old grille-named fan form was replaced with the genuine original Exhaust Grills worksheet. Review the worksheet selection and source inventory again.'};
   if(!object(data)||data.format!=='ABP-PREFIELD-REVIEW'||data.version!==1||typeof data.project!=='string'||data.project.length>180||typeof data.location!=='string'||data.location.length>180||!['Commercial','USACE'].includes(data.standard)||!Array.isArray(data.records)||data.records.length>500||!Array.isArray(data.templates)||data.templates.some(t=>typeof t!=='string'||!templates.includes(t))||new Set(data.templates).size!==data.templates.length) invalid();
   if(data.human_page_reviews!==undefined&&(!Array.isArray(data.human_page_reviews)||data.human_page_reviews.length>30000||data.human_page_reviews.some(p=>!object(p)||typeof p.source!=='string'||p.source.length>160||! /^[a-f0-9]{64}$/.test(p.sha256||'')||!Number.isInteger(p.page)||p.page<1||p.page>300||!['reviewed','not_applicable'].includes(p.disposition)||typeof p.note!=='string'||p.note.trim().length<10||p.note.length>500)))invalid();
   if(data.human_review_note!==undefined&&(typeof data.human_review_note!=='string'||data.human_review_note.length>1000))invalid();
@@ -125,6 +181,7 @@ function validateSavedReview(data, templates, forms, tagPattern) {
   validateScanState(data.scan_state);
   if(airPathErrors(data,false,false).length)invalid();
   if(equipmentComponentErrors(data,false,false).length)invalid();
+  if(exhaustOutletErrors(data,false,false).length)invalid();
   return {...data,records:data.records.map(r=>({...r,tag:r.tag.toUpperCase()}))};
 }
 
@@ -397,13 +454,15 @@ function sourceInventorySnapshot(payload){
  const project=(rows,keys)=>rows.map(r=>Object.fromEntries(keys.filter(k=>Object.hasOwn(r,k)).map(k=>[k,r[k]])));
  const snapshot={project:payload.project||'',location:payload.location||'',templates:payload.templates||[],standard:payload.standard||'Commercial',records:project(payload.records||[],recordKeys),diffusers:project(payload.diffusers||[],outletKeys),image_decisions:(payload.image_review||[]).map(r=>({accepted:r.accepted??false,excluded:r.excluded??false,exclusion_note:r.exclusion_note||'',tag:r.tag||'',source:r.source||'',page:r.page??null,position:r.position??null}))};
  if(payload.air_paths?.length)snapshot.air_paths=project(payload.air_paths,airPathFields);
+ if(payload.exhaust_outlets?.length)snapshot.exhaust_outlets=project(payload.exhaust_outlets,exhaustFields);
  return snapshot;
 }
 function sourceReviewErrors(payload){
  const state=payload.scan_state||{},review=payload.source_review;
  if(!review||typeof review!=='object')return ['Human source review has not been approved'];
+ for(const key of ['records','diffusers','image_review','exhaust_outlets'])if(payload[key]!==undefined&&(!Array.isArray(payload[key])||payload[key].some(r=>!r||typeof r!=='object'||Array.isArray(r))))return ['Invalid source inventory'];
  if(payload.air_paths!==undefined&&(!Array.isArray(payload.air_paths)||payload.air_paths.some(p=>!p||typeof p!=='object'||Array.isArray(p))))return ['Invalid passive supply paths'];
- const errors=[...airPathErrors(payload),...equipmentComponentErrors(payload)];
+ const errors=[...airPathErrors(payload),...equipmentComponentErrors(payload),...exhaustOutletErrors(payload)];
  if(review.version!==1||review.approved!==true)errors.push('Human source review has not been approved');
  if(!['incomplete','review_required'].includes(state.status)||state.complete_takeoff!==false)errors.push('Sources are unscanned, outdated or unknown');
  if(JSON.stringify(review.scan_state)!==JSON.stringify(state))errors.push('Source scan changed after human review');

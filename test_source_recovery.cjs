@@ -30,12 +30,13 @@ const workflow=fs.readFileSync(__dirname+'/abp_workflow.js','utf8');
 vm.runInContext(workflow.slice(workflow.indexOf('function applyScanResult('),workflow.indexOf('async function workflowRecommendations(')),ctx);
 const nodes={scanstatus:{}};Object.assign(ctx,{
  records:[oldRecord,missingRecord],diffusers:[oldOutlet,missingOutlet],airPaths:[{tag:'L-7',kind:'passive_supply',status:'VERIFIED',source:'plan.pdf',source_sha256:'a'.repeat(64),reference:'page 1',location:'STORAGE',note:'Original plan shows passive louver feeding supply outlets.'}],
+ exhaustOutlets:[{...oldOutlet,type:'EAG-1',system:'EF-2',manual_locator:'RESTROOM NORTH',source_sha256:'a'.repeat(64),evidence:'Original source shows one exhaust inlet connected to EF-2.'}],
  outletBatchUndo:{},outletRepeatUndo:{},$:id=>nodes[id],applyProposed:()=>{},renderScanReview:()=>{},renderReview:()=>{},renderOutlets:()=>{},renderImageReview:()=>{},renderImageCoverage:()=>{},workflowSave:()=>{}
 });
 vm.runInContext("humanSourceReview={approved:true};humanPageReviews=[{source:'plan.pdf',page:1}];humanReviewNote='SOURCE REVIEW RETAINED';",ctx);
 const checkpoints=identities.map(s=>({...s,pages:1,native_status:'completed_native_stage',image_status:'incomplete'}));
 const data={records:[freshRecord],diffusers:[{...oldOutlet,design_cfm:125}],scan_status:'incomplete',source_checkpoints:checkpoints,source_manifest:identities,job_id:'f'.repeat(48)};
-const current=()=>vm.runInContext('JSON.stringify([records,diffusers,airPaths,humanSourceReview,scanState])',ctx),snapshot=current();
+const current=()=>vm.runInContext('JSON.stringify([records,diffusers,exhaustOutlets,airPaths,humanSourceReview,scanState])',ctx),snapshot=current();
 for(const altered of [{...data,source_manifest:undefined},{...data,source_manifest:[{...identities[0],sha256:'e'.repeat(64)},identities[1]]},{...data,source_checkpoints:[]}]){
  assert.throws(()=>ctx.applyScanResult(altered,null,identities));assert.equal(current(),snapshot);
 }
@@ -45,4 +46,7 @@ assert.equal(vm.runInContext('humanSourceReview',ctx),null);assert.equal(vm.runI
 assert.equal(ctx.scanJobId,'f'.repeat(48));assert.equal(vm.runInContext('scanState.complete_takeoff',ctx),false);
 assert(ctx.records.every(r=>r.status==='UNVERIFIED'));assert(ctx.diffusers.every(o=>o.include===false));
 assert.equal(ctx.airPaths[0].status,'UNVERIFIED');assert.equal(ctx.airPaths[0].source_sha256,'a'.repeat(64));
+assert.equal(ctx.exhaustOutlets.length,1);assert.equal(ctx.exhaustOutlets[0].include,false);
+assert.equal(ctx.exhaustOutlets[0].source_sha256,'a'.repeat(64));assert.equal(ctx.exhaustOutlets[0].design_cfm,150);
+assert.equal(ctx.exhaustOutlets[0].manual_locator,'RESTROOM NORTH');
 console.log('Hash-bound source recovery preserves reviewed and missing rows, rejects changed sources atomically, and requires fresh approval.');

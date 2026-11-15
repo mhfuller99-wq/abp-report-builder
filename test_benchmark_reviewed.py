@@ -29,6 +29,48 @@ def reviewed_example():
 
 
 class ReviewedBenchmarkTests(unittest.TestCase):
+    def test_exhaust_inventory_is_separate_required_and_not_a_raw_manual_success(self):
+        project,raw,review=reviewed_example()
+        expected={'id':'EXHAUST-NORTH','source':'plan.pdf','page':2,'position':[80,90],
+            'values':{'type':'EAG-3','design_cfm':90},'review_fields':{'system':'EF-7','location':'RESTROOM','size':'8'},
+            'must_withhold':['actual_cfm','initial_cfm']}
+        project['expected'].update(exhaust_outlets=[expected],exhaust_outlet_inventory_complete=True)
+        self.assertEqual(evaluate(project,raw)['exhaust_outlet_counts'],{'expected':1,'actual':0,'matched':0})
+        self.assertFalse(evaluate_reviewed(project,review)['reviewed_inventory_pass'])
+        fan={'tag':'EF-7','status':'VERIFIED','template':'Exhaust Fans _Sm._.xlsx','design_cfm':90}
+        project['expected']['equipment'].append({'tag':'EF-7','source':'plan.pdf','page':2,'values':{'design_cfm':90},'reviewed_values':{'template':fan['template'],'design_cfm':90}})
+        review['records'].append(fan);review['templates']+=['Exhaust Grills.xlsx',fan['template']]
+        grille={'include':True,**expected['values'],**expected['review_fields'],'source':'plan.pdf','reference':'page 2',
+            'source_sha256':'a'*64,'position':[80,90],'position_coordinate_space':'displayed_pdf_points','manual_locator':'NORTH INLET',
+            'evidence':'Independent physical plan and fan connection reviewed.', 'quantity':1,'quantity_unresolved':False}
+        review['exhaust_outlets']=[grille]
+        review['source_review']['inventory']['records'].append(copy.deepcopy(fan))
+        review['source_review']['inventory']['templates']=copy.deepcopy(review['templates'])
+        review['source_review']['inventory']['exhaust_outlets']=copy.deepcopy(review['exhaust_outlets'])
+        result=evaluate_reviewed(project,review)
+        self.assertTrue(result['reviewed_inventory_pass'],result['errors'])
+        self.assertEqual(result['matched_exhaust_outlets'],1);self.assertEqual(result['physical_equipment_count'],2)
+        for key,value in [('design_cfm',91),('size','12'),('system','RTU-1'),('source_sha256','b'*64),('reference','page 1'),('quantity',True),('manual_locator',''),('evidence','ok'),('actual_cfm',88)]:
+            changed=copy.deepcopy(review);changed['exhaust_outlets'][0][key]=value
+            changed['source_review']['inventory']['exhaust_outlets'][0][key]=value
+            self.assertFalse(evaluate_reviewed(project,changed)['reviewed_inventory_pass'],key)
+        changed=copy.deepcopy(review);changed['exhaust_outlets'][0]['design_cfm']=91
+        self.assertIn('human_source_approval_missing_or_stale',[e['code'] for e in evaluate_reviewed(project,changed)['errors']])
+        changed=copy.deepcopy(review);changed['exhaust_outlets']*=2;changed['source_review']['inventory']['exhaust_outlets']=copy.deepcopy(changed['exhaust_outlets'])
+        self.assertFalse(evaluate_reviewed(project,changed)['reviewed_inventory_pass'])
+        raw['exhaust_outlets']=[{**grille,'include':False}]
+        self.assertIn('manual_source_entry_in_raw',[e['code'] for e in evaluate(project,raw)['errors']])
+        raw['exhaust_outlets'][0].pop('manual_locator')
+        self.assertNotIn('manual_source_entry_in_raw',[e['code'] for e in evaluate(project,raw)['errors']])
+        raw['exhaust_outlets'][0]['review_history']=[{'kind':'manual_source_entry'}]
+        self.assertIn('manual_source_entry_in_raw',[e['code'] for e in evaluate(project,raw)['errors']])
+
+    def test_zero_and_boolean_equipment_quantities_do_not_default_to_one(self):
+        for quantity in (0,False,True,'NaN','0'):
+            project,_,review=reviewed_example();review['records'][0]['quantity']=quantity
+            review['source_review']['inventory']['records'][0]['quantity']=quantity
+            self.assertFalse(evaluate_reviewed(project,review)['reviewed_inventory_pass'],quantity)
+
     def test_linked_form_has_its_own_source_values_and_does_not_double_count_parent(self):
         project,raw,review=reviewed_example()
         child={'tag':'RTU-1 EXHAUST','component_of':'RTU-1','component_kind':'integral_exhaust',

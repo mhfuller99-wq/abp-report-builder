@@ -75,3 +75,13 @@ in the review log. Save/restore and retries retain those identities; missing or
 duplicated physical rows block both partial and fully reviewed builds. For these
 cases, private expected outlets can identify each physical row with an
 `instance_locator` in addition to its common source/page/annotation position.
+
+Exhaust grille rows are a separate `exhaust_outlets` inventory, with the same
+independent physical source anchors and field expectations. They cannot satisfy
+supply outlet matches. Reviewed rows also require their source SHA, a distinct
+physical locator, evidence, and one verified exhaust fan. The genuine original
+`Exhaust Grills.xlsx` form has 29 inlet rows per page and no total formula; the
+writer preserves that design. The older similarly named pack file contains a fan
+form and cannot substitute for it. A suite can bind `required_exhaust_template`
+by name and SHA in addition to checking the downloaded workbook. Manual exhaust
+entries remain manual work and cannot turn a failed raw scan into a raw pass.
