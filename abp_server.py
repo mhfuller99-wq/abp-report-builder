@@ -17,7 +17,7 @@ from abp_job import NUMERIC_FIELDS, TEXT_FIELDS, COIL_FORMS, canonical_tag, post
 from abp_schedule import parse_pdf, annotate
 from abp_scan import scan as bounded_pdf_scan, ScanIncomplete
 from abp_review_gate import partial_review_allowed, partial_review_lines
-from abp_ocr_candidates import reconcile_diffuser_sources
+from abp_ocr_candidates import reconcile_diffuser_sources,retain_image_quantity_guards
 from abp_inventory import validate_inventory, expand_instances
 from abp_source_review import source_review_approved
 
@@ -269,6 +269,7 @@ def read_sources(blobs, *, runner=None):
     names=[Path(name).name[:160] for name,_ in blobs]
     ambiguous_names={name for name in names if names.count(name)>1}
     reconcile_diffuser_sources([o for o in diffusers if o.get('source') not in ambiguous_names], image_review)
+    retain_image_quantity_guards([o for o in diffusers if o.get('source') not in ambiguous_names], image_review)
     return {'scan_status':'incomplete' if incomplete_sources else 'review_required','complete_takeoff':False,'source_checkpoints':checkpoints,'tags':list(records)[:MAX_RECORDS],'records':list(records.values())[:MAX_RECORDS],'diffusers':diffusers[:500],'image_review':image_review,'image_coverage':image_coverage,'image_coverage_truncated':image_coverage_truncated,'warnings':warnings,'characters':total_chars,'sources':sources,'preview':'\n'.join(preview)[:1800],'signals':sorted(signals),'sparse':sparse}
 
 # These labels only suggest which original ABP workbook to include.
@@ -674,6 +675,9 @@ def validate_payload(payload):
     validate_inventory(records)
     outlets=payload.get('diffusers',[])
     if not isinstance(outlets,list) or len(outlets)>500:raise ValueError('Invalid supply outlets')
+    from abp_outlet_instances import outlet_instance_errors
+    instance_errors=outlet_instance_errors(outlets)
+    if instance_errors:raise ValueError('; '.join(instance_errors))
     if any(isinstance(item,dict) and item.get('include') is not False for item in outlets) and 'Supply Diffusers.xlsx' not in selected:
         raise ValueError('Include the Supply Diffusers worksheet for the included outlets')
     for item in outlets:

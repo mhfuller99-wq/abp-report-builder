@@ -584,11 +584,15 @@ def keyed_outlets(words, page_number, name, legend):
         quantities=[re.fullmatch(r'\(TYP[- ](\d+)\)',w[4],re.I) for w in words
                     if abs(center(w)-center(word)) < 25 and 0 < w[1]-numbers[0][1] < 18]
         quantities=[int(m[1]) for m in quantities if m]
-        if len(quantities)==1 and 1 < quantities[0] <= 50:
+        quantities=sorted(set(q for q in quantities if q>1))
+        if quantities:
             item=result[-1]
-            item['evidence'] += f'; explicitly repeated TYP-{quantities[0]}; confirm each physical location'
-            for occurrence in range(2,quantities[0]+1):
-                result.append({**item,'evidence':item['evidence']+f'; occurrence {occurrence}'})
+            item['evidence'] += '; repeated TYP count '+'/'.join(map(str,quantities))+'; confirm each physical location'
+            # One annotation is not N independently located physical outlets.
+            # Keep its count through deduplication for explicit source review.
+            if len(quantities)==1:item['quantity']=quantities[0]
+            else:item['quantity_candidates']=quantities
+            item['quantity_unresolved']=True
     return sorted(result, key=lambda item: (item['position'][1], item['position'][0]))
 
 

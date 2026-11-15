@@ -818,6 +818,8 @@ def diffuser_candidates(words, source, page, *, plan_confirmed=False):
                        'evidence_text': item.get('evidence', '') + ('; page position (points): ' + str(item['position']) if item.get('position') else ''),
                        'position': item.get('position'), 'position_coordinate_space': 'displayed_pdf_points',
                        'review_reasons': ['Confirm device, size, airflow, duct connection and room in the original drawing.']})
+        for key in ('quantity','quantity_unresolved','quantity_candidates'):
+            if key in item:result[-1][key]=item[key]
     return result
 
 

@@ -311,5 +311,24 @@ def distinct_outlets(items):
                        all(item.get(k)==old.get(k) for k in ('source','reference','type','design_cfm')) and
                        math.dist(p,old['position'])<4),None)
         if duplicate is None:result.append(item)
-        elif not duplicate.get('size') and item.get('size'):duplicate['size']=item['size'];duplicate['shape']=item['shape']
+        else:
+            if not duplicate.get('size') and item.get('size'):duplicate['size']=item['size'];duplicate['shape']=item['shape']
+            merge_outlet_quantity(duplicate,item)
     return result
+
+
+def merge_outlet_quantity(existing,incoming):
+    """A parser which misses a repeat marker cannot erase its quantity witness."""
+    if not any(row.get('quantity_unresolved') or row.get('quantity_candidates')
+               or type(row.get('quantity'))==int and row['quantity']>1
+               for row in (existing,incoming)):return
+    existing['quantity_unresolved']=True
+    counts=set()
+    for row in (existing,incoming):
+        for value in [row.get('quantity'),*(row.get('quantity_candidates') or [])]:
+            if type(value)==int and value>1:counts.add(value)
+    if len(counts)==1 and not existing.get('quantity_candidates') and not incoming.get('quantity_candidates'):
+        existing['quantity']=counts.pop()
+    elif counts:
+        existing.pop('quantity',None)
+        existing['quantity_candidates']=sorted(counts)

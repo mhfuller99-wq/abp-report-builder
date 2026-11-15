@@ -6,11 +6,12 @@ inventory, template or project change. It does not certify field measurements.
 """
 import copy
 from abp_job import NUMERIC_FIELDS,TEXT_FIELDS
+from abp_outlet_instances import outlet_instance_errors
 
 
 def inventory_snapshot(payload):
     record_keys=('tag','status','template','coil_template','source','reference','instance_locations',*NUMERIC_FIELDS,*TEXT_FIELDS)
-    outlet_keys=('include','type','size','system','location','design_cfm','source','reference','position','quantity','quantity_unresolved','exclusion_note')
+    outlet_keys=('include','type','size','system','location','design_cfm','source','reference','position','quantity','quantity_unresolved','quantity_candidates','exclusion_note','repeat_resolution','repeat_instance')
     def project(rows,keys):return [{k:r[k] for k in keys if k in r} for r in rows]
     return copy.deepcopy({'project':payload.get('project',''),'location':payload.get('location',''),
         'templates':payload.get('templates',[]),'standard':payload.get('standard','Commercial'),
@@ -57,6 +58,7 @@ def source_review_errors(payload):
             errors.append('Every page needs a reviewed / not applicable disposition and source note')
     if actual!=expected:errors.append('Every uploaded page must be accounted for against its source hash')
     records=payload.get('records',[]);outlets=payload.get('diffusers',[])
+    errors.extend(outlet_instance_errors(outlets))
     supply_units={str(r.get('tag','')).strip().upper() for r in records if r.get('status')=='VERIFIED'
                   and r.get('template') not in ('Exhaust Fans _Sm._.xlsx','Exhaust Fans _Std._.xlsx','Kitchen Hood.xlsx','Chiller - Air Cooled.xlsx','Chiller - Water Cooled.xlsx')}
     if any(r.get('status') not in ('VERIFIED','EXCLUDED') for r in records):errors.append('Resolve every equipment review row')

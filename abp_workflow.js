@@ -43,7 +43,7 @@ function renderOutletTotals(){
   if(o.include===false)continue;
   const system=String(o.system||'Unassigned').trim().toUpperCase();
   const item=systems.get(system)||{count:0,total:0};item.count++;item.total+=Number(o.design_cfm||0);systems.set(system,item);
-  if(o.position?.length===2){const k=JSON.stringify([o.source,o.reference,o.position.map(n=>Math.round(n*10)/10)]);if(positions.has(k))duplicates++;positions.set(k,i);}
+  if(o.position?.length===2){const k=JSON.stringify([o.source,o.reference,o.position.map(n=>Math.round(n*10)/10),o.repeat_instance?.index??null]);if(positions.has(k))duplicates++;positions.set(k,i);}
  }
  for(const [system,s] of [...systems].sort((a,b)=>a[0].localeCompare(b[0]))){
   const record=records.find(r=>r.tag===system),target=record?.design_cfm;
@@ -52,7 +52,7 @@ function renderOutletTotals(){
  if(duplicates)box.append(workflowElement('p','Review '+duplicates+' repeated source positions before building. Repeated flow values alone are not treated as duplicates.'));
  if(new Set(diffusers.map(o=>o.source).filter(Boolean)).size>1)box.append(workflowElement('p','Multiple source documents contain outlet candidates. Review revisions and duplicates; no drawing is silently superseded.'));
 }
-let outletBatchUndo=null;
+let outletBatchUndo=null,outletRepeatUndo=null;
 renderOutlets=function(){
  workflowOriginalOutlets();const box=$('outlets');if(!diffusers.length)return;
  const totals=workflowElement('div');totals.id='outlet-totals';box.insertBefore(totals,box.children[2]);
@@ -68,11 +68,25 @@ renderOutlets=function(){
  rows.forEach((row,index)=>{
   const o=diffusers[index],cell=workflowElement('td'),check=document.createElement('input');check.type='checkbox';check.dataset.batchOutlet=index;check.setAttribute('aria-label','Select outlet '+(index+1)+' for batch assignment');cell.append(check);row.prepend(cell);
   const inclusion=row.querySelector('input[aria-label="Include outlet '+(index+1)+' in supply sheet"]');
+  if(o.repeat_resolution||o.quantity_unresolved||o.quantity>1){inclusion.disabled=true;inclusion.title='Resolve the repeated annotation and include its individual physical rows.';}
   const exclusion=workflowElement('label','Reason this outlet is excluded'),reason=document.createElement('input');
   reason.maxLength=500;reason.value=o.exclusion_note||'';reason.setAttribute('aria-label','Outlet '+(index+1)+' exclusion reason');
   reason.oninput=()=>{o.exclusion_note=reason.value;workflowChanged();};exclusion.append(reason);exclusion.hidden=o.include!==false;row.lastElementChild.append(exclusion);
   inclusion.addEventListener('change',()=>{exclusion.hidden=inclusion.checked;if(inclusion.checked){const sheet=[...document.querySelectorAll('.template input')].find(x=>x.value==='Supply Diffusers.xlsx');if(sheet)sheet.checked=true;updateWorkspace();}});
   row.lastElementChild.append(document.createElement('br'),workflowButton('View outlet '+(index+1)+' source',()=>viewSource(o.source,sourcePage(o.reference),o.position)));
+  if(o.repeat_instance)row.lastElementChild.append(workflowElement('p','Physical outlet '+o.repeat_instance.index+': '+o.repeat_instance.locator+' — human-reviewed repeated callout.'));
+  if((o.quantity_unresolved||o.quantity>1)&&!o.repeat_resolution){
+   const details=workflowElement('details'),summary=workflowElement('summary','Resolve repeated outlet '+(index+1)+' ('+(o.quantity||'unknown')+' physical locations)');details.append(summary);
+   details.append(workflowElement('p','Identify every physical outlet from the original drawing. Enter one distinct room and position per line. The original annotation remains in the review log; new physical rows start unchecked.'));
+   const countLabel=workflowElement('label','Reviewed physical count'),count=document.createElement('input');count.type='number';count.min=2;count.max=100;count.step=1;count.value=o.quantity||'';count.setAttribute('aria-label','Outlet '+(index+1)+' reviewed repeated count');countLabel.append(count);details.append(countLabel);
+   if(o.quantity_candidates?.length)details.append(workflowElement('p','Conflicting source readings: '+o.quantity_candidates.join(', ')+'. Confirm the count from the original drawing.'));
+   const locLabel=workflowElement('label','Physical locators'),locators=document.createElement('textarea');locators.maxLength=12100;locators.setAttribute('aria-label','Outlet '+(index+1)+' repeated physical locators');locLabel.append(locators);
+   const evidenceLabel=workflowElement('label','Source basis for the count and airflow'),evidence=document.createElement('input');evidence.maxLength=500;evidence.setAttribute('aria-label','Outlet '+(index+1)+' repetition evidence');evidenceLabel.append(evidence);
+   const confirmLabel=workflowElement('label',' I checked each physical location and confirmed this airflow applies to each outlet, not the combined group.'),confirm=document.createElement('input');confirm.type='checkbox';confirm.setAttribute('aria-label','Confirm outlet '+(index+1)+' repeated count and per-outlet airflow');confirmLabel.prepend(confirm);
+   const status=workflowElement('p');status.setAttribute('role','status');
+   details.append(locLabel,evidenceLabel,confirmLabel,workflowButton('Create physical rows for outlet '+(index+1),()=>{try{const result=resolveRepeatedOutlet(diffusers,index,locators.value.split('\n'),evidence.value,confirm.checked,Number(count.value));diffusers=result.outlets;outletRepeatUndo=result.action;outletBatchUndo=null;humanSourceReview=null;renderOutlets();workflowChanged();}catch(e){status.textContent=e.message;}}),status);row.lastElementChild.append(details);
+  }
+  if(o.repeat_resolution)row.lastElementChild.append(workflowElement('p','Aggregate annotation resolved into '+o.repeat_resolution.locators.length+' physical rows. Source basis: '+o.repeat_resolution.note));
   if(o.review_notice)row.lastElementChild.append(workflowElement('p',o.review_notice));
   if(o.latest_observation)row.lastElementChild.append(workflowElement('p','Latest source observation: '+Object.entries(o.latest_observation).map(([k,v])=>k+': '+(v??'UNREAD')).join(' · ')));
  });
@@ -80,7 +94,9 @@ renderOutlets=function(){
  // Stable dataset mapping avoids interpreting identical CFM values as one outlet.
  const originalRows=[...table.querySelectorAll('tr')].slice(1);originalRows.forEach((row,i)=>row.dataset.outletIndex=i);
  originalRows.sort((a,b)=>String(diffusers[+a.dataset.outletIndex].system||'').localeCompare(String(diffusers[+b.dataset.outletIndex].system||''))||Number(a.dataset.outletIndex)-Number(b.dataset.outletIndex));
- for(const row of originalRows)table.append(row);renderOutletTotals();
+ for(const row of originalRows)table.append(row);
+ if(outletRepeatUndo){const status=workflowElement('p');status.setAttribute('role','status');box.append(workflowButton('Undo last repeated-callout resolution',()=>{try{diffusers=undoRepeatedOutlet(diffusers,outletRepeatUndo);outletRepeatUndo=null;humanSourceReview=null;renderOutlets();workflowChanged();}catch(e){status.textContent=e.message;}}),status);}
+ renderOutletTotals();
 };
 renderReview=function(){
  const expanded=[...$('review').querySelectorAll('details[open]')].map(d=>d.querySelector('summary')?.textContent);

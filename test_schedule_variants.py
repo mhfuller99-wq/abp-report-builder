@@ -37,7 +37,9 @@ class ScheduleVariants(unittest.TestCase):
     def test_offset_cfm_and_explicit_quantity(self):
         words=[w(0,0,'HVAC'),w(20,0,'PLAN'),w(100,100,'R-7'),w(80,112,'180'),w(96,112,'CFM'),w(90,124,'(TYP-3)')]
         found=keyed_outlets(words,2,'synthetic.pdf',{'R-7':'12x6'})
-        self.assertEqual(len(found),3)
+        self.assertEqual(len(found),1)
+        self.assertEqual(found[0]['quantity'],3)
+        self.assertTrue(found[0]['quantity_unresolved'])
         self.assertTrue(all(x['design_cfm']==180 and not x['include'] for x in found))
 
     def test_revisions_do_not_silently_overwrite_design(self):

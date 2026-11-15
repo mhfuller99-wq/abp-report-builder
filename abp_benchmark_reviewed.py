@@ -10,7 +10,7 @@ from abp_benchmark import same,page,point
 # Independent copy of the report-input approval contract. Deliberately do not
 # call the application's approval function while auditing that same function.
 RECORD_INPUTS=('tag status template coil_template source reference instance_locations quantity design_cfm osa_cfm osa_min_cfm esp total_sp motor_hp motor_volts motor_phase motor_fla motor_rpm design_gpm cooling_edb cooling_ewb cooling_ldb cooling_lwb heating_cfm heating_edb heating_ldb heating_input_btu heating_output_btu cooling_total_btu cooling_sensible_btu electric_heating_edb electric_heating_ldb heater_volts heater_phase heater_amps heater_stages heater_kw heating_ewt heating_lwt water_dp_ft manufacturer model unit_type service equipment_location area_served heating_type').split()
-OUTLET_INPUTS='include type size system location design_cfm source reference position quantity quantity_unresolved exclusion_note'.split()
+OUTLET_INPUTS='include type size system location design_cfm source reference position quantity quantity_unresolved quantity_candidates exclusion_note repeat_resolution repeat_instance'.split()
 
 
 def same_reviewed(actual,expected):
@@ -48,7 +48,8 @@ def evaluate_reviewed(project,review):
     known=project['expected'];actual=[d for d in review.get('diffusers',[]) if d.get('include') is True];used=set()
     for expected in known.get('outlets',[]):
         choices=[i for i,item in enumerate(actual) if item.get('source')==expected['source'] and page(item)==expected['page']
-            and point(item) is not None and math.dist(point(item),expected['position'])<=expected.get('tolerance_points',6)]
+            and point(item) is not None and math.dist(point(item),expected['position'])<=expected.get('tolerance_points',6)
+            and (expected.get('instance_locator') is None or item.get('repeat_instance',{}).get('locator')==expected['instance_locator'])]
         if len(choices)!=1:error('missing_or_duplicate_reviewed_outlet',id=expected['id'],count=len(choices));continue
         index=choices[0]
         if index in used:error('shared_physical_outlet',id=expected['id']);continue

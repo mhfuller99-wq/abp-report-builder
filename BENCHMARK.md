@@ -65,3 +65,13 @@ template checks above. These are evidence requirements, not automatic assertions
 Set suite-level `required_holdouts: 2` when two qualified held-out projects are
 required. Neither reviewed acceptance nor a passing suite upgrades automatic scan
 coverage or certifies field measurements.
+
+Repeated annotations such as `TYP-20` remain a single unresolved source witness.
+They may not be included as one outlet or silently expanded into identical rows.
+The browser's repeated-callout review retains the original count observations,
+requires an explicit reviewed count and distinct physical locators, and starts
+every resulting physical row unchecked. The original annotation remains excluded
+in the review log. Save/restore and retries retain those identities; missing or
+duplicated physical rows block both partial and fully reviewed builds. For these
+cases, private expected outlets can identify each physical row with an
+`instance_locator` in addition to its common source/page/annotation position.

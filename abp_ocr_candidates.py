@@ -33,7 +33,8 @@ def _reason(candidate, text):
 def _reading(candidate):
     result = {key: copy.deepcopy(candidate[key]) for key in
             ('type', 'size', 'shape', 'type_confidence', 'position', 'region',
-             'review_values', 'values', 'design_cfm', 'evidence_text')
+             'review_values', 'values', 'design_cfm', 'evidence_text',
+             'quantity','quantity_unresolved','quantity_candidates')
             if key in candidate}
     if 'type_confidence' in result:
         result['type_confidence'] = _confidence(candidate)
@@ -143,6 +144,8 @@ def merge_diffuser_candidate(existing, incoming, *, tolerance=6):
         return False
     old = matches[0]
     _remember(old, incoming)
+    from abp_outlets import merge_outlet_quantity
+    merge_outlet_quantity(old,incoming)
     agrees = bool(_printed(old)) and _printed(old) == _printed(incoming)
     flow_agrees = bool(_flow_text(old)) and _flow_text(old) == _flow_text(incoming)
     old_lines, new_lines = _printed(old).split('/'), _printed(incoming).split('/')
@@ -361,3 +364,24 @@ def reconcile_diffuser_sources(native_outlets,image_candidates,*,tolerance=6):
         _withhold_native_conflicts(candidate)
         candidate['native_reconciled']=True
     return image_candidates
+
+
+def retain_image_quantity_guards(native_outlets,image_candidates):
+    """Carry only repeat-count warnings onto uniquely matched RAW native rows.
+
+    Run after reconciliation. No CFM, type, neck, assignment or inclusion is
+    transferred. A duplicate image must not conceal a TYP count from review.
+    """
+    from abp_outlets import merge_outlet_quantity
+    for image in image_candidates:
+        if (image.get('kind')!='diffuser' or image.get('native_outlet_match') is not True
+                or image.get('native_outlet_ambiguous') or image.get('accepted')
+                or image.get('include') or image.get('status','UNVERIFIED')!='UNVERIFIED'):continue
+        point=_reconciliation_position(image);space=_position_space(image);key=_source_page(image)
+        if point is None or space is None or key is None:continue
+        matches=[row for row in native_outlets if _source_page(row)==key and _position_space(row)==space
+                 and _reconciliation_position(row) is not None and math.dist(point,row['position'])<=6]
+        if len(matches)!=1:continue
+        row=matches[0]
+        if row.get('include') or row.get('repeat_resolution') or row.get('repeat_instance'):continue
+        merge_outlet_quantity(row,image)

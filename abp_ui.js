@@ -89,6 +89,7 @@ function validateSavedReview(data, templates, forms, tagPattern) {
     if(r.candidates!==undefined&&(!Array.isArray(r.candidates)||r.candidates.length>30||r.candidates.some(c=>!object(c)||!object(c.values)||Object.entries(c.values).some(([k,v])=>reviewTextFields.includes(k)?typeof v!=='string'||v.length>120:(!fields.includes(k)&&!reviewEvidenceFields.includes(k))||!numeric(v))||['source','reference','evidence'].some(k=>c[k]!==undefined&&typeof c[k]!=='string')))) invalid();
   }
   if(data.diffusers!==undefined&&(!Array.isArray(data.diffusers)||data.diffusers.length>500||data.diffusers.some(d=>!object(d)||(d.design_cfm!==undefined&&d.design_cfm!==null&&d.design_cfm!==''&&!numeric(d.design_cfm))||(d.exclusion_note!==undefined&&(typeof d.exclusion_note!=='string'||d.exclusion_note.length>500))))) invalid();
+  if(outletInstanceErrors((data.diffusers||[]).filter(d=>d.repeat_resolution!==undefined||d.repeat_instance!==undefined)).length)invalid();
   if(data.image_coverage_truncated!==undefined&&typeof data.image_coverage_truncated!=='boolean')invalid();
   if(data.image_coverage!==undefined&&(!Array.isArray(data.image_coverage)||data.image_coverage.length>1000||data.image_coverage.some(p=>!object(p)||typeof p.source!=='string'||p.source.length>160||!Number.isInteger(p.page)||p.page<1||p.page>300||typeof (p.status||p.ocr_status)!=='string'||(p.status||p.ocr_status).length>100||p.regions_omitted!==undefined&&(!Number.isInteger(p.regions_omitted)||p.regions_omitted<0||p.regions_omitted>100000)||['image_regions_truncated','selection_truncated'].some(k=>p[k]!==undefined&&typeof p[k]!=='boolean')||p.selection_failed!==undefined&&(typeof p.selection_failed!=='string'||p.selection_failed.length>100)||p.unexamined_content!==undefined&&(typeof p.unexamined_content!=='string'||p.unexamined_content.length>1000)||p.regions!==undefined&&(!Array.isArray(p.regions)||p.regions.length>100||p.regions.some(r=>!object(r)||typeof r.status!=='string'||r.status.length>100||r.box!==undefined&&(!Array.isArray(r.box)||r.box.length!==4||r.box.some(x=>typeof x!=='number'||!Number.isFinite(x)||Math.abs(x)>100000))||r.reason!==undefined&&(typeof r.reason!=='string'||r.reason.length>1000)||r.method!==undefined&&(typeof r.method!=='string'||r.method.length>100)||r.pixels!==undefined&&(!Number.isInteger(r.pixels)||r.pixels<0||r.pixels>100000000))))))invalid();
   if(data.image_review!==undefined&&(!Array.isArray(data.image_review)||data.image_review.length>500||data.image_review.some(c=>!object(c)||!['kitchen_hood','diffuser','equipment'].includes(c.kind)||typeof c.tag!=='string'||c.tag.length>80||typeof c.source!=='string'||c.source.length>160||!Number.isInteger(c.page)||c.page<1||c.page>300||!object(c.review_values)||Object.entries(c.review_values).some(([k,v])=>!(c.kind==='equipment'?fields:['exhaust_cfm','supply_cfm','makeup_air_cfm','design_cfm']).includes(k)||!numeric(v))||c.evidence_text!==undefined&&(typeof c.evidence_text!=='string'||c.evidence_text.length>4000)||c.review_reasons!==undefined&&(!Array.isArray(c.review_reasons)||c.review_reasons.length>20||c.review_reasons.some(x=>typeof x!=='string'||x.length>1000))||['type','size'].some(k=>c[k]!==undefined&&(typeof c[k]!=='string'||c[k].length>120))||c.accepted!==undefined&&typeof c.accepted!=='boolean')))invalid();
@@ -155,12 +156,13 @@ function renderScanReview(){
 // Stable source observations survive review edits; CFM/room are not identity.
 function outletFromImage(candidate){
  const outlet={include:false,type:candidate.type||'',size:candidate.size||'',design_cfm:candidate.review_values?.design_cfm??null,system:'',location:'',source:candidate.source,reference:'page '+candidate.page,evidence:candidate.evidence_text||''};
- for(const key of ['position','position_coordinate_space','region','region_coordinate_space','coordinate_space','method','shape','quantity','quantity_unresolved'])if(candidate[key]!==undefined)outlet[key]=JSON.parse(JSON.stringify(candidate[key]));
+ for(const key of ['position','position_coordinate_space','region','region_coordinate_space','coordinate_space','method','shape','quantity','quantity_unresolved','quantity_candidates'])if(candidate[key]!==undefined)outlet[key]=JSON.parse(JSON.stringify(candidate[key]));
  outlet.observation={type:outlet.type,size:outlet.size,design_cfm:outlet.design_cfm};
  return outlet;
 }
 function samePhysicalOutlet(a,b){
  if(a.source!==b.source||a.reference!==b.reference)return false;
+ if(a.repeat_instance||b.repeat_instance)return Boolean(a.repeat_instance&&b.repeat_instance&&a.repeat_instance.group===b.repeat_instance.group&&a.repeat_instance.index===b.repeat_instance.index);
  if(!Array.isArray(a.position)||!Array.isArray(b.position)||a.position.length!==2||b.position.length!==2)return false;
  return a.position.every(Number.isFinite)&&b.position.every(Number.isFinite)&&Math.hypot(a.position[0]-b.position[0],a.position[1]-b.position[1])<=2;
 }
@@ -178,7 +180,7 @@ function reconcileReviewedOutlets(previous,native,images,retried){
   if(matches.length===1&&!consumed.has(matches[0])){
    const index=matches[0],incoming=observations[index];consumed.add(index);
    result.push(affected?{...old,include:false,prior_inclusion:old.include!==false,
-    latest_observation:{type:incoming.type,size:incoming.size,design_cfm:incoming.design_cfm},
+    latest_observation:{type:incoming.type,size:incoming.size,design_cfm:incoming.design_cfm,...(incoming.quantity!==undefined?{quantity:incoming.quantity}:{}),...(incoming.quantity_candidates?{quantity_candidates:incoming.quantity_candidates}:{})},
     review_notice:'This source was retried. Your reviewed values and associations were retained. Compare the new source observation, then check Include again.'}:old);
   }else{
    for(const index of matches)consumed.add(index);
@@ -206,11 +208,61 @@ function undoOutletBatch(outlets,action){
  return outlets.map((o,i)=>{const row=action.rows.find(r=>r.index===i);return row?{...o,...row.before,review_history:[...(o.review_history||[]),{kind:'undo_batch',at:new Date().toISOString(),batch_at:action.at}]}:o;});
 }
 
+function resolveRepeatedOutlet(outlets,index,locations,note,confirmed=false,reviewedCount){
+ if(confirmed!==true)throw Error('Confirm the physical count and whether the printed airflow applies to each outlet.');
+ const original=outlets[index];
+ if(!original||original.repeat_resolution||original.repeat_instance)throw Error('This callout was already resolved; review its physical rows.');
+ const count=reviewedCount===undefined?original.quantity:reviewedCount;
+ if(!original.quantity_unresolved&&!(original.quantity>1))throw Error('This row has no repeated source annotation to resolve.');
+ if(!Number.isInteger(count)||count<2||count>100)throw Error('A source-supported repeated count between 2 and 100 is required.');
+ if(!Array.isArray(original.position)||original.position.length!==2||original.position.some(x=>!Number.isFinite(x))||!original.source||!original.reference)throw Error('The repeated callout needs an original source page and position.');
+ if(!Array.isArray(locations)||locations.some(x=>typeof x!=='string'))throw Error('Enter one physical locator per line.');
+ const locators=locations.map(x=>x.trim().toUpperCase()).filter(Boolean);
+ if(locators.length!==count||locators.some(x=>x.length>120)||new Set(locators).size!==count)throw Error('Enter exactly '+count+' distinct physical locators, one per line (room and position, such as OFFICE 101 / NORTH).');
+ if(typeof note!=='string'||note.trim().length<10||note.trim().length>500)throw Error('Describe the source evidence establishing every physical outlet (10–500 characters).');
+ if(outlets.length+count>500)throw Error('Resolving this count exceeds the 500-row review limit. Split the source set.');
+ const group=JSON.stringify([original.source,original.reference,original.position]);
+ if(outlets.some(o=>o.repeat_resolution?.group===group))throw Error('This source callout already has a physical resolution.');
+ const parent={...original,quantity:count,include:false,exclusion_note:'AGGREGATE CALLOUT REPLACED BY '+count+' SOURCE-REVIEWED PHYSICAL ROWS.',repeat_resolution:{group,locators,note:note.trim(),source_quantity:original.quantity??null,source_quantity_candidates:original.quantity_candidates||[]}};
+ const children=locators.map((locator,i)=>{const item={...original,include:false,quantity:1,quantity_unresolved:false,repeat_instance:{group,index:i+1,locator},location:locator,exclusion_note:'',review_notice:'Manually resolved from a repeated source callout. Check this physical location and Include after source review.'};delete item.repeat_resolution;return item;});
+ const result=outlets.map((o,i)=>i===index?parent:o).concat(children);
+ return {outlets:result,action:{index,before:JSON.parse(JSON.stringify(original)),after:JSON.parse(JSON.stringify(parent)),children:JSON.parse(JSON.stringify(children)),start:outlets.length}};
+}
+function undoRepeatedOutlet(outlets,action){
+ if(!action||outlets.length!==action.start+action.children.length||JSON.stringify(outlets[action.index])!==JSON.stringify(action.after)||JSON.stringify(outlets.slice(action.start))!==JSON.stringify(action.children))throw Error('Physical rows changed after resolution. Keep the newer edits and review them individually.');
+ return outlets.slice(0,action.start).map((o,i)=>i===action.index?action.before:o);
+}
+function outletInstanceErrors(outlets){
+ const errors=[],parents=new Map(),children=new Map(),text=(v,min=1,max=120)=>typeof v==='string'&&v.trim().length>=min&&v.trim().length<=max;
+ for(const o of outlets){
+  if(o.include!==false&&(o.quantity_unresolved||o.quantity!==undefined&&o.quantity!==1))errors.push('Resolve the repeated outlet count into reviewed physical rows before including it');
+  if(o.repeat_resolution!==undefined){
+   const p=o.repeat_resolution;let identity;
+   try{identity=typeof p?.group==='string'&&p.group.length<=600?JSON.parse(p.group):null;}catch(e){identity=null;}
+   const validSource=text(o.source,1,160)&&text(o.reference,1,120)&&Array.isArray(o.position)&&o.position.length===2&&o.position.every(Number.isFinite);
+   const validWitness=p&&(p.source_quantity===null||Number.isInteger(p.source_quantity)&&p.source_quantity>1)&&Array.isArray(p.source_quantity_candidates)&&p.source_quantity_candidates.length<=100&&p.source_quantity_candidates.every(x=>Number.isInteger(x)&&x>1);
+   if(!p||!validSource||!validWitness||JSON.stringify(identity)!==JSON.stringify([o.source,o.reference,o.position])||!Array.isArray(p.locators)||p.locators.length<2||p.locators.length>100||p.locators.some(x=>!text(x))||new Set(p.locators.map(x=>x.trim().toUpperCase())).size!==p.locators.length||o.quantity!==p.locators.length||o.include!==false||!text(p.note,10,500)){errors.push('Repeated callout needs its reviewed count, original source and distinct physical locators');continue;}
+   if(parents.has(p.group))errors.push('Duplicate repeated callout review');parents.set(p.group,[o,p]);
+  }
+  if(o.repeat_instance!==undefined){
+   const c=o.repeat_instance;if(!c||!text(c.group,1,600)||!Number.isInteger(c.index)){errors.push('Invalid repeated outlet identity');continue;}
+   const list=children.get(c.group)||[];list.push(o);children.set(c.group,list);
+  }
+ }
+ for(const group of new Set([...parents.keys(),...children.keys()])){
+  if(!parents.has(group)){errors.push('Repeated outlets lost their original callout review');continue;}
+  const [original,parent]=parents.get(group),rows=children.get(group)||[],indices=rows.map(o=>o.repeat_instance.index).sort((a,b)=>a-b);
+  if(JSON.stringify(indices)!==JSON.stringify(parent.locators.map((_,i)=>i+1))){errors.push('Repeated callout physical rows are missing or duplicated');continue;}
+  for(const o of rows){const c=o.repeat_instance;if(c.locator!==parent.locators[c.index-1]||['source','reference','position'].some(k=>JSON.stringify(o[k])!==JSON.stringify(original[k]))||o.quantity!==1||o.quantity_unresolved!==false||o.repeat_resolution!==undefined)errors.push('Repeated outlet source identity changed; review the callout again');}
+ }
+ return [...new Set(errors)];
+}
+
 
 let humanSourceReview=null,humanPageReviews=[],humanReviewNote='';
 function sourceInventorySnapshot(payload){
  const recordKeys=['tag','status','template','coil_template','source','reference','instance_locations',...reviewNumericFields,'heater_kw',...reviewTextFields];
- const outletKeys=['include','type','size','system','location','design_cfm','source','reference','position','quantity','quantity_unresolved','exclusion_note'];
+ const outletKeys=['include','type','size','system','location','design_cfm','source','reference','position','quantity','quantity_unresolved','quantity_candidates','exclusion_note','repeat_resolution','repeat_instance'];
  const project=(rows,keys)=>rows.map(r=>Object.fromEntries(keys.filter(k=>Object.hasOwn(r,k)).map(k=>[k,r[k]])));
  return {project:payload.project||'',location:payload.location||'',templates:payload.templates||[],standard:payload.standard||'Commercial',records:project(payload.records||[],recordKeys),diffusers:project(payload.diffusers||[],outletKeys),image_decisions:(payload.image_review||[]).map(r=>({accepted:r.accepted??false,excluded:r.excluded??false,exclusion_note:r.exclusion_note||'',tag:r.tag||'',source:r.source||'',page:r.page??null,position:r.position??null}))};
 }
@@ -237,6 +289,7 @@ function sourceReviewErrors(payload){
  }
  if(actual.size!==expected.size||[...actual].some(k=>!expected.has(k)))errors.push('Every uploaded page must be accounted for against its source hash');
  if((payload.records||[]).some(r=>!['VERIFIED','EXCLUDED'].includes(r.status)))errors.push('Resolve every equipment review row');
+ errors.push(...outletInstanceErrors(payload.diffusers||[]));
  if((payload.image_review||[]).some(c=>c.accepted!==true&&!(c.excluded===true&&typeof c.exclusion_note==='string'&&c.exclusion_note.trim().length>=10&&c.exclusion_note.trim().length<=500)))errors.push('Resolve every image candidate: add it or exclude it with a reason');
  if(!(payload.records||[]).some(r=>r.status==='VERIFIED')&&!(payload.diffusers||[]).some(o=>o.include===true))errors.push('The reviewed inventory is empty');
  if((payload.diffusers||[]).some(o=>o.include===true)&&!(payload.templates||[]).includes('Supply Diffusers.xlsx'))errors.push('Include the Supply Diffusers worksheet for the included outlets');
