@@ -96,15 +96,18 @@ def read(page, box, native, pixels, timeout, engine, transposed_hint=None):
         def point(value):
             p=pymupdf.Point(value)*matrix
             return pymupdf.Point(p.x-render_rect.x0+10,p.y-render_rect.y0+10)
+        # Finish each path independently (including its stroke width), but
+        # write the accumulated PDF content once. One commit per glyph grows
+        # thousands of content streams and exhausts constrained-host deadlines.
+        shape=target.new_shape()
         for index,path in enumerate(selected):
             if index%128==0 and time.monotonic()-started>=timeout:
                 raise TimeoutError('Outlined schedule rendering deadline')
-            shape=target.new_shape()
             for item in path['items']:
                 if item[0]=='l':shape.draw_line(point(item[1]),point(item[2]))
                 else:shape.draw_bezier(*[point(p) for p in item[1:]])
             shape.finish(color=(0,0,0),width=path.get('width',1),closePath=False)
-            shape.commit()
+        shape.commit()
         remaining=timeout-(time.monotonic()-started)
         if remaining<=0:raise TimeoutError('Outlined schedule rendering deadline')
         words=engine(target,pixels,remaining,clip=list(target.rect),psm=11,max_zoom=5)
