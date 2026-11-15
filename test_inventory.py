@@ -48,5 +48,16 @@ class InventoryTests(unittest.TestCase):
         self.assertTrue(any('RECT' in name.upper() for name in workbook.sheetnames))
         self.assertTrue(any('RND' in name.upper() or 'ROUND' in name.upper() for name in workbook.sheetnames))
 
+    def test_reviewed_nameplate_speed_does_not_populate_measured_fan_speed(self):
+        record={'tag':'AHU-7','status':'VERIFIED','template':'Air Moving Equipment.xlsx',
+                'motor_rpm':1075,'motor_hp':.5,'design_cfm':800,'fan_rpm':854}
+        book=load_workbook(io.BytesIO(build({'project':'NAMEPLATE','templates':[record['template']],'records':[record]})))
+        original=load_workbook(LOOKUP[record['template']]).active;sheet=book[original.title]
+        self.assertEqual(sheet['T7'].value,1075)
+        self.assertIsNone(sheet['T22'].value)
+        for row in original:
+            for cell in row:
+                if cell.data_type=='f':self.assertEqual(sheet[cell.coordinate].value,cell.value)
+
 
 if __name__=='__main__':unittest.main()
