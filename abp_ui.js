@@ -166,6 +166,18 @@ function samePhysicalOutlet(a,b){
  if(!Array.isArray(a.position)||!Array.isArray(b.position)||a.position.length!==2||b.position.length!==2)return false;
  return a.position.every(Number.isFinite)&&b.position.every(Number.isFinite)&&Math.hypot(a.position[0]-b.position[0],a.position[1]-b.position[1])<=2;
 }
+function recoverySourceIdentities(expected,actual){
+ if(!Array.isArray(expected)||!expected.length||expected.length>100)throw Error('The saved review has no complete source identity list. Use a new scan and review its results.');
+ const names=new Set(),identities=expected.map(s=>{
+  if(!s||typeof s.name!=='string'||!s.name.length||s.name.length>160||/[\\/]/.test(s.name)||names.has(s.name)||typeof s.sha256!=='string'||!/^[a-f0-9]{64}$/.test(s.sha256))throw Error('The saved review has invalid source identities. Use a new scan and review its results.');
+  names.add(s.name);return {name:s.name,sha256:s.sha256};
+ });
+ if(actual!==undefined){
+  const uploaded=recoverySourceIdentities(actual),byName=new Map(uploaded.map(s=>[s.name,s.sha256]));
+  if(uploaded.length!==identities.length||identities.some(s=>byName.get(s.name)!==s.sha256))throw Error('Source files differ from the saved review. Reattach every original file with the same name and contents. Your reviewed values were not replaced.');
+ }
+ return identities;
+}
 function reconcileReviewedOutlets(previous,native,images,retried){
  const observations=native.map(o=>({...o}));
  for(const candidate of images.filter(c=>c.kind==='diffuser')){
@@ -176,7 +188,9 @@ function reconcileReviewedOutlets(previous,native,images,retried){
  const consumed=new Set(),result=[];
  for(const old of previous){
   const matches=observations.map((o,i)=>samePhysicalOutlet(old,o)?i:-1).filter(i=>i>=0);
-  const affected=old.source===retried;
+  // An array denotes recovery of the complete source set. Even a legacy row
+  // without source metadata must be rechecked, never silently retained as included.
+  const affected=Array.isArray(retried)||old.source===retried;
   if(matches.length===1&&!consumed.has(matches[0])){
    const index=matches[0],incoming=observations[index];consumed.add(index);
    result.push(affected?{...old,include:false,prior_inclusion:old.include!==false,
@@ -190,6 +204,17 @@ function reconcileReviewedOutlets(previous,native,images,retried){
  }
  for(let i=0;i<native.length;i++)if(!consumed.has(i))result.push(observations[i]);
  if(result.length>500)throw Error('Outlet review limit exceeded; previous review was preserved.');
+ return result;
+}
+function reconcileReviewedEquipment(previous,fresh,retried,recovering=false){
+ const prior=new Map(previous.map(r=>[r.tag,r]));
+ const result=fresh.map(r=>{
+  const old=prior.get(r.tag);if(!old)return r;prior.delete(r.tag);
+  const affected=recovering||old.source===retried||(old.occurrences||[]).some(c=>c.source===retried)||(r.candidates||[]).some(c=>c.source===retried);
+  return affected?{...r,...old,candidates:r.candidates,occurrences:r.occurrences,proposed:r.proposed,text_proposed:r.text_proposed,flags:r.flags,status:'UNVERIFIED'}:old;
+ });
+ for(const old of prior.values())result.push({...old,status:'UNVERIFIED',flags:[...(old.flags||[]),'Prior equipment was not recovered. Check its original source before verification.']});
+ if(result.length>500)throw Error('Equipment review limit exceeded; previous review was preserved.');
  return result;
 }
 function assignOutletBatch(outlets,indices,values,note){

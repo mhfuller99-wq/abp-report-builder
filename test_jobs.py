@@ -1,7 +1,7 @@
-import io,json,tempfile,threading,time,unittest
+import hashlib,io,json,tempfile,threading,time,unittest
 from pathlib import Path
 from unittest.mock import patch
-from abp_jobs import Jobs,merge_pages,SourceRunner
+from abp_jobs import Jobs,merge_pages,SourceRunner,validate_recovery_sources
 
 class JobTests(unittest.TestCase):
     def test_cached_reader_and_source_identity_must_both_match(self):
@@ -84,5 +84,25 @@ class JobTests(unittest.TestCase):
         nextjob=jobs.create('scan',parent=first['id'],retry={'source_index':0,'stage':'images','page_numbers':[2]});child=self.finish(jobs,nextjob['id'])
         self.assertFalse((child['root']/'inflight.tmp').exists())
         self.assertEqual(parent['sources'],child['sources']);self.assertEqual((parent['root']/'source-0.pdf').read_bytes(),(child['root']/'source-0.pdf').read_bytes())
+
+    def test_recovery_matches_server_computed_bytes_before_scanning(self):
+        calls=[]
+        def read(blobs,runner):calls.append([name for name,_ in blobs]);return {'records':[]}
+        jobs=Jobs(threading.Lock(),read,None)
+        values=[('plan.pdf',b'original plan'),('selection.pdf',b'original selection')]
+        expected=[{'name':name,'sha256':hashlib.sha256(data).hexdigest()} for name,data in values]
+        for altered in ([('plan.pdf',b'changed plan'),values[1]],values[:1],values+[('extra.pdf',b'extra')]):
+            with self.assertRaisesRegex(ValueError,'differ from the saved review'):
+                jobs.create('scan',parts=[('files',name,io.BytesIO(data)) for name,data in altered],expected_sources=expected)
+            self.assertEqual(jobs.jobs,{});self.assertEqual(calls,[]);self.assertEqual([p for p in jobs.root().iterdir() if p.name!='owner.json'],[])
+        created=jobs.create('scan',parts=[('files',name,io.BytesIO(data)) for name,data in reversed(values)],expected_sources=expected)
+        restored=self.finish(jobs,created['id']);self.assertEqual(restored['status'],'done')
+        self.assertEqual(calls,[['selection.pdf','plan.pdf']])
+        self.assertFalse(any(restored['root'].glob('*-native.json'))) # No client-supplied checkpoint was trusted.
+
+    def test_recovery_rejects_missing_duplicate_or_invalid_identity(self):
+        valid={'name':'plan.pdf','sha256':'a'*64}
+        for expected in (None,[],[valid,valid],[dict(valid,name='../plan.pdf')],[dict(valid,sha256='wrong')]):
+            with self.assertRaises(ValueError):validate_recovery_sources(expected,[valid])
 
 if __name__=='__main__':unittest.main()

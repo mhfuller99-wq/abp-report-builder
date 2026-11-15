@@ -14,6 +14,22 @@ TTL=2*60*60
 MAX_RETAINED_BYTES=350_000_000
 MAX_JOBS=24
 
+def validate_recovery_sources(expected, actual):
+    """Only reconnect the identical source set; filenames alone are not identity."""
+    if not isinstance(expected,list) or not 1<=len(expected)<=100:
+        raise ValueError('Recovery needs the original source names and SHA256 hashes')
+    identities={}
+    for source in expected:
+        if not isinstance(source,dict):raise ValueError('Invalid recovery source identity')
+        name=source.get('name');digest=source.get('sha256')
+        if (not isinstance(name,str) or not 1<=len(name)<=160 or '/' in name or '\\' in name
+                or not isinstance(digest,str) or not re.fullmatch(r'[a-f0-9]{64}',digest)
+                or name in identities):
+            raise ValueError('Recovery needs distinct original source names and SHA256 hashes')
+        identities[name]=digest
+    if len(actual)!=len(identities) or {s['name']:s['sha256'] for s in actual}!=identities:
+        raise ValueError('Source files differ from the saved review. Reattach every original file with the same name and contents. Your reviewed values were not replaced.')
+
 def write_json(path,value):
     data=json.dumps(value,allow_nan=False).encode('utf-8')
     if len(data)>8_000_000:raise ValueError('Job result is too large; use fewer source documents')
@@ -130,7 +146,7 @@ class Jobs:
             if job['status'] in ('done','failed') and time.time()-job['updated']>TTL:
                 shutil.rmtree(job['root']);del self.jobs[token]
     def size(self):return sum(p.stat().st_size for p in self.root().rglob('*') if p.is_file())
-    def create(self,kind,*,parts=None,payload=None,parent=None,retry=None):
+    def create(self,kind,*,parts=None,payload=None,parent=None,retry=None,expected_sources=None):
         with self.lock:
             self.prune()
             if len(self.jobs)>=MAX_JOBS or sum(j['status'] in ('queued','running','uploading') for j in self.jobs.values())>=3:
@@ -165,6 +181,9 @@ class Jobs:
                                 dest.write(block);h.update(block)
                         job['sources'].append({'name':name,'file':path.name,'bytes':size,'sha256':h.hexdigest()})
                     if not job['sources']:raise ValueError('Choose source documents first')
+                if expected_sources is not None:
+                    if kind!='scan' or parent or parts is None:raise ValueError('Recovery requires uploaded scan sources')
+                    validate_recovery_sources(expected_sources,job['sources'])
                 if payload is not None:write_json(root/'payload.json',payload)
                 if self.size()>MAX_RETAINED_BYTES:raise ValueError('Temporary document capacity reached; save your review and try a smaller source set')
                 job.update(status='queued',progress={'message':'Queued for document processing'})

@@ -29,9 +29,9 @@ function viewSource(name,page=1,position){
  $('source-view-title').textContent=name+' · page '+page+(position?' · callout near ['+position.map(n=>Math.round(n)).join(', ')+'] PDF points':'');
  $('source-preview').alt='Source drawing preview for '+name+', page '+page;
  $('source-preview-status').textContent='Loading source page…';
- if(!scanJobId||index<0){$('source-preview').removeAttribute('src');$('source-preview-status').textContent='Reattach this source and scan to enable its preview. The saved design review is still available.';return;}
+ if(!scanJobId||index<0){$('source-preview').removeAttribute('src');$('source-preview-status').textContent='Reattach the original files, then use Recover sources and keep reviewed values under Source coverage. The saved design review is still available.';return;}
  $('source-preview').onload=()=>{$('source-preview-status').textContent='Check the full drawing, revision, duct connection and room. Coordinates identify the extracted callout; they do not prove supply service.';};
- $('source-preview').onerror=()=>{$('source-preview-status').textContent='Preview unavailable or source expired. Open the original locally, or reattach it and scan again.';};
+ $('source-preview').onerror=()=>{$('source-preview-status').textContent='Preview unavailable or source expired. Reattach the original files and use Recover sources and keep reviewed values under Source coverage, or open the original locally.';};
  $('source-preview').src='/api/jobs/'+scanJobId+'/preview?source='+index+'&page='+page;
  $('source-preview-large').href=$('source-preview').src;$('source-review-layout').classList.add('viewing');
  panel.scrollIntoView({block:'nearest'});
@@ -137,7 +137,7 @@ function renderHumanReview(box,wasOpen){
  }
  const label=workflowElement('label','Final review basis, differences and deliberate blanks'),input=workflowElement('textarea');input.maxLength=1000;input.value=humanReviewNote;input.setAttribute('aria-label','Final source review basis');input.oninput=()=>{humanReviewNote=input.value;workflowSave();};label.append(input);panel.append(label);
  const confirm=workflowElement('input');confirm.type='checkbox';const confirmLabel=workflowElement('label');confirmLabel.append(confirm,document.createTextNode(' I compared the final inventory with all applicable source pages, resolved differences, and accounted for missing design information.'));panel.append(confirmLabel);
- panel.append(workflowButton('Approve reviewed design inventory',()=>{try{if(!confirm.checked)throw Error('Confirm the completed source review first.');humanSourceReview=makeSourceReview(workflowOriginalPayload(),humanPageReviews,humanReviewNote);workflowSave();renderReadiness(true);}catch(e){message.textContent=e.message;}}),message);box.append(panel);
+ panel.append(workflowButton('Approve reviewed design inventory',()=>{try{if(workflowBusy)throw Error('Wait for the current document job.');if(!confirm.checked)throw Error('Confirm the completed source review first.');humanSourceReview=makeSourceReview(workflowOriginalPayload(),humanPageReviews,humanReviewNote);workflowSave();renderReadiness(true);}catch(e){message.textContent=e.message;}}),message);for(const control of panel.querySelectorAll('input,textarea,select,button'))control.disabled=workflowBusy;box.append(panel);
 }
 function renderReadiness(force=false){
  const box=$('readiness');if(!box)return;
@@ -166,6 +166,12 @@ function renderReadiness(force=false){
  if(scanState.source_checkpoints.length){
   renderHumanReview(box,humanOpen);
   const heading=workflowElement('h4','Source coverage and page retries');box.append(heading);
+  if(records.length||diffusers.length){
+   const recovery=workflowElement('div');recovery.id='source-recovery';
+   recovery.append(workflowElement('p','Saved reviews keep your edited values, but temporary source files can expire or disappear after a server restart. Reattach every original file below its original filename. Recovery checks the file contents and rescans to restore previews and page retries, while keeping reviewed values and worksheet choices. You must verify the refreshed observations and approve the inventory again.'));
+   const button=workflowButton('Recover sources and keep reviewed values',async()=>{try{await recoverSources();}catch(e){$('job-status').textContent=e.message+' Your current review is preserved.';}});
+   button.disabled=workflowBusy||!sourceFiles.length;recovery.append(button);if(!sourceFiles.length)recovery.append(workflowElement('p','Choose the original files in Upload source documents to enable recovery.'));box.append(recovery);
+  }
   scanState.source_checkpoints.forEach(c=>{
    const row=workflowElement('div');row.className='source-checkpoint';
    row.append(workflowElement('strong',c.name),workflowElement('p','Native: '+c.native_status.replaceAll('_',' ')+' · Images: '+c.image_status.replaceAll('_',' ')+(c.pages?' · '+c.pages+' pages':'')));
@@ -203,26 +209,34 @@ async function retrySource(name,stage,pages){
  workflowJob={...(await readApiJson(await fetch('/api/jobs/'+scanJobId+'/retry',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({source_index:index,stage,page_numbers:selection})}))),retry_source:name,retry_pages:selection,retry_stage:stage,source_revision:workflowSourceRevision};
  workflowSave();await followWorkflowJob();
 }
-function applyScanResult(data,retrySourceName){
- const nextOutlets=retrySourceName?reconcileReviewedOutlets(diffusers,data.diffusers||[],data.image_review||[],retrySourceName):(data.diffusers||[]);
- outletBatchUndo=null;
- scanState=validateScanState({status:data.scan_status||'unknown',complete_takeoff:false,source_checkpoints:data.source_checkpoints||[],warnings:data.warnings||[]});renderScanReview();
+async function recoverSources(){
+ if(workflowBusy)throw Error('Wait for the current document job.');
+ const expected=recoverySourceIdentities(scanState.source_checkpoints);
+ if(sourceFiles.length!==expected.length||expected.some(s=>!sourceFiles.some(f=>f.name===s.name)))throw Error('Choose every original source file with its original filename before recovery.');
+ try{
+  workflowControls(true);$('job-status').textContent='Checking original source files for recovery…';
+  const form=new FormData();for(const file of sourceFiles)form.append('files',file);form.append('recovery_sources',JSON.stringify(expected));
+  const job=await readApiJson(await fetch('/api/jobs/scan',{method:'POST',body:form}));
+  recoverySourceIdentities(expected,job.sources||[]);
+  workflowJob={...job,recovery_sources:expected,source_revision:workflowSourceRevision};workflowSave();await followWorkflowJob();
+ }finally{workflowControls(false);}
+}
+function applyScanResult(data,retrySourceName,recoverySources){
+ if(recoverySources){recoverySourceIdentities(recoverySources,data.source_manifest||[]);recoverySourceIdentities(recoverySources,data.source_checkpoints||[]);}
+ const preserving=Boolean(retrySourceName||recoverySources),affectedSources=recoverySources?recoverySources.map(s=>s.name):retrySourceName;
+ const nextOutlets=preserving?reconcileReviewedOutlets(diffusers,data.diffusers||[],data.image_review||[],affectedSources):(data.diffusers||[]);
  const fresh=(data.records||[]).map(r=>{const next={...r};applyProposed(next);return next;});
- if(retrySourceName){
-  const prior=new Map(records.map(r=>[r.tag,r]));
-  records=fresh.map(r=>{const old=prior.get(r.tag);if(!old)return r;prior.delete(r.tag);
-   const affected=old.source===retrySourceName||(old.occurrences||[]).some(c=>c.source===retrySourceName)||(r.candidates||[]).some(c=>c.source===retrySourceName);
-   return affected?{...r,...old,candidates:r.candidates,occurrences:r.occurrences,proposed:r.proposed,text_proposed:r.text_proposed,flags:r.flags,status:'UNVERIFIED'}:old;
-  });
-  for(const old of prior.values())records.push({...old,status:'UNVERIFIED'});
-  diffusers=nextOutlets;
- }else{records=fresh;diffusers=data.diffusers||[];}
+ const nextRecords=preserving?reconcileReviewedEquipment(records,fresh,retrySourceName,Boolean(recoverySources)):fresh;
+ outletBatchUndo=null;
+ outletRepeatUndo=null;humanSourceReview=null;
+ scanState=validateScanState({status:data.scan_status||'unknown',complete_takeoff:false,source_checkpoints:data.source_checkpoints||[],warnings:data.warnings||[]});renderScanReview();
+ records=nextRecords;diffusers=nextOutlets;
  tags=records.map(r=>r.tag);imageReview=data.image_review||[];
- if(retrySourceName)for(const candidate of imageReview)if(candidate.kind==='diffuser'&&diffusers.some(o=>samePhysicalOutlet(o,outletFromImage(candidate))))candidate.accepted=true;
+ if(preserving)for(const candidate of imageReview)if(candidate.kind==='diffuser'&&diffusers.some(o=>samePhysicalOutlet(o,outletFromImage(candidate))))candidate.accepted=true;
 imageCoverage=data.image_coverage||[];imageCoverageTruncated=data.image_coverage_truncated===true;
  scanJobId=data.job_id;sourceManifest=data.source_manifest||[];
  renderReview();renderOutlets();renderImageReview();renderImageCoverage();
- $('scanstatus').textContent=(data.scan_status==='incomplete'?'SCAN INCOMPLETE. Completed results retained. ':'Source results ready for review. ')+scanCandidateSummary(records,diffusers,imageReview)+(retrySourceName?'Retried '+retrySourceName+'; affected equipment requires fresh verification. ':'')+(data.warnings||[]).join(' | ');
+ $('scanstatus').textContent=(data.scan_status==='incomplete'?'SCAN INCOMPLETE. Completed results retained. ':'Source results ready for review. ')+scanCandidateSummary(records,diffusers,imageReview)+(recoverySources?'Original sources recovered. Reviewed values retained; equipment and outlet inclusion require fresh verification. ':retrySourceName?'Retried '+retrySourceName+'; affected equipment requires fresh verification. ':'')+(data.warnings||[]).join(' | ');
  workflowSave();
 }
 async function workflowRecommendations(data){
@@ -245,11 +259,11 @@ async function followWorkflowJob(){
     if(status.kind==='scan'){
      if(finished.source_revision!==undefined&&finished.source_revision!==workflowSourceRevision){$('job-status').textContent='The source list changed after this scan started. Your review was preserved. Scan the new source list before building.';return;}
      const data=await readApiJson(await fetch('/api/jobs/'+status.id+'/result'));
-     if(!finished.retry_source&&(records.length||diffusers.length)&&!confirm('Replace the current review with these scan results? Cancel preserves your current review.')){
+     if(!finished.retry_source&&!finished.recovery_sources&&(records.length||diffusers.length)&&!confirm('Replace the current review with these scan results? Cancel preserves your current review.')){
       $('job-status').textContent='Scan finished. Current review kept. Use Reconnect completed job to review its results.';$('reconnect-job').hidden=false;return;
      }
-     applyScanResult(data,finished.retry_source);if(!finished.retry_source)await workflowRecommendations(data);
-     $('job-status').textContent='Scan finished. Check source coverage, unresolved equipment and outlet totals below.';
+     applyScanResult(data,finished.retry_source,finished.recovery_sources);if(!finished.retry_source&&!finished.recovery_sources)await workflowRecommendations(data);
+     $('job-status').textContent=finished.recovery_sources?'Source recovery finished. Original files matched; edited values and worksheet choices were retained. Recheck equipment and outlet inclusion, then approve the inventory again.':'Scan finished. Check source coverage, unresolved equipment and outlet totals below.';
     }else{
      completedBuild={id:status.id,project:finished.project,partial:finished.partial};const link=$('download-report');link.href='/api/jobs/'+status.id+'/result';link.download=String(finished.project||'ABP').replace(/[^a-z0-9_-]+/gi,'_')+'_PreField_TAB.xlsx';link.hidden=false;link.textContent='Download checked Excel report';link.click();
      $('status').textContent=status.kind==='reference'?'Report built from the approved reference. Original formula XML preserved; field readings and signoffs cleared.':(finished.partial?'Reviewed partial report built. SOURCE SCAN REMAINS INCOMPLETE. See Notes for omissions. ':'Report built. ')+'Template integrity checks passed. '+reviewCoverage(records,diffusers);
@@ -334,7 +348,7 @@ function installWorkflow(){
   }catch(e){$('status').textContent=e.message;workflowControls(false);}
  };
  document.addEventListener('input',workflowChanged);document.addEventListener('change',workflowChanged);
- const oldSourcesChanged=sourcesChanged;sourcesChanged=function(){workflowSourceRevision++;scanJobId=null;sourceManifest=[];oldSourcesChanged();workflowSave();};
+ const oldSourcesChanged=sourcesChanged;sourcesChanged=function(){workflowSourceRevision++;scanJobId=null;sourceManifest=[];oldSourcesChanged();renderReadiness();workflowSave();};
  const oldLoadProject=$('loadproject').onchange;
  $('loadproject').onchange=async event=>{
   if(workflowBusy)return;await oldLoadProject(event);

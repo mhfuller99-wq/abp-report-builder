@@ -95,6 +95,7 @@ def read_sources(blobs, *, runner=None):
             data=source.read(MAX_UPLOAD+1) if hasattr(source,'read') else source
             total_size+=len(data)
             if total_size>MAX_UPLOAD:raise ValueError('Total source size exceeds 200 MB')
+            source_digest=hashlib.sha256(data).hexdigest();checkpoint['sha256']=source_digest
         try:
             if ext=='.pdf':
                 stream=source if hasattr(source,'read') else io.BytesIO(source)
@@ -1293,7 +1294,11 @@ class Handler(BaseHTTPRequestHandler):
                         job=JOBS.create('reference',parts=sources,payload={'project':project,'location':location})
                 elif path=='/api/jobs/scan':
                     with multipart(self.rfile,n,self.headers.get('Content-Type',''),MAX_UPLOAD) as parts:
-                        job=JOBS.create('scan',parts=parts)
+                        identities=[file.read(50_001) for name,filename,file in parts if not filename and name=='recovery_sources']
+                        if len(identities)>1 or any(len(value)>50_000 for value in identities):raise ValueError('Invalid recovery source list')
+                        expected=json.loads(identities[0]) if identities else None
+                        if identities and expected is None:raise ValueError('Recovery source identities are required')
+                        job=JOBS.create('scan',parts=parts,expected_sources=expected)
                 else:
                     if n>8_000_000:raise ValueError('Job request exceeds 8 MB')
                     payload=json.loads(self.rfile.read(n))
