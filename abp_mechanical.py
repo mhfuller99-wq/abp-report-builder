@@ -147,7 +147,7 @@ def _ac_schedule_context(header, mark):
     title_pattern = re.compile(
         r'(?:(?:HEATING (?:&|AND) )?AIR CONDITIONING|AIR CONDITIONER|'
         r'PACKAGED (?:GAS[ /-]*(?:ELECTRIC|ELEC(?:TRIC)?\.?)|AIR CONDITIONING))'
-        r'(?: UNIT)? SCHEDULE', re.I)
+        r'(?: UNIT)? SCHEDULE|INDOOR DUCTLESS UNIT SCHEDULE', re.I)
     titles = []
     for line in rows(header):
         segments = [[]]
@@ -163,6 +163,13 @@ def _ac_schedule_context(header, mark):
         return None
     title_y = titles[0][0][1]
     columns = [w for w in header if w[1] > title_y + 3]
+    if ' '.join(w[4].upper() for w in titles[0]) == 'INDOOR DUCTLESS UNIT SCHEDULE':
+        # A rated maximum at different cooling/heating speeds is not a selected
+        # balancing target. Retain the indoor identity without importing those
+        # flows, basis-of-design brand, outdoor motor values or capacities.
+        if not phrases(columns,r'COOLING DATA') or not phrases(columns,r'HEATING DATA'):
+            return None
+        return {'identity_only':True,'flows':[],'words':titles[0]}
     flows = list(phrases(columns, r'SUPPLY(?: AIR)? (?:CFM|AIRFLOW)(?: \(CFM\))?'))
     groups = phrases(columns, r'(?:SUPPLY|EVAPORATOR) FAN')
     for anchor in phrases(columns, r'CFM|AIRFLOW'):
@@ -242,6 +249,13 @@ def schedule_candidates(words, page_number, name):
         family = tags[0].split('-')[0]
         ac_context = _ac_schedule_context(header, mark) if family == 'AC' else None
         if family == 'AC' and not ac_context:
+            continue
+        if ac_context and ac_context.get('identity_only'):
+            for tag in tags:
+                found.append({'tag':tag,'values':{},'text':{'unit_type':'INDOOR DUCTLESS'},
+                    'value_words':{},'source':name,'reference':f'page {page_number}',
+                    'evidence':'INDOOR DUCTLESS UNIT SCHEDULE: '+tag+'; identity only; select design flow from approved source, not cooling/heating maximum ratings.',
+                    'basis':'PLAN_SCHEDULE'})
             continue
         values = {}
         text = {}

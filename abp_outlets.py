@@ -3,7 +3,7 @@ import math
 import re
 from collections import defaultdict
 
-MARK = re.compile(r'(?:[A-Z]|S[A-Z]|SD\d?)$')
+MARK = re.compile(r'(?:[A-Z]|S[A-Z]|SD\d?|S(?:AG|AD|AR|D)-\d{1,3}[A-Z]?)$')
 FLOW = re.compile(r'(?:\d{1,4}|\d{1,2},\d{3})$')
 # These ambiguous equipment families cannot be used as unclassified outlets.
 EQUIPMENT_MARKS = {'SF', 'EF', 'RF', 'PF', 'FS', 'UH', 'CU', 'AHU', 'RTU', 'FCU', 'MAU', 'MUA', 'DOAS'}
@@ -85,7 +85,7 @@ def centered_outlets(words, page_number, source, legend=None, *, plan_confirmed=
     text block or a repeated, isolated callout grammar. Mutual uniqueness prevents
     assigning one flow to adjacent type marks. Coordinates remain PDF points.
     """
-    if not plan_confirmed and not plan_context(words):return []
+    if len(words)>30000 or (not plan_confirmed and not plan_context(words)):return []
     legend = legend or {}
     blocks = defaultdict(list); grid = defaultdict(list)
     for i,w in enumerate(words):
@@ -146,7 +146,7 @@ def necked_outlets(words, page_number, source, *, plan_confirmed=False):
                 and abs((a[0]+a[2]-b[0]-b[2])/2)<.45*h)
     pairs=[];used=defaultdict(int)
     for i,w in enumerate(words):
-        if not re.fullmatch(r'(?:CSD\d+|SD\d*|S[A-Z]|[A-Z])',w[4]) or w[4] in EQUIPMENT_MARKS:continue
+        if not (MARK.fullmatch(w[4]) or re.fullmatch(r'(?:CSD\d+|SD\d*)',w[4])) or w[4] in EQUIPMENT_MARKS:continue
         if not 3<=w[3]-w[1]<=30:continue
         neighbors=near(w)
         if any(re.search(r'\b(?:INDICATES|TYPICAL|SYMBOL|LEGEND)\b',words[k][4],re.I)

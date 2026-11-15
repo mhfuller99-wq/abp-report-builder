@@ -11,6 +11,7 @@ from abp_benchmark import same,page,same_annotation
 # call the application's approval function while auditing that same function.
 RECORD_INPUTS=('tag status template coil_template source reference instance_locations quantity design_cfm osa_cfm osa_min_cfm esp total_sp motor_hp motor_volts motor_phase motor_fla motor_rpm design_gpm cooling_edb cooling_ewb cooling_ldb cooling_lwb heating_cfm heating_edb heating_ldb heating_input_btu heating_output_btu cooling_total_btu cooling_sensible_btu electric_heating_edb electric_heating_ldb heater_volts heater_phase heater_amps heater_stages heater_kw heating_ewt heating_lwt water_dp_ft manufacturer model unit_type service equipment_location area_served heating_type').split()
 OUTLET_INPUTS='include type size system location design_cfm source reference position quantity quantity_unresolved quantity_candidates exclusion_note repeat_resolution repeat_instance manual_locator'.split()
+AIR_PATH_INPUTS='tag kind status source source_sha256 reference location note'.split()
 
 
 def same_reviewed(actual,expected):
@@ -35,6 +36,7 @@ def approved_inventory_matches(review,approval):
         'image_decisions':[{'accepted':r.get('accepted',False),'excluded':r.get('excluded',False),
             'exclusion_note':r.get('exclusion_note',''),'tag':r.get('tag',''),'source':r.get('source',''),
             'page':r.get('page'),'position':r.get('position')} for r in review.get('image_review',[])]}
+    if review.get('air_paths'):expected['air_paths']=inputs(review['air_paths'],AIR_PATH_INPUTS)
     return approval.get('inventory')==expected
 
 
@@ -72,6 +74,20 @@ def evaluate_reviewed(project,review):
         for key in expected.get('must_withhold',[]):
             if record.get(key) not in (None,''):error('unsupported_reviewed_equipment_field',tag=expected['tag'],field=key)
     for index in set(range(len(records)))-used_records:error('unexpected_reviewed_equipment',tag=records[index].get('tag'))
+    # Passive components are frozen separately from physical powered units.
+    # A path must be supported by independent component and outlet evidence.
+    expected_paths={c['tag'] for c in known.get('associated_components',[]) if c.get('kind')=='PASSIVE SUPPLY INLET'}
+    paths=review.get('air_paths',[]);seen_paths=set()
+    for path in paths:
+        tag=path.get('tag')
+        if tag not in expected_paths or tag in seen_paths:error('unexpected_or_duplicate_passive_path',tag=tag)
+        seen_paths.add(tag)
+        if (set(path)-set(AIR_PATH_INPUTS) or path.get('kind')!='passive_supply' or path.get('status')!='VERIFIED'
+                or path.get('source_sha256')!=sources.get(path.get('source'))
+                or not isinstance(path.get('note'),str) or not 20<=len(path['note'].strip())<=500
+                or not path.get('location')):error('unsupported_passive_path',tag=tag)
+        if not any(c['name']==path.get('source') and type(page(path))==int and 1<=page(path)<=c.get('pages',0) for c in checkpoints):error('passive_path_page_missing',tag=tag)
+    if seen_paths!=expected_paths:error('passive_path_inventory_mismatch')
     if any(r.get('status') not in ('VERIFIED','EXCLUDED') for r in review.get('records',[])):error('unresolved_equipment')
     for candidate in review.get('image_review',[]):
         if candidate.get('accepted') is not True and not (candidate.get('excluded') is True and len(str(candidate.get('exclusion_note','')).strip())>=10):error('unresolved_image_candidate')

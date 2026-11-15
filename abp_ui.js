@@ -95,6 +95,7 @@ function validateSavedReview(data, templates, forms, tagPattern) {
   if(data.image_review!==undefined&&(!Array.isArray(data.image_review)||data.image_review.length>500||data.image_review.some(c=>!object(c)||!['kitchen_hood','diffuser','equipment'].includes(c.kind)||typeof c.tag!=='string'||c.tag.length>80||typeof c.source!=='string'||c.source.length>160||!Number.isInteger(c.page)||c.page<1||c.page>300||!object(c.review_values)||Object.entries(c.review_values).some(([k,v])=>!(c.kind==='equipment'?fields:['exhaust_cfm','supply_cfm','makeup_air_cfm','design_cfm']).includes(k)||!numeric(v))||c.evidence_text!==undefined&&(typeof c.evidence_text!=='string'||c.evidence_text.length>4000)||c.review_reasons!==undefined&&(!Array.isArray(c.review_reasons)||c.review_reasons.length>20||c.review_reasons.some(x=>typeof x!=='string'||x.length>1000))||['type','size'].some(k=>c[k]!==undefined&&(typeof c[k]!=='string'||c[k].length>120))||c.accepted!==undefined&&typeof c.accepted!=='boolean')))invalid();
   for(const c of data.image_review||[])for(const key of ['native_outlet_match','native_outlet_ambiguous'])if(c[key]!==undefined&&typeof c[key]!=='boolean')invalid();
   validateScanState(data.scan_state);
+  if(airPathErrors(data,false,false).length)invalid();
   return {...data,records:data.records.map(r=>({...r,tag:r.tag.toUpperCase()}))};
 }
 
@@ -286,7 +287,7 @@ function outletInstanceErrors(outlets){
 
 
 let humanSourceReview=null,humanPageReviews=[],humanReviewNote='';
-function manualSourceEntry(input,state,records,outlets,forms,tagPattern){
+function manualSourceEntry(input,state,records,outlets,forms,tagPattern,paths=[]){
  if(!['incomplete','review_required'].includes(state.status)||state.complete_takeoff!==false)throw Error('Scan the current source files before adding a source-reviewed item.');
  const source=(state.source_checkpoints||[]).find(s=>s.name===input.source),page=Number(input.page);
  if(!source||! /^[a-f0-9]{64}$/.test(source.sha256||'')||!Number.isInteger(page)||page<1||!Number.isInteger(source.pages)||page>source.pages)throw Error('Choose an original source and a page within that document.');
@@ -308,7 +309,8 @@ function manualSourceEntry(input,state,records,outlets,forms,tagPattern){
  const cfm=Number(input.design_cfm);
  if(!type||!location||!locator||String(input.design_cfm??'').trim()===''||!Number.isFinite(cfm)||cfm<=0||cfm>1000000)throw Error('Enter the physical outlet type, room, locator and positive design CFM.');
  const unit=records.find(r=>String(r.tag).toUpperCase()===system&&r.status!=='EXCLUDED');
- if(!unit||['Exhaust Fans _Sm._.xlsx','Exhaust Fans _Std._.xlsx','Kitchen Hood.xlsx','Chiller - Air Cooled.xlsx','Chiller - Water Cooled.xlsx'].includes(unit.template))throw Error('Assign this supply outlet to a supply equipment row in the review.');
+ const passive=paths.find(p=>p.tag===system&&p.status==='VERIFIED');
+ if(!(unit&&!['Exhaust Fans _Sm._.xlsx','Exhaust Fans _Std._.xlsx','Kitchen Hood.xlsx','Chiller - Air Cooled.xlsx','Chiller - Water Cooled.xlsx'].includes(unit.template))&&(!passive||airPathErrors({air_paths:[passive],records,scan_state:state}).length))throw Error('Assign this outlet to supply equipment or a verified passive supply path.');
  let position;
  if(String(input.x??'').trim()!==''||String(input.y??'').trim()!==''){
   position=[input.x,input.y].map(v=>String(v??'').trim()===''?NaN:Number(v));
@@ -318,17 +320,53 @@ function manualSourceEntry(input,state,records,outlets,forms,tagPattern){
     position&&Array.isArray(o.position)&&Math.hypot(position[0]-o.position[0],position[1]-o.position[1])<1||o.manual_locator===locator)))throw Error('This source position or physical locator already has an outlet row. Review the existing row.');
  return {kind:'outlet',item:{...provenance,type,system,location,size,design_cfm:cfm,include:false,quantity:1,manual_locator:locator,...(position?{position,position_coordinate_space:'displayed_pdf_points'}:{})}};
 }
+const airPathFields=['tag','kind','status','source','source_sha256','reference','location','note'];
+const passivePathTag=/^(?:L|LOUVER|LOUVRE|OA|INTAKE|TRANSFER|PASSIVE)-[A-Z0-9]+(?:[.-][A-Z0-9]+)*$/;
+function airPathErrors(payload,requireVerified=true,checkSources=true){
+ const paths=payload.air_paths===undefined?[]:payload.air_paths;
+ if(!Array.isArray(paths)||paths.length>100)return ['Invalid passive supply paths'];
+ const errors=[],seen=new Set(),equipment=new Set((payload.records||[]).map(r=>String(r.tag||'').trim().toUpperCase()));
+ for(const path of paths){
+  if(!path||typeof path!=='object'||Array.isArray(path)||Object.keys(path).some(k=>!airPathFields.includes(k))){errors.push('Invalid passive supply path fields');continue;}
+  if(typeof path.tag!=='string'||path.tag.length>80||!passivePathTag.test(path.tag)){errors.push('Use a passive inlet or transfer ID, such as L-1 or PASSIVE-1');continue;}
+  if(seen.has(path.tag)||equipment.has(path.tag))errors.push('Passive path IDs must be unique and separate from equipment IDs');seen.add(path.tag);
+  if(path.kind!=='passive_supply'||!['UNVERIFIED','VERIFIED'].includes(path.status))errors.push('Invalid passive supply path kind or status');
+  if(requireVerified&&path.status!=='VERIFIED')errors.push('Verify every passive supply path from its source');
+  for(const [field,min,max] of [['source',1,160],['reference',1,80],['location',1,120],['note',20,500]])if(typeof path[field]!=='string'||path[field].trim().length<min||path[field].trim().length>max)errors.push('Passive paths need a source page, room / area and 20–500 character supply-path evidence');
+  const match=typeof path.reference==='string'&&/^page ([1-9]\d{0,2})$/.exec(path.reference);
+  if(typeof path.source_sha256!=='string'||! /^[a-f0-9]{64}$/.test(path.source_sha256)||!match){errors.push('Invalid passive path source identity');continue;}
+  if(checkSources){const sources=(payload.scan_state?.source_checkpoints||[]).filter(s=>s.name===path.source&&s.sha256===path.source_sha256);
+   if(sources.length!==1||!Number.isInteger(sources[0].pages)||Number(match[1])>sources[0].pages)errors.push('Passive path source changed or is missing; check and add it again from the current source');}
+ }
+ return [...new Set(errors)];
+}
+function makePassivePath(input,state,records,paths){
+ const source=(state.source_checkpoints||[]).find(s=>s.name===input.source);
+ if(!['incomplete','review_required'].includes(state.status)||state.complete_takeoff!==false||!source)throw Error('Scan the current source files before adding a passive path.');
+ if(input.confirmed!==true)throw Error('Confirm this is a passive supply connection, not powered equipment or a return/exhaust outlet.');
+ const path={tag:String(input.tag||'').trim().toUpperCase(),kind:'passive_supply',status:'UNVERIFIED',source:source.name,source_sha256:source.sha256,
+  reference:'page '+Number(input.page),location:String(input.location||'').trim().toUpperCase(),note:String(input.note||'').trim().toUpperCase()};
+ const errors=airPathErrors({air_paths:[...paths,path],records,scan_state:state},false);
+ if(errors.length)throw Error(errors.join('. '));return path;
+}
+function reconcileAirPaths(paths,affectedSources){
+ const affected=new Set(Array.isArray(affectedSources)?affectedSources:[affectedSources]);
+ return paths.map(p=>affected.has(p.source)?{...p,status:'UNVERIFIED'}:{...p});
+}
 function sourcePageNumber(reference){return Number(/\bpage (\d+)\b/i.exec(reference||'')?.[1]||0);}
 function sourceInventorySnapshot(payload){
  const recordKeys=['tag','status','template','coil_template','source','reference','instance_locations',...reviewNumericFields,'heater_kw',...reviewTextFields];
  const outletKeys=['include','type','size','system','location','design_cfm','source','reference','position','quantity','quantity_unresolved','quantity_candidates','exclusion_note','repeat_resolution','repeat_instance','manual_locator'];
  const project=(rows,keys)=>rows.map(r=>Object.fromEntries(keys.filter(k=>Object.hasOwn(r,k)).map(k=>[k,r[k]])));
- return {project:payload.project||'',location:payload.location||'',templates:payload.templates||[],standard:payload.standard||'Commercial',records:project(payload.records||[],recordKeys),diffusers:project(payload.diffusers||[],outletKeys),image_decisions:(payload.image_review||[]).map(r=>({accepted:r.accepted??false,excluded:r.excluded??false,exclusion_note:r.exclusion_note||'',tag:r.tag||'',source:r.source||'',page:r.page??null,position:r.position??null}))};
+ const snapshot={project:payload.project||'',location:payload.location||'',templates:payload.templates||[],standard:payload.standard||'Commercial',records:project(payload.records||[],recordKeys),diffusers:project(payload.diffusers||[],outletKeys),image_decisions:(payload.image_review||[]).map(r=>({accepted:r.accepted??false,excluded:r.excluded??false,exclusion_note:r.exclusion_note||'',tag:r.tag||'',source:r.source||'',page:r.page??null,position:r.position??null}))};
+ if(payload.air_paths?.length)snapshot.air_paths=project(payload.air_paths,airPathFields);
+ return snapshot;
 }
 function sourceReviewErrors(payload){
  const state=payload.scan_state||{},review=payload.source_review;
  if(!review||typeof review!=='object')return ['Human source review has not been approved'];
- const errors=[];
+ if(payload.air_paths!==undefined&&(!Array.isArray(payload.air_paths)||payload.air_paths.some(p=>!p||typeof p!=='object'||Array.isArray(p))))return ['Invalid passive supply paths'];
+ const errors=airPathErrors(payload);
  if(review.version!==1||review.approved!==true)errors.push('Human source review has not been approved');
  if(!['incomplete','review_required'].includes(state.status)||state.complete_takeoff!==false)errors.push('Sources are unscanned, outdated or unknown');
  if(JSON.stringify(review.scan_state)!==JSON.stringify(state))errors.push('Source scan changed after human review');
@@ -353,8 +391,9 @@ function sourceReviewErrors(payload){
  if(!(payload.records||[]).some(r=>r.status==='VERIFIED')&&!(payload.diffusers||[]).some(o=>o.include===true))errors.push('The reviewed inventory is empty');
  if((payload.diffusers||[]).some(o=>o.include===true)&&!(payload.templates||[]).includes('Supply Diffusers.xlsx'))errors.push('Include the Supply Diffusers worksheet for the included outlets');
  const supplyUnits=new Set((payload.records||[]).filter(r=>r.status==='VERIFIED'&&!['Exhaust Fans _Sm._.xlsx','Exhaust Fans _Std._.xlsx','Kitchen Hood.xlsx','Chiller - Air Cooled.xlsx','Chiller - Water Cooled.xlsx'].includes(r.template)).map(r=>String(r.tag||'').trim().toUpperCase()));
+ for(const path of payload.air_paths||[])if(path.status==='VERIFIED'&&path.kind==='passive_supply')supplyUnits.add(path.tag);
  for(const outlet of payload.diffusers||[]){if(outlet.include!==true){if(typeof outlet.exclusion_note!=='string'||outlet.exclusion_note.trim().length<10||outlet.exclusion_note.trim().length>500)errors.push('Every unchecked outlet needs a source-based exclusion reason; unchecked is not reviewed');continue;}
-  if(!supplyUnits.has(String(outlet.system||'').trim().toUpperCase()))errors.push('Every included supply outlet must belong to a verified supply unit in this inventory');
+  if(!supplyUnits.has(String(outlet.system||'').trim().toUpperCase()))errors.push('Every included supply outlet must belong to verified supply equipment or a source-reviewed passive supply path');
   if(outlet.quantity_unresolved||outlet.quantity!==undefined&&outlet.quantity!==1)errors.push('Resolve repeated outlet quantities into physical rows before approval');
   if(['source','reference','type','system','location','design_cfm'].some(k=>outlet[k]===undefined||outlet[k]===null||outlet[k]===''))errors.push('Included outlets need source, type, system, location and design CFM; document deliberate neck-size blanks in the review basis');
  }

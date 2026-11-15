@@ -72,6 +72,7 @@ def evaluate(project,review):
     """Score per physical outlet/field, not aggregate totals; never waive omissions."""
     errors=[];manual=[];matches=[]
     def error(code,**kw):errors.append({'code':code,**kw})
+    if review.get('air_paths'):error('manual_air_paths_in_raw')
     for item in review.get('records',[])+review.get('diffusers',[]):
         if item.get('manual_locator') or any(h.get('kind')=='manual_source_entry' for h in item.get('review_history',[]) if isinstance(h,dict)):
             error('manual_source_entry_in_raw',tag=item.get('tag'),source=item.get('source'))
@@ -121,6 +122,8 @@ def evaluate(project,review):
             equipment.append({**c,'values':c.get('review_values',{})})
     for expected in known.get('equipment',[]):
         found=[c for c in equipment if c.get('tag')==expected['tag'] and c.get('source')==expected['source'] and page(c)==expected['page']]
+        # Deliberately unknown design values do not waive the physical unit.
+        if not found:error('missing_equipment',tag=expected['tag'],source=expected['source'],page=expected['page'])
         for field,value in expected['values'].items():
             values=[c.get('values',{}).get(field) for c in found if field in c.get('values',{})]
             if not values:error('missing_equipment_field',tag=expected['tag'],field=field)

@@ -29,6 +29,20 @@ def reviewed_example():
 
 
 class ReviewedBenchmarkTests(unittest.TestCase):
+    def test_passive_path_requires_independent_component_source_and_approval(self):
+        project,_,review=reviewed_example()
+        project['expected']['associated_components']=[{'tag':'L-7','kind':'PASSIVE SUPPLY INLET'}]
+        path={'tag':'L-7','kind':'passive_supply','status':'VERIFIED','source':'plan.pdf','source_sha256':'a'*64,
+            'reference':'page 1','location':'ROOM A','note':'Original drawing shows the passive supply intake duct.'}
+        review['air_paths']=[path];review['source_review']['inventory']['air_paths']=copy.deepcopy([path])
+        self.assertTrue(evaluate_reviewed(project,review)['reviewed_inventory_pass'])
+        for field,value in [('status','UNVERIFIED'),('source_sha256','b'*64),('reference','page 3'),('tag','L-99'),('motor_hp',1)]:
+            changed=copy.deepcopy(review);changed['air_paths'][0][field]=value
+            changed['source_review']['inventory']['air_paths']=copy.deepcopy(changed['air_paths'])
+            self.assertFalse(evaluate_reviewed(project,changed)['reviewed_inventory_pass'])
+        review['air_paths']=[];review['source_review']['inventory'].pop('air_paths')
+        self.assertFalse(evaluate_reviewed(project,review)['reviewed_inventory_pass'])
+
     def test_reviewed_annotation_anchor_uses_the_original_callout_box(self):
         project,raw,review=reviewed_example()
         review['diffusers'][0].update(position=[95,80],evidence_box=[95,80,108,105])

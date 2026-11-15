@@ -7,6 +7,20 @@ from abp_schedule import parse_page,resolve_proposed
 def w(x,y,text):return (x,y,x+len(text)*4,y+9,text,0,0,0)
 
 class ScheduleVariants(unittest.TestCase):
+    def test_indoor_ductless_identity_does_not_choose_maximum_airflow(self):
+        words=[w(10,10,'INDOOR DUCTLESS UNIT SCHEDULE'),w(10,60,'MARK'),
+            w(150,35,'COOLING DATA'),w(300,35,'HEATING DATA'),
+            w(150,48,'MAX.'),w(150,60,'CFM'),w(300,48,'MAX.'),w(300,60,'CFM'),
+            w(10,85,'AC-7'),w(150,85,'370'),w(300,85,'440')]
+        found=schedule_candidates(words,2,'synthetic.pdf')
+        self.assertEqual([r['tag'] for r in found],['AC-7'])
+        self.assertEqual(found[0]['values'],{})
+        self.assertEqual(found[0]['text'],{'unit_type':'INDOOR DUCTLESS'})
+        for title in ('SEE INDOOR DUCTLESS UNIT SCHEDULE','ELECTRICAL PANEL SCHEDULE','OUTDOOR DUCTLESS UNIT SCHEDULE'):
+            changed=[w(10,10,title),*words[1:]]
+            self.assertEqual(schedule_candidates(changed,2,'synthetic.pdf'),[])
+        self.assertEqual(schedule_candidates(words+[w(420,60,'ACTUAL')],2,'synthetic.pdf'),[])
+
     def test_stacked_id_columns(self):
         words=[w(10,70,'ID'),w(150,55,'SUPPLY'),w(150,70,'CFM'),w(250,55,'OUTDOOR'),w(250,70,'CFM'),
                w(10,95,'RTU-7'),w(150,95,'950'),w(250,95,'125')]

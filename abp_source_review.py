@@ -4,33 +4,72 @@ A partial-scan acknowledgment never satisfies this contract. Approval requires
 page accounting and a resolved inventory and is invalidated by any source,
 inventory, template or project change. It does not certify field measurements.
 """
-import copy
+import copy,re
 from abp_job import NUMERIC_FIELDS,TEXT_FIELDS
 from abp_outlet_instances import outlet_instance_errors
+
+AIR_PATH_FIELDS=('tag','kind','status','source','source_sha256','reference','location','note')
+PASSIVE_TAG=re.compile(r'(?:L|LOUVER|LOUVRE|OA|INTAKE|TRANSFER|PASSIVE)-[A-Z0-9]+(?:[.-][A-Z0-9]+)*$')
+
+
+def air_path_errors(payload, *, require_verified=True, check_sources=True):
+    """Source-bound passive supply connections, never motorized unit records."""
+    paths=payload.get('air_paths',[])
+    if not isinstance(paths,list) or len(paths)>100:return ['Invalid passive supply paths']
+    errors=[];seen=set()
+    equipment={str(r.get('tag','')).strip().upper() for r in payload.get('records',[]) if isinstance(r,dict)}
+    state=payload.get('scan_state') or {}
+    checkpoints=state.get('source_checkpoints',[]) if isinstance(state,dict) else []
+    for path in paths:
+        if not isinstance(path,dict) or set(path)-set(AIR_PATH_FIELDS):
+            errors.append('Invalid passive supply path fields');continue
+        tag=path.get('tag')
+        if not isinstance(tag,str) or len(tag)>80 or not PASSIVE_TAG.fullmatch(tag):
+            errors.append('Use a passive inlet or transfer ID, such as L-1 or PASSIVE-1');continue
+        if tag in seen or tag in equipment:errors.append('Passive path IDs must be unique and separate from equipment IDs')
+        seen.add(tag)
+        if path.get('kind')!='passive_supply' or path.get('status') not in ('UNVERIFIED','VERIFIED'):
+            errors.append('Invalid passive supply path kind or status')
+        if require_verified and path.get('status')!='VERIFIED':errors.append('Verify every passive supply path from its source')
+        for field,minimum,maximum in [('source',1,160),('reference',1,80),('location',1,120),('note',20,500)]:
+            value=path.get(field)
+            if not isinstance(value,str) or not minimum<=len(value.strip())<=maximum:
+                errors.append('Passive paths need a source page, room / area and 20–500 character supply-path evidence')
+        digest=path.get('source_sha256');reference=path.get('reference','')
+        match=re.fullmatch(r'page ([1-9]\d{0,2})',reference) if isinstance(reference,str) else None
+        if not isinstance(digest,str) or not re.fullmatch(r'[a-f0-9]{64}',digest) or not match:
+            errors.append('Invalid passive path source identity');continue
+        if check_sources:
+            sources=[s for s in checkpoints if isinstance(s,dict) and s.get('name')==path.get('source') and s.get('sha256')==digest]
+            if len(sources)!=1 or type(sources[0].get('pages'))!=int or int(match[1])>sources[0]['pages']:
+                errors.append('Passive path source changed or is missing; check and add it again from the current source')
+    return list(dict.fromkeys(errors))
 
 
 def inventory_snapshot(payload):
     record_keys=('tag','status','template','coil_template','source','reference','instance_locations',*NUMERIC_FIELDS,*TEXT_FIELDS)
     outlet_keys=('include','type','size','system','location','design_cfm','source','reference','position','quantity','quantity_unresolved','quantity_candidates','exclusion_note','repeat_resolution','repeat_instance','manual_locator')
     def project(rows,keys):return [{k:r[k] for k in keys if k in r} for r in rows]
-    return copy.deepcopy({'project':payload.get('project',''),'location':payload.get('location',''),
+    snapshot={'project':payload.get('project',''),'location':payload.get('location',''),
         'templates':payload.get('templates',[]),'standard':payload.get('standard','Commercial'),
         'records':project(payload.get('records',[]),record_keys),
         'diffusers':project(payload.get('diffusers',[]),outlet_keys),
         'image_decisions':[{'accepted':r.get('accepted',False),'excluded':r.get('excluded',False),
             'exclusion_note':r.get('exclusion_note',''),'tag':r.get('tag',''),'source':r.get('source',''),
-            'page':r.get('page'),'position':r.get('position')} for r in payload.get('image_review',[])]})
+            'page':r.get('page'),'position':r.get('position')} for r in payload.get('image_review',[])]}
+    if payload.get('air_paths'):snapshot['air_paths']=project(payload['air_paths'],AIR_PATH_FIELDS)
+    return copy.deepcopy(snapshot)
 
 
 def source_review_errors(payload):
     state=payload.get('scan_state') or {};review=payload.get('source_review')
     if not isinstance(review,dict):return ['Human source review has not been approved']
     if not isinstance(state,dict) or any(not isinstance(payload.get(key,[]),list) or
-            any(not isinstance(row,dict) for row in payload.get(key,[])) for key in ('records','diffusers','image_review')):
+            any(not isinstance(row,dict) for row in payload.get(key,[])) for key in ('records','diffusers','image_review','air_paths')):
         return ['Invalid source review inventory']
     if not isinstance(state.get('source_checkpoints',[]),list) or any(not isinstance(c,dict) for c in state.get('source_checkpoints',[])):
         return ['Invalid source checkpoints']
-    errors=[]
+    errors=air_path_errors(payload)
     if review.get('version')!=1 or review.get('approved') is not True:errors.append('Human source review has not been approved')
     if state.get('status') not in ('incomplete','review_required') or state.get('complete_takeoff') is not False:
         errors.append('Sources are unscanned, outdated or unknown')
@@ -61,6 +100,7 @@ def source_review_errors(payload):
     errors.extend(outlet_instance_errors(outlets))
     supply_units={str(r.get('tag','')).strip().upper() for r in records if r.get('status')=='VERIFIED'
                   and r.get('template') not in ('Exhaust Fans _Sm._.xlsx','Exhaust Fans _Std._.xlsx','Kitchen Hood.xlsx','Chiller - Air Cooled.xlsx','Chiller - Water Cooled.xlsx')}
+    supply_units.update(p.get('tag','') for p in payload.get('air_paths',[]) if p.get('status')=='VERIFIED' and p.get('kind')=='passive_supply')
     if any(r.get('status') not in ('VERIFIED','EXCLUDED') for r in records):errors.append('Resolve every equipment review row')
     if any(c.get('accepted') is not True and not (c.get('excluded') is True and isinstance(c.get('exclusion_note'),str) and 10<=len(c['exclusion_note'].strip())<=500) for c in payload.get('image_review',[])):
         errors.append('Resolve every image candidate: add it or exclude it with a reason')
@@ -74,7 +114,7 @@ def source_review_errors(payload):
                 errors.append('Every unchecked outlet needs a source-based exclusion reason; unchecked is not reviewed')
             continue
         if str(outlet.get('system','')).strip().upper() not in supply_units:
-            errors.append('Every included supply outlet must belong to a verified supply unit in this inventory')
+            errors.append('Every included supply outlet must belong to verified supply equipment or a source-reviewed passive supply path')
         if outlet.get('quantity_unresolved') or outlet.get('quantity',1)!=1:errors.append('Resolve repeated outlet quantities into physical rows before approval')
         if not all(outlet.get(k) not in (None,'') for k in ('source','reference','type','system','location','design_cfm')):
             errors.append('Included outlets need source, type, system, location and design CFM; document deliberate neck-size blanks in the review basis')

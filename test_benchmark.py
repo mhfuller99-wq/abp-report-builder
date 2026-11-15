@@ -20,6 +20,16 @@ def example():
 
 
 class BenchmarkTests(unittest.TestCase):
+    def test_unknown_design_values_still_require_source_bound_equipment(self):
+        p,r=example();p['expected']['equipment'][0]['values']={}
+        r['records'][0]['candidates'][0]['values']={}
+        self.assertTrue(evaluate(p,r)['candidate_checks_pass'])
+        for mutate in (lambda r:r['records'].clear(),
+                       lambda r:r['records'][0]['candidates'].clear(),
+                       lambda r:r['records'][0]['candidates'][0].update(reference='page 99')):
+            changed=copy.deepcopy(r);mutate(changed)
+            self.assertIn('missing_equipment',[e['code'] for e in evaluate(p,changed)['errors']])
+
     def test_raw_candidate_pass_is_not_workbook_pass(self):
         p,r=example();result=evaluate(p,r)
         self.assertTrue(result['candidate_checks_pass']);self.assertFalse(result['workbook_verified'])

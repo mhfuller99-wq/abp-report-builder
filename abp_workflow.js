@@ -75,7 +75,8 @@ function renderOutletTotals(){
  }
  for(const [system,s] of [...systems].sort((a,b)=>a[0].localeCompare(b[0]))){
   const record=records.find(r=>r.tag===system),target=record?.design_cfm;
-  box.append(workflowElement('p',system+': '+s.count+' included outlets · '+s.total.toLocaleString()+' design CFM'+(target!=null&&target!==''?' · unit target '+target+' CFM · difference '+(s.total-Number(target))+' CFM':' · unit target unverified/not supplied')));
+  const passive=airPaths.find(p=>p.tag===system);
+  box.append(workflowElement('p',system+': '+s.count+' included outlets · '+s.total.toLocaleString()+' design CFM'+(passive?' · passive supply path · '+passive.status.toLowerCase():target!=null&&target!==''?' · unit target '+target+' CFM · difference '+(s.total-Number(target))+' CFM':' · unit target unverified/not supplied')));
  }
  if(duplicates)box.append(workflowElement('p','Review '+duplicates+' repeated source positions before building. Repeated flow values alone are not treated as duplicates.'));
  if(new Set(diffusers.map(o=>o.source).filter(Boolean)).size>1)box.append(workflowElement('p','Multiple source documents contain outlet candidates. Review revisions and duplicates; no drawing is silently superseded.'));
@@ -87,7 +88,7 @@ renderOutlets=function(){
  const table=box.querySelector('table'),rows=[...table.querySelectorAll('tr')].slice(1);
  const batch=workflowElement('fieldset'),legend=workflowElement('legend','Assign reviewed fields to selected outlets');batch.append(legend);
  batch.append(workflowElement('p','Select the individual physical outlets below. Assign only fields supported by the original source; blank batch fields leave existing values unchanged.'));
- const inputs={};for(const key of ['system','location','size']){const label=workflowElement('label',({system:'Serving equipment',location:'Room / area',size:'Neck size (not face or branch size)'})[key]),input=document.createElement('input');input.maxLength=120;input.setAttribute('aria-label','Batch '+key);label.append(input);inputs[key]=input;batch.append(label);}
+ const inputs={};for(const key of ['system','location','size']){const label=workflowElement('label',({system:'Serving equipment or passive path',location:'Room / area',size:'Neck size (not face or branch size)'})[key]),input=document.createElement('input');input.maxLength=120;input.setAttribute('aria-label','Batch '+key);label.append(input);inputs[key]=input;batch.append(label);}
  const evidenceLabel=workflowElement('label','Source evidence for this assignment'),evidenceInput=document.createElement('input');evidenceInput.maxLength=500;evidenceInput.setAttribute('aria-label','Batch source evidence');evidenceLabel.append(evidenceInput);batch.append(evidenceLabel);
  const message=workflowElement('p');message.setAttribute('role','status');
  batch.append(workflowButton('Apply to selected outlets',()=>{try{const indices=Array.from(table.querySelectorAll('[data-batch-outlet]')).filter(x=>x.checked).map(x=>Number(x.dataset.batchOutlet));const result=assignOutletBatch(diffusers,indices,Object.fromEntries(Object.entries(inputs).map(([k,v])=>[k,v.value])),evidenceInput.value);diffusers=result.outlets;outletBatchUndo=result.action;renderOutlets();workflowChanged();}catch(e){message.textContent=e.message;}}));
@@ -188,14 +189,14 @@ function renderManualSourceEntry(box,wasOpen,previousPanel){
  field('page','Source page');
  const equipment=workflowElement('fieldset'),outlet=workflowElement('fieldset');equipment.append(workflowElement('legend','Equipment identification'));outlet.append(workflowElement('legend','One physical supply outlet'));outlet.hidden=true;panel.append(equipment,outlet);
  field('tag','Equipment ID',equipment);field('template','Original equipment form',equipment,[['','Choose form'],...Object.keys(unitForms).map(name=>[name,worksheetLabel(name)])]);
- for(const [name,title] of [['type','Outlet type'],['design_cfm','Design CFM'],['system','Serving equipment ID'],['location','Room / area'],['size','Neck size, if supported'],['locator','Distinct physical locator'],['x','PDF X coordinate (optional)'],['y','PDF Y coordinate (optional)']])field(name,title,outlet);
+ for(const [name,title] of [['type','Outlet type'],['design_cfm','Design CFM'],['system','Serving equipment or passive path ID'],['location','Room / area'],['size','Neck size, if supported'],['locator','Distinct physical locator'],['x','PDF X coordinate (optional)'],['y','PDF Y coordinate (optional)']])field(name,title,outlet);
  fields.kind.onchange=()=>{equipment.hidden=fields.kind.value!=='equipment';outlet.hidden=fields.kind.value!=='outlet';};
  field('note','Source evidence');const confirmation=workflowElement('input');confirmation.type='checkbox';confirmation.setAttribute('aria-label','Manual item source and duplicates checked');const label=workflowElement('label');label.append(confirmation,document.createTextNode(' I checked this physical item on the original page and checked the existing review for duplicates.'));panel.append(label);
  const message=workflowElement('p');message.setAttribute('role','status');
  panel.append(workflowButton('Add source-reviewed item',()=>{
   try{
    if(workflowBusy)throw Error('Wait for the current document job.');
-   const entry=manualSourceEntry({...Object.fromEntries(Object.entries(fields).map(([key,el])=>[key,el.value])),confirmed:confirmation.checked},scanState,records,diffusers,unitForms,savedTagPattern);
+   const entry=manualSourceEntry({...Object.fromEntries(Object.entries(fields).map(([key,el])=>[key,el.value])),confirmed:confirmation.checked},scanState,records,diffusers,unitForms,savedTagPattern,airPaths);
    if(entry.kind==='equipment'){records=[...records,entry.item];tags=records.map(r=>r.tag);const check=[...document.querySelectorAll('.template input')].find(x=>x.value===entry.item.template);if(check)check.checked=true;}
    else diffusers=[...diffusers,entry.item];
    humanSourceReview=null;outletBatchUndo=null;outletRepeatUndo=null;renderReview();renderOutlets();workflowSave();updateWorkspace();renderReadiness(true);
@@ -205,12 +206,38 @@ function renderManualSourceEntry(box,wasOpen,previousPanel){
  for(const control of panel.querySelectorAll('input,textarea,select,button'))control.disabled=workflowBusy;
  box.append(panel);
 }
+function renderPassivePaths(box,previous){
+ const sourceKey=JSON.stringify([scanState.source_checkpoints,airPaths]);
+ if(previous?.dataset.sourceKey===sourceKey){for(const el of previous.querySelectorAll('input,textarea,select,button'))el.disabled=workflowBusy;box.append(previous);return;}
+ const panel=workflowElement('details');panel.id='passive-path-review';panel.open=previous?.open||airPaths.length>0;panel.dataset.sourceKey=sourceKey;
+ panel.append(workflowElement('summary','Passive supply paths'),workflowElement('p','Use this for a source-confirmed louver or transfer path feeding supply outlets. It groups those outlets on the original Supply Diffusers sheet and creates no motorized equipment form. Return and exhaust outlets are excluded from supply.'));
+ for(const [index,path] of airPaths.entries()){
+  const row=workflowElement('fieldset');row.append(workflowElement('legend',path.tag+' · '+path.status),workflowElement('p',path.location+' · '+path.source+' · '+path.reference+' · '+path.note));
+  const check=workflowElement('input');check.type='checkbox';check.checked=path.status==='VERIFIED';check.setAttribute('aria-label','Verified passive path '+path.tag);
+  const label=workflowElement('label',' I verified this passive supply connection on the original source.');label.prepend(check);row.append(label);
+  const status=workflowElement('p');status.setAttribute('role','status');
+  check.onchange=()=>{const errors=airPathErrors({air_paths:[path],records,scan_state:scanState},false);if(check.checked&&errors.length){check.checked=false;status.textContent=errors.join('. ');return;}path.status=check.checked?'VERIFIED':'UNVERIFIED';humanSourceReview=null;workflowSave();renderReadiness(true);renderOutletTotals();};
+  row.append(workflowButton('View '+path.tag+' passive path source',()=>viewSource(path.source,sourcePage(path.reference))),workflowButton('Remove passive path '+path.tag,()=>{airPaths=airPaths.filter((_,i)=>i!==index);humanSourceReview=null;workflowSave();renderReadiness(true);renderOutletTotals();}),status);panel.append(row);
+ }
+ const fields={};
+ for(const [name,title] of [['tag','Path ID (L-1 or PASSIVE-1)'],['source','Source document'],['page','Source page'],['location','Room / area'],['note','Evidence of passive supply connection']]){
+  const label=workflowElement('label',title),input=workflowElement(name==='source'?'select':name==='note'?'textarea':'input');input.setAttribute('aria-label','Passive '+title);
+  if(name==='source')for(const [value,text] of [['','Choose original source'],...scanState.source_checkpoints.map(s=>[s.name,s.name])]){const opt=workflowElement('option',text);opt.value=value;input.append(opt);}
+  else input.maxLength=name==='note'?500:120;
+  fields[name]=input;label.append(input);panel.append(label);
+ }
+ const confirm=workflowElement('input');confirm.type='checkbox';confirm.setAttribute('aria-label','Confirm passive supply source and duplicates checked');const label=workflowElement('label',' I checked the original source and duplicates; this is a passive supply connection, not powered equipment or a return/exhaust outlet.');label.prepend(confirm);panel.append(label);
+ const status=workflowElement('p');status.setAttribute('role','status');
+ panel.append(workflowButton('Add passive supply path',()=>{try{if(workflowBusy)throw Error('Wait for the current document job.');const path=makePassivePath({...Object.fromEntries(Object.entries(fields).map(([key,el])=>[key,el.value])),confirmed:confirm.checked},scanState,records,airPaths);airPaths=[...airPaths,path];humanSourceReview=null;workflowSave();renderReadiness(true);}catch(e){status.textContent=e.message;}}),status);
+ for(const el of panel.querySelectorAll('input,textarea,select,button'))el.disabled=workflowBusy;box.append(panel);
+}
 function renderReadiness(force=false){
  const box=$('readiness');if(!box)return;
  // A delayed inventory autosave must not erase a page note or confirmation
  // while the reviewer is using it. Approval still checks the current payload.
  const humanPanel=$('human-source-review');
  const manualPanel=$('manual-source-entry');
+ const passivePanel=$('passive-path-review');
  if(!force&&(humanPanel?.open&&humanPanel.contains(document.activeElement)||manualPanel?.open&&manualPanel.contains(document.activeElement)))return;
  const humanOpen=humanPanel?.open===true,manualOpen=manualPanel?.open===true;box.replaceChildren();
  if(humanSourceReview&&!workflowBusy)$('scanstatus').textContent=sourceReviewApproved(workflowOriginalPayload())?'AUTOMATED SCAN: '+scanState.status.toUpperCase()+'. HUMAN SOURCE REVIEW APPROVED FOR THIS INVENTORY.':'Source or inventory changed after human approval. Recheck the changes and approve the reviewed design inventory again.';
@@ -231,7 +258,7 @@ function renderReadiness(force=false){
    if(record.source&&/\.pdf$/i.test(record.source))row.append(workflowButton('View '+record.tag+' source',()=>viewSource(record.source,sourcePage(record.reference))));box.append(row);
  }
  if(scanState.source_checkpoints.length){
-  renderManualSourceEntry(box,manualOpen,force?null:manualPanel);renderHumanReview(box,humanOpen);
+  renderManualSourceEntry(box,manualOpen,force?null:manualPanel);renderPassivePaths(box,passivePanel);renderHumanReview(box,humanOpen);
   const heading=workflowElement('h4','Source coverage and page retries');box.append(heading);
   if(records.length||diffusers.length){
    const recovery=workflowElement('div');recovery.id='source-recovery';
@@ -297,7 +324,7 @@ function applyScanResult(data,retrySourceName,recoverySources){
  outletBatchUndo=null;
  outletRepeatUndo=null;humanSourceReview=null;
  scanState=validateScanState({status:data.scan_status||'unknown',complete_takeoff:false,source_checkpoints:data.source_checkpoints||[],warnings:data.warnings||[]});renderScanReview();
- records=nextRecords;diffusers=nextOutlets;
+ records=nextRecords;diffusers=nextOutlets;airPaths=preserving?reconcileAirPaths(airPaths,affectedSources):[];
  tags=records.map(r=>r.tag);imageReview=data.image_review||[];
  if(preserving)for(const candidate of imageReview)if(candidate.kind==='diffuser'&&diffusers.some(o=>samePhysicalOutlet(o,outletFromImage(candidate))))candidate.accepted=true;
 imageCoverage=data.image_coverage||[];imageCoverageTruncated=data.image_coverage_truncated===true;
@@ -365,7 +392,7 @@ function renderComparison(){
 function restoreWorkflow(saved){
  humanSourceReview=null;humanReviewNote=typeof saved.review?.human_review_note==='string'?saved.review.human_review_note:'';humanPageReviews=Array.isArray(saved.review?.human_page_reviews)?saved.review.human_page_reviews:[];
  const data=validateSavedReview(saved.review,[...document.querySelectorAll('.template input')].map(x=>x.value),unitForms,savedTagPattern);
- scanState=validateScanState(data.scan_state);renderScanReview();records=data.records;tags=records.map(r=>r.tag);diffusers=data.diffusers||[];imageReview=data.image_review||[];imageCoverage=data.image_coverage||[];imageCoverageTruncated=data.image_coverage_truncated===true;
+ scanState=validateScanState(data.scan_state);renderScanReview();records=data.records;tags=records.map(r=>r.tag);diffusers=data.diffusers||[];airPaths=data.air_paths||[];imageReview=data.image_review||[];imageCoverage=data.image_coverage||[];imageCoverageTruncated=data.image_coverage_truncated===true;
  $('project').value=data.project;$('location').value=data.location;$('standard').value=data.standard;document.querySelectorAll('.template input').forEach(x=>x.checked=data.templates.includes(x.value));
  scanJobId=typeof saved.scan_job_id==='string'&&/^[a-f0-9]{48}$/.test(saved.scan_job_id)?saved.scan_job_id:null;
  sourceManifest=Array.isArray(saved.source_manifest)?saved.source_manifest.filter(s=>typeof s.name==='string'&&s.name.length<=160).slice(0,100):[];

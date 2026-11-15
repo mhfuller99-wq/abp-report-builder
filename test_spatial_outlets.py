@@ -12,6 +12,22 @@ def sample():
     return words
 
 class SpatialOutletTests(unittest.TestCase):
+    def test_numbered_supply_device_families_keep_physical_callout_rules(self):
+        words=[(10,10,240,20,'MECHANICAL FLOOR PLAN',99)]
+        for i,mark in enumerate(['SAG-7','SAD-8','SAR-9','SD-10','EAG-7','RAG-8','EF-9']):
+            x=100+i*100
+            words.extend([(x-20,100,x+20,110,mark,i),(x-10,114,x+10,124,'175',i)])
+        found=centered_outlets(words,1,'synthetic.pdf')
+        self.assertEqual([r['type'] for r in found],['SAG-7','SAD-8','SAR-9','SD-10'])
+        self.assertTrue(all(not r['include'] and r['size']==r['system']==r['location']=='' for r in found))
+        # A nearby note, two competing flows, and a schedule title each fail.
+        prose=words+[(75,100,99,110,'MOUNT',88)]
+        self.assertNotIn('SAG-7',[r['type'] for r in centered_outlets(prose,1,'synthetic.pdf')])
+        ambiguous=words+[(90,116,110,126,'195',89)]
+        self.assertNotIn('SAG-7',[r['type'] for r in centered_outlets(ambiguous,1,'synthetic.pdf')])
+        words[0]=(*words[0][:4],'SUPPLY AIR DEVICE SCHEDULE',99)
+        self.assertEqual(centered_outlets(words,1,'synthetic.pdf'),[])
+
     def test_repeated_centered_symbols_and_comma_flow(self):
         found=centered_outlets(sample(),2,'plan.pdf')
         self.assertEqual([o['design_cfm'] for o in found],[250,250,1200])
