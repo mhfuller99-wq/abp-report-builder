@@ -1226,7 +1226,8 @@ class Handler(BaseHTTPRequestHandler):
                 elif action=='preview':
                     query=parse_qs(urlsplit(self.path).query);index=int(query.get('source',['-1'])[0]);page=int(query.get('page',['1'])[0])
                     if not 0<=index<len(job['sources']) or Path(job['sources'][index]['file']).suffix!='.pdf':raise ValueError('Select a PDF source')
-                    if not WORK_LOCK.acquire(timeout=1):raise ValueError('Document processing is running. Preview this page when it finishes.')
+                    if not WORK_LOCK.acquire(timeout=1):
+                        self.respond(b'{"error":"Document processing is running. Retry the preview when it finishes.","reason":"processing_busy"}',code=503,extra_headers=[('Retry-After','5')]);return
                     try:
                         from abp_preview import render
                         image=render(job['root']/job['sources'][index]['file'],page)
@@ -1316,6 +1317,19 @@ class Handler(BaseHTTPRequestHandler):
             except Exception as exc:
                 self.close_connection=True;self.respond(json.dumps({'error':str(exc)}).encode(),code=400)
             return
+        # Worksheet names are a bounded metadata lookup, not document work.
+        # A following queued scan must not prevent the previous job finishing its UI.
+        if path=='/api/suggest':
+            try:
+                self.connection.settimeout(30)
+                n=int(self.headers.get('Content-Length','0'))
+                if not 0<n<=2_000_000:raise ValueError('Template suggestion request too large or empty')
+                request=json.loads(self.rfile.read(n))
+                if not isinstance(request,dict):raise ValueError('Template suggestion request must be an object')
+                self.respond(json.dumps(suggested_templates(request.get('tags',[]),request.get('signals',[]),sparse=request.get('sparse') is True)).encode())
+            except Exception as exc:
+                self.close_connection=True;self.respond(json.dumps({'error':str(exc)}).encode(),code=400)
+            return
         # Allow the previous response's brief cleanup to finish before reporting
         # busy; do not read or retain a waiting request body.
         if not WORK_LOCK.acquire(timeout=2):
@@ -1327,10 +1341,6 @@ class Handler(BaseHTTPRequestHandler):
         try:
             n=int(self.headers.get('Content-Length','0'))
             if n<0 or n>MAX_UPLOAD:raise ValueError('Upload limit is 200 MB')
-            if path=='/api/suggest':
-                if n>2_000_000:raise ValueError('Template suggestion request too large')
-                request=json.loads(self.rfile.read(n))
-                self.respond(json.dumps(suggested_templates(request.get('tags',[]),request.get('signals',[]),sparse=request.get('sparse') is True)).encode());return
             if path=='/api/build':
                 if n>8_000_000:raise ValueError('Build request exceeds 8 MB')
                 payload=json.loads(self.rfile.read(n));validate_api_scan_state(payload);out=build(payload);self.respond(out,'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',filename='ABP_PreField_TAB.xlsx');return

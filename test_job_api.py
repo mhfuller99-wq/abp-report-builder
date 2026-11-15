@@ -5,6 +5,30 @@ from abp_jobs import Jobs
 from test_upload_memory import body
 
 class JobApiTests(unittest.TestCase):
+    def test_busy_preview_does_not_block_worksheet_suggestions(self):
+        from pathlib import Path
+        from unittest.mock import Mock
+        lock=threading.Lock();lock.acquire()
+        jobs=Mock();jobs.get.return_value={'root':Path('.'),'sources':[{'file':'plan.pdf'}]}
+        server=app.ReportHTTPServer(('127.0.0.1',0),app.Handler)
+        thread=threading.Thread(target=server.serve_forever,daemon=True);thread.start()
+        def request(method,path,data=None):
+            conn=http.client.HTTPConnection('127.0.0.1',server.server_port,timeout=4)
+            conn.request(method,path,data,{'Content-Type':'application/json'})
+            result=conn.getresponse();status=result.status;headers=dict(result.getheaders());payload=result.read();conn.close()
+            return status,headers,json.loads(payload)
+        try:
+            with patch.object(app,'JOBS',jobs),patch.object(app,'WORK_LOCK',lock),patch.object(app,'LAN_MODE',False):
+                status,headers,payload=request('GET','/api/jobs/'+'a'*48+'/preview?source=0&page=1')
+                self.assertEqual(status,503);self.assertEqual(payload['reason'],'processing_busy');self.assertEqual(headers['Retry-After'],'5');self.assertTrue(lock.locked())
+                status,_,payload=request('POST','/api/suggest',json.dumps({'tags':['EF-1']}))
+                self.assertEqual(status,200);self.assertTrue(payload['recommended']);self.assertTrue(lock.locked())
+                self.assertEqual(request('POST','/api/suggest','[]')[0],400)
+                with patch.object(app,'LAN_MODE',True),patch.object(app,'ACCESS_PASSWORD','synthetic-password-123'):
+                    self.assertEqual(request('POST','/api/suggest','{}')[0],401)
+        finally:
+            lock.release();server.shutdown();server.server_close();thread.join()
+
     def test_csv_scan_retains_source_hash_for_saved_review_recovery(self):
         source=b'TAG,DESIGN CFM,ESP\nAHU-1,1200,0.5'
         result=app.read_sources([('schedule.csv',io.BytesIO(source))])

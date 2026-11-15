@@ -24,17 +24,45 @@ let workflowSaveTimer;
 function workflowChanged(event){if(event?.target?.closest('#readiness,#office-comparison-panel'))return;clearTimeout(workflowSaveTimer);workflowSaveTimer=setTimeout(()=>{workflowSave();renderReadiness();renderOutletTotals();renderComparison();},450);}
 function sourceIndex(name){return sourceManifest.findIndex(s=>s.name===name);}
 function sourcePage(reference){return Number(/\bpage (\d+)\b/i.exec(reference||'')?.[1]||1);}
-function viewSource(name,page=1,position){
+let sourcePreviewRevision=0,sourcePreviewController=null,sourcePreviewObjectUrl=null;
+function clearSourcePreview(){
+ sourcePreviewRevision++;sourcePreviewController?.abort();sourcePreviewController=null;
+ const image=$('source-preview');image.onload=null;image.onerror=null;image.removeAttribute('src');
+ if(sourcePreviewObjectUrl){URL.revokeObjectURL(sourcePreviewObjectUrl);sourcePreviewObjectUrl=null;}
+ $('source-preview-large').removeAttribute('href');$('source-preview-large').hidden=true;
+ $('source-preview-retry').hidden=true;
+}
+async function viewSource(name,page=1,position){
+ clearSourcePreview();const revision=sourcePreviewRevision;
  const index=sourceIndex(name),panel=$('source-viewer');panel.hidden=false;
  $('source-view-title').textContent=name+' · page '+page+(position?' · callout near ['+position.map(n=>Math.round(n)).join(', ')+'] PDF points':'');
  $('source-preview').alt='Source drawing preview for '+name+', page '+page;
  $('source-preview-status').textContent='Loading source page…';
- if(!scanJobId||index<0){$('source-preview').removeAttribute('src');$('source-preview-status').textContent='Reattach the original files, then use Recover sources and keep reviewed values under Source coverage. The saved design review is still available.';return;}
- $('source-preview').onload=()=>{$('source-preview-status').textContent='Check the full drawing, revision, duct connection and room. Coordinates identify the extracted callout; they do not prove supply service.';};
- $('source-preview').onerror=()=>{$('source-preview-status').textContent='Preview unavailable or source expired. Reattach the original files and use Recover sources and keep reviewed values under Source coverage, or open the original locally.';};
- $('source-preview').src='/api/jobs/'+scanJobId+'/preview?source='+index+'&page='+page;
- $('source-preview-large').href=$('source-preview').src;$('source-review-layout').classList.add('viewing');
+ $('source-review-layout').classList.add('viewing');
  panel.scrollIntoView({block:'nearest'});
+ const recovery='Reattach the original files, then use Recover sources and keep reviewed values under Source coverage. The saved design review is still available.';
+ if(!scanJobId||index<0){$('source-preview-status').textContent=recovery;return;}
+ const controller=new AbortController();sourcePreviewController=controller;
+ const retry=$('source-preview-retry');retry.onclick=()=>viewSource(name,page,position);
+ try{
+  const response=await fetch('/api/jobs/'+scanJobId+'/preview?source='+index+'&page='+page,{signal:controller.signal});
+  if(revision!==sourcePreviewRevision)return;
+  if(response.status===401||response.redirected)throw new Error('Sign in again to view this source page. Your saved design review is retained.');
+  if(!response.ok){
+   const detail=await response.json().catch(()=>({}));
+   if(response.status===503&&detail.reason==='processing_busy')throw new Error('Document processing is running. Retry this preview when it finishes. Your source files and reviewed values are still available.');
+   if(response.status===404)throw new Error('Source files expired or the server restarted. '+recovery);
+   throw new Error(detail.error||'The source preview could not be loaded. Retry the preview or open the original locally.');
+  }
+  if(!(response.headers.get('content-type')||'').startsWith('image/png'))throw new Error('The source preview could not be loaded. Retry the preview or sign in again.');
+  const blob=await response.blob();if(revision!==sourcePreviewRevision)return;
+  sourcePreviewObjectUrl=URL.createObjectURL(blob);
+  const image=$('source-preview');
+  image.onload=()=>{if(revision===sourcePreviewRevision)$('source-preview-status').textContent='Check the full drawing, revision, duct connection and room. Coordinates identify the extracted callout; they do not prove supply service.';};
+  image.onerror=()=>{if(revision===sourcePreviewRevision){$('source-preview-status').textContent='The preview image could not be displayed. Retry the preview or open the original locally.';retry.hidden=false;}};
+  image.src=sourcePreviewObjectUrl;$('source-preview-large').href=sourcePreviewObjectUrl;$('source-preview-large').hidden=false;
+ }catch(e){if(revision===sourcePreviewRevision&&e.name!=='AbortError'){$('source-preview-status').textContent=e.message||'Connection interrupted. Retry the source preview.';retry.hidden=false;}}
+ finally{if(revision===sourcePreviewRevision)sourcePreviewController=null;}
 }
 function renderOutletTotals(){
  const box=$('outlet-totals');if(!box)return;box.replaceChildren();
@@ -262,8 +290,14 @@ async function followWorkflowJob(){
      if(!finished.retry_source&&!finished.recovery_sources&&(records.length||diffusers.length)&&!confirm('Replace the current review with these scan results? Cancel preserves your current review.')){
       $('job-status').textContent='Scan finished. Current review kept. Use Reconnect completed job to review its results.';$('reconnect-job').hidden=false;return;
      }
-     applyScanResult(data,finished.retry_source,finished.recovery_sources);if(!finished.retry_source&&!finished.recovery_sources)await workflowRecommendations(data);
+     applyScanResult(data,finished.retry_source,finished.recovery_sources);
+     let recommendationWarning='';
+     if(!finished.retry_source&&!finished.recovery_sources){
+      try{await workflowRecommendations(data);}
+      catch(e){recommendationWarning=' Worksheet suggestions are unavailable. Your scan results are retained; choose the applicable worksheets before building.';$('template-recommendations').textContent=recommendationWarning;}
+     }
      $('job-status').textContent=finished.recovery_sources?'Source recovery finished. Original files matched; edited values and worksheet choices were retained. Recheck equipment and outlet inclusion, then approve the inventory again.':'Scan finished. Check source coverage, unresolved equipment and outlet totals below.';
+     $('job-status').textContent+=recommendationWarning;
     }else{
      completedBuild={id:status.id,project:finished.project,partial:finished.partial};const link=$('download-report');link.href='/api/jobs/'+status.id+'/result';link.download=String(finished.project||'ABP').replace(/[^a-z0-9_-]+/gi,'_')+'_PreField_TAB.xlsx';link.hidden=false;link.textContent='Download checked Excel report';link.click();
      $('status').textContent=status.kind==='reference'?'Report built from the approved reference. Original formula XML preserved; field readings and signoffs cleared.':(finished.partial?'Reviewed partial report built. SOURCE SCAN REMAINS INCOMPLETE. See Notes for omissions. ':'Report built. ')+'Template integrity checks passed. '+reviewCoverage(records,diffusers);
@@ -309,7 +343,8 @@ function installWorkflow(){
  const source=$('source-panel'),viewer=workflowElement('section');viewer.id='source-viewer';viewer.hidden=true;viewer.append(workflowElement('h3','Source page review'));
  const caption=workflowElement('p');caption.id='source-view-title';const image=workflowElement('img');image.id='source-preview';const previewStatus=workflowElement('p');previewStatus.id='source-preview-status';
  const large=workflowElement('a','Open larger source preview');large.id='source-preview-large';large.target='_blank';large.rel='noopener';
- viewer.append(workflowButton('Close source preview',()=>{viewer.hidden=true;$('source-review-layout').classList.remove('viewing');}),caption,large,previewStatus,image);source.insertBefore(viewer,$('review'));
+ const previewRetry=workflowButton('Retry source preview',()=>{});previewRetry.id='source-preview-retry';previewRetry.hidden=true;
+ viewer.append(workflowButton('Close source preview',()=>{clearSourcePreview();viewer.hidden=true;$('source-review-layout').classList.remove('viewing');}),caption,large,previewStatus,previewRetry,image);source.insertBefore(viewer,$('review'));
  const readiness=workflowElement('section');readiness.id='readiness';source.insertBefore(readiness,$('review'));
  const layout=workflowElement('div');layout.id='source-review-layout';const body=workflowElement('div');body.id='source-review-body';source.insertBefore(layout,readiness);
  for(const element of [readiness,$('review'),$('outlets'),$('image-coverage'),$('image-review')])body.append(element);
