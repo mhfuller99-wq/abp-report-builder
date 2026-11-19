@@ -26,6 +26,15 @@ class GroupedTests(unittest.TestCase):
             self.assertEqual(d[f'G{3+off}'].value,'RTU-'+str(off//42+1))
             self.assertIsNone(d[f'J{17+off}'].value)
         with zipfile.ZipFile(io.BytesIO(data)) as z:files={n:z.read(n) for n in z.namelist()}
+        # Native Excel scales each print area separately. A single tall range
+        # splits every round traverse onto a second page for the sign-off line.
+        rnd=w['DUCT TRAVERSE RND']
+        self.assertTrue(rnd.sheet_properties.pageSetUpPr.fitToPage)
+        self.assertEqual((rnd.page_setup.fitToWidth,rnd.page_setup.fitToHeight),(1,1))
+        names=ET.fromstring(files['xl/workbook.xml']).find('{'+NS+'}definedNames')
+        area=next(n.text for n in names if n.get('name')=='_xlnm.Print_Area'
+                  and n.get('localSheetId')==str(w.sheetnames.index(rnd.title)))
+        self.assertEqual(area.split(','),[f"'DUCT TRAVERSE RND'!$A${r}:$O${r+26}" for r in range(1,406,27)])
         path=sheet_paths(files)[s.title];root=ET.fromstring(files[path]);rid=root.find('{'+NS+'}drawing').attrib['{'+DOCREL+'}id']
         links={r.attrib['Id']:r for r in ET.fromstring(files[relpath(path)])}
         drawing=ET.fromstring(files[resolve(path,links[rid].attrib['Target'])])

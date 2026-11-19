@@ -10,7 +10,7 @@ from copy import copy
 from openpyxl import load_workbook
 from openpyxl.formula.translate import Translator
 from openpyxl.cell.cell import MergedCell
-from openpyxl.utils.cell import get_column_letter, range_boundaries
+from openpyxl.utils.cell import get_column_letter, quote_sheetname, range_boundaries
 
 def palette(theme):
     if not theme:return None
@@ -89,7 +89,19 @@ def audit_report(data,origins):
         for key,dim in master.column_dimensions.items():
             actual=ws.column_dimensions[key]
             if (actual.width,actual.hidden)!=(dim.width,dim.hidden):fail(title+' column dimensions changed')
-        if ws.page_setup!=master.page_setup or ws.page_margins!=master.page_margins:fail(title+' print settings changed')
+        expected_setup=copy(master.page_setup)
+        if original=='DUCT TRAVERSE RND' and pages>1:
+            expected_setup.fitToWidth=expected_setup.fitToHeight=1
+            if not ws.sheet_properties.pageSetUpPr or not ws.sheet_properties.pageSetUpPr.fitToPage:
+                fail(title+' round traverse scaling changed')
+            last_col=get_column_letter(master.max_column)
+            expected_areas=','.join(f'{quote_sheetname(title)}!$A${start}:${last_col}${start+height-1}'
+                                    for start in range(1,height*pages+1,height))
+            names=ET.fromstring(output_parts['xl/workbook.xml']).find('{'+NS+'}definedNames')
+            areas=[n.text for n in names if n.get('name')=='_xlnm.Print_Area'
+                   and n.get('localSheetId')==str(report.sheetnames.index(title))] if names is not None else []
+            if areas!=[expected_areas]:fail(title+' needs one complete print area per round traverse form')
+        if ws.page_setup!=expected_setup or ws.page_margins!=master.page_margins:fail(title+' print settings changed')
         if original=='NOTES':
             for page in range(pages):
                 for cell in master[3]:
