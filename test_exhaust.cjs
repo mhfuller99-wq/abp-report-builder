@@ -5,6 +5,24 @@ const records=[{tag:'EF-7',template:'Exhaust Fans _Sm._.xlsx',status:'VERIFIED',
 const input={source:'plan.pdf',page:'2',confirmed:true,note:'Original exhaust duct connects this inlet to EF-7.',type:'eag-2',size:'8',system:'ef-7',location:'restroom',locator:'north inlet',design_cfm:'90',x:'100',y:'200'};
 const make=(values=input,rs=records,exhaust=[],supply=[])=>ctx.makeExhaustOutlet(values,state,rs,supply,exhaust);
 const item=make();assert.equal(item.include,false);assert.equal(item.quantity,1);assert.equal(item.quantity_unresolved,false);
+const observation={include:false,type:'G',design_cfm:90,source:'plan.pdf',reference:'page 2',
+ source_sha256:state.source_checkpoints[0].sha256,position:[100,200],position_coordinate_space:'displayed_pdf_points',
+ service_hint:'possible_exhaust',size:'INCORRECT SUPPLY NECK'};
+const move=(o=observation,details=input,existing=[])=>ctx.reviewGrilleService(o,details,state,records,[o],existing);
+const moved=move();
+assert.equal(moved.supply[0].include,false);
+assert(moved.supply[0].exclusion_note.includes('EF-7'));
+assert.equal(moved.exhaust[0].include,false);
+assert.equal(moved.exhaust[0].type,'G');
+assert.equal(moved.exhaust[0].size,'');
+assert.equal(observation.exclusion_note,undefined);
+assert.deepEqual(Array.from(moved.exhaust[0].position),observation.position);
+assert.throws(()=>move(observation,{...input,confirmed:false}));
+assert.throws(()=>move(observation,input,moved.exhaust));
+assert.throws(()=>move({...observation,source_sha256:'0'.repeat(64)}));
+assert.throws(()=>move({...observation,quantity_unresolved:true,quantity:2}));
+assert.throws(()=>move({...observation,service_hint:undefined}));
+assert.throws(()=>move({...observation,position:[100,NaN]}));
 assert.equal(item.type,'EAG-2');assert.equal(item.system,'EF-7');assert.equal(item.design_cfm,90);assert.equal(item.source_sha256,'a'.repeat(64));assert.equal(item.reference,'page 2');
 assert.equal(item.location,'RESTROOM');assert.equal(item.manual_locator,'NORTH INLET');assert.equal(item.review_history[0].kind,'manual_source_entry');
 assert.equal(item.actual_cfm,undefined);assert.equal(item.motor_hp,undefined);

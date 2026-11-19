@@ -335,6 +335,8 @@ def reconcile_diffuser_sources(native_outlets,image_candidates,*,tolerance=6):
             continue
         native=matches[0]
         candidate['native_outlet_match']=True
+        if native.get('service_hint') == 'possible_exhaust':
+            reason(candidate,'The native identifier resembles the exhaust grille in the drawing legend. Check the duct connection on the original outlet before assigning service.')
         reason(candidate,'Native text already contains an outlet at this source/page position. Review the existing native outlet instead of adding this image reading as another device; compare all alternative evidence with the source.')
         # Capture the raw image before blanks are imposed, once. Reconciliation
         # can safely run again after serialization without adding blank readings.

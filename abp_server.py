@@ -126,7 +126,11 @@ def read_sources(blobs, *, runner=None):
                 if len(diffusers)+len(native['outlets'])>500:
                     checkpoint.update(native_status='incomplete',reason='outlet review capacity exceeded')
                     warnings.append(name+': outlet review capacity exceeded; this source outlet candidates were not added. Review manually or rescan separately.')
-                else:diffusers.extend(native['outlets'])
+                else:
+                    for outlet in native['outlets']:
+                        if outlet.get('service_hint') == 'possible_exhaust':
+                            outlet['source_sha256'] = source_digest
+                    diffusers.extend(native['outlets'])
                 if native['outlets']:signals.add('supply_outlets')
                 chunks=native['chunks']
                 for place,txt in chunks:

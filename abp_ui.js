@@ -54,6 +54,23 @@ function makeExhaustOutlet(input,state,records,supply,exhaust){
  const errors=exhaustOutletErrors({records,diffusers:supply,exhaust_outlets:[...exhaust,item],scan_state:state,templates:[exhaustTemplate]},false);
  if(errors.length)throw Error(errors.join('. '));return item;
 }
+function reviewGrilleService(observation,input,state,records,supply,exhaust){
+ const match=/^page ([1-9]\d{0,2})$/.exec(observation?.reference||'');
+ const sources=(state.source_checkpoints||[]).filter(s=>s.name===observation?.source);
+ if(!supply.includes(observation)||observation.service_hint!=='possible_exhaust'||sources.length!==1||
+    sources[0].sha256!==observation.source_sha256||!match||observation.position_coordinate_space!=='displayed_pdf_points'||
+    !Array.isArray(observation.position)||observation.position.length!==2||!observation.position.every(Number.isFinite)){
+  throw Error('Review this outlet against the current source scan.');
+ }
+ if(observation.quantity_unresolved||observation.repeat_instance||observation.repeat_resolution||Number(observation.quantity??1)!==1){
+  throw Error('Resolve the physical inlet locations before assigning exhaust service.');
+ }
+ const item=makeExhaustOutlet({...input,source:observation.source,page:Number(match[1]),
+  x:observation.position[0],y:observation.position[1],type:observation.type,design_cfm:observation.design_cfm,
+  size:''},state,records,supply,exhaust);
+ const reason=('EXHAUST GRILLE FOR '+item.system+'. '+item.evidence).slice(0,500);
+ return {supply:supply.map(o=>o===observation?{...o,include:false,exclusion_note:reason}:o),exhaust:[...exhaust,item]};
+}
 const componentFields=['component_of','component_kind','component_source_sha256','component_note','component_index','component_count'];
 const motorFields=['motor_hp','motor_volts','motor_phase','motor_fla','motor_rpm'];
 function supplyFanCount(v){return Number.isInteger(v)&&v>=2&&v<=20?v:typeof v==='string'&&/^(?:[2-9]|1\d|20)$/.test(v.trim())?Number(v):null;}

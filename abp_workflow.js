@@ -82,6 +82,29 @@ function renderOutletTotals(){
  if(new Set(diffusers.map(o=>o.source).filter(Boolean)).size>1)box.append(workflowElement('p','Multiple source documents contain outlet candidates. Review revisions and duplicates; no drawing is silently superseded.'));
 }
 let outletBatchUndo=null,outletRepeatUndo=null;
+function renderGrilleService(cell, observation){
+ const form=workflowElement('details');
+ form.append(workflowElement('summary','Check possible exhaust grille'));
+ const fields={};
+ for(const [key,title] of [['system','Connected exhaust fan ID'],['location','Room or area'],['locator','Physical inlet location'],['note','Drawing evidence for the connection']]){
+  const label=workflowElement('label',title),input=workflowElement(key==='note'?'textarea':'input');
+  input.maxLength=key==='note'?500:120;label.append(input);form.append(label);fields[key]=input;
+ }
+ const label=workflowElement('label'),confirm=workflowElement('input');confirm.type='checkbox';
+ label.append(confirm,document.createTextNode(' I traced this inlet to its exhaust fan and checked for duplicates.'));form.append(label);
+ const status=workflowElement('p');status.setAttribute('role','status');
+ form.append(workflowButton('Move to exhaust review',()=>{
+  try{
+   if(workflowBusy)throw Error('Wait for the current document job.');
+   const input={...Object.fromEntries(Object.entries(fields).map(([key,el])=>[key,el.value])),confirmed:confirm.checked};
+   const result=reviewGrilleService(observation,input,scanState,records,diffusers,exhaustOutlets);
+   diffusers=result.supply;exhaustOutlets=result.exhaust;humanSourceReview=null;outletBatchUndo=null;outletRepeatUndo=null;
+   renderOutlets();workflowChanged();renderReadiness(true);
+   $('job-status').textContent='Source observation excluded from supply. Check the new exhaust grille row before including it in the report.';
+  }catch(error){status.textContent=error.message;}
+ }),status);
+ cell.append(form);
+}
 renderOutlets=function(){
  workflowOriginalOutlets();const box=$('outlets');if(!diffusers.length)return;
  const totals=workflowElement('div');totals.id='outlet-totals';box.insertBefore(totals,box.children[2]);
@@ -97,6 +120,9 @@ renderOutlets=function(){
  rows.forEach((row,index)=>{
   const o=diffusers[index],cell=workflowElement('td'),check=document.createElement('input');check.type='checkbox';check.dataset.batchOutlet=index;check.setAttribute('aria-label','Select outlet '+(index+1)+' for batch assignment');cell.append(check);row.prepend(cell);
   const inclusion=row.querySelector('input[aria-label="Include outlet '+(index+1)+' in supply sheet"]');
+  if(o.service_hint==='possible_exhaust'&&!o.quantity_unresolved&&!o.repeat_instance&&!o.repeat_resolution){
+   renderGrilleService(row.lastElementChild,o);
+  }
   if(o.repeat_resolution||o.quantity_unresolved||o.quantity>1){inclusion.disabled=true;inclusion.title='Resolve the repeated annotation and include its individual physical rows.';}
   const exclusion=workflowElement('label','Reason this outlet is excluded'),reason=document.createElement('input');
   reason.maxLength=500;reason.value=o.exclusion_note||'';reason.setAttribute('aria-label','Outlet '+(index+1)+' exclusion reason');

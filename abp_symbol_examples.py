@@ -50,6 +50,13 @@ def symbol_examples(words):
             n = matches[0]
             examples.append((mark, flow, (min(label[0],n[0])-2, label[1]-2,
                                           max(label[2],n[2])+2, n[3]+2)))
+    if examples:
+        from abp_grille_service import exhaust_sample
+        sample = exhaust_sample(words)
+        if sample:
+            mark, number = sample
+            examples.append((mark[4], int(number[4]),
+                             (min(mark[0],number[0])-2, mark[1]-2, max(mark[2],number[2])+2, number[3]+2)))
     return examples
 
 

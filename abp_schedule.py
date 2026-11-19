@@ -762,6 +762,13 @@ def parse_pdf(name, data=None, *, path=None, page_numbers=None, checkpoint=None)
             if examples:
                 outlets=[o for o in outlets if o.get('reference')!=f'page {index+1}' or not is_symbol_example(o,examples)]
             outlets=distinct_outlets(outlets)
+            if examples:
+                from abp_grille_service import grille_hints
+                current = [o for o in outlets if o.get('reference') == f'page {index+1}']
+                try:
+                    grille_hints(page, words, current, examples)
+                except (RuntimeError, ValueError) as exc:
+                    warnings.append(f'{name}: page {index+1} grille symbol review unavailable ({str(exc)[:100]}); check service on the drawing')
             for outlet in outlets:
                 if outlet.get('reference') == f'page {index+1}':
                     outlet['position_coordinate_space']='displayed_pdf_points'
