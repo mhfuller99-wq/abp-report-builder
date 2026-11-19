@@ -277,6 +277,18 @@ def extract_local(data, source='synthetic.pdf', budget=Budget(), engine=tesserac
     report = {'review_candidates': [], 'pages': [], 'coverage': [], 'warnings': [], 'complete_takeoff': False}
     attempted = total_pixels = regions_attempted = raster_pages = coverage_count = 0
     coverage_warning = False
+    from abp_symbol_examples import is_symbol_example, symbol_examples
+    printed_examples = {}
+
+    def remove_printed_examples():
+        if printed_examples:
+            report['review_candidates'][:] = [c for c in report['review_candidates']
+                if c.get('kind') != 'diffuser' or not is_symbol_example(c, printed_examples.get(c.get('page')))]
+
+    def save_progress():
+        if checkpoint:
+            remove_printed_examples()
+            checkpoint(report)
 
     def record_region(coverage, region):
         nonlocal coverage_count, coverage_warning
@@ -297,7 +309,7 @@ def extract_local(data, source='synthetic.pdf', budget=Budget(), engine=tesserac
         ordered_pages=prioritized_pages(doc,page_numbers,started+budget.total_seconds)
         for page_offset,index in enumerate(ordered_pages):
             number, page = index+1,doc[index]
-            if checkpoint:checkpoint(report)
+            save_progress()
             if page_numbers is not None and number not in page_numbers:continue
             entry = {'page': number, 'ocr_status': 'not_needed'}
             coverage = {'page': number, 'status': 'native_text_only',
@@ -313,6 +325,8 @@ def extract_local(data, source='synthetic.pdf', budget=Budget(), engine=tesserac
             from abp_outlets import plan_context, centered_outlets
             from abp_mechanical import page_words
             displayed_words=page_words(page)
+            examples=symbol_examples(displayed_words)
+            if examples:printed_examples[number]=examples
             plan_page=plan_context(displayed_words) or bool(re.search(r'(?:FLOOR|CEILING)[ _-]+PLAN',source,re.I))
             # Native callouts do not prove that every device has extractable
             # text: CAD plans commonly mix native labels and outlined glyphs.
@@ -488,7 +502,7 @@ def extract_local(data, source='synthetic.pdf', budget=Budget(), engine=tesserac
                     # candidates while waiting for the whole page to finish.
                     if page_attempted:
                         coverage['status'] = 'partial_review_required'
-                        if checkpoint:checkpoint(report)
+                        save_progress()
 
             def read_small_crops(pending_jobs,psm,*,word_sink=None,glyph=False,parse=True,
                                  raster_page=None,capture=False,on_batch=None):
@@ -549,7 +563,7 @@ def extract_local(data, source='synthetic.pdf', budget=Budget(), engine=tesserac
                         coverage.setdefault('batches',[]).append({'regions':len(jobs),'psm':psm,
                             'elapsed_seconds':round(time.monotonic()-batch_started,3)})
                         if on_batch:on_batch()
-                        if checkpoint:checkpoint(report)
+                        save_progress()
 
             if raster_pages >= budget.max_pages or not available(1):
                 entry['ocr_status'] = coverage['status'] = 'budget_skipped'
@@ -602,7 +616,7 @@ def extract_local(data, source='synthetic.pdf', budget=Budget(), engine=tesserac
                             coverage['planned_outline_regions']=[
                                 {'box':p['crop'],'anchor':p['anchor'][:2],'status':'not_examined'} for p in plans]
                             coverage['unexamined_content']='Outlined callouts are unverified; rooms, duct connections and all other content require review.'
-                            if checkpoint:checkpoint(report)
+                            save_progress()
                             contexts=[]
                             def save_outlines():
                                 decoded=abp_outline_outlets.candidates(plans,outline_jobs+contexts,source,number,
@@ -627,7 +641,7 @@ def extract_local(data, source='synthetic.pdf', budget=Budget(), engine=tesserac
                                 min(budget.max_regions-regions_attempted,budget.max_regions_per_page-page_regions))
                             read_small_crops(contexts,6,parse=False,capture=True,on_batch=save_outlines)
                             save_outlines()
-                            if checkpoint:checkpoint(report)
+                            save_progress()
                     except (OSError,ValueError,RuntimeError,MemoryError) as exc:
                         coverage['outline_selection_failed']=type(exc).__name__
                         report['warnings'].append(f'Page {number}: outlined-callout reading incomplete; manual review required.')
@@ -665,7 +679,7 @@ def extract_local(data, source='synthetic.pdf', budget=Budget(), engine=tesserac
                 coverage['planned_keynote_markers']=[{'box':b,'status':'not_examined'} for b in markers] if notes else []
                 # Save the whole pending queue before recognition: a worker
                 # timeout must not make the unvisited bottom of a plan vanish.
-                if checkpoint:checkpoint(report)
+                save_progress()
                 read_small_crops(coverage['planned_callout_regions'],6)
                 note_words=[]
                 read_small_crops(coverage['planned_keynote_regions'],6,word_sink=note_words,parse=False)
@@ -687,7 +701,7 @@ def extract_local(data, source='synthetic.pdf', budget=Budget(), engine=tesserac
                 read_small_crops(coverage['planned_keynote_markers'],10,word_sink=note_words,glyph=True,parse=False)
                 for candidate in keynote_candidates(note_words,markers,notes,source,number,plan_confirmed=True):
                     if not merge_diffuser_candidate(report['review_candidates'],candidate):report['review_candidates'].append(candidate)
-                if checkpoint:checkpoint(report)
+                save_progress()
                 # Read the plan before optional circle refinement. Region-count
                 # reservations alone do not reserve wall time: decorative
                 # circles can otherwise exhaust the deadline before any tile.
@@ -759,11 +773,12 @@ def extract_local(data, source='synthetic.pdf', budget=Budget(), engine=tesserac
             if page_attempted:
                 report['warnings'].append(f'Page {number}: OCR is unverified and may miss or misread content; review the original.')
             coverage['elapsed_seconds']=round(time.monotonic()-page_started,3)
+            remove_printed_examples()
             if len(report['review_candidates']) > 500:
                 raise ValueError('Too many OCR review candidates; split source documents')
     report.update(ocr_attempted_pages=attempted, ocr_regions_attempted=regions_attempted,
                   pixels_processed=total_pixels, raster_pages_attempted=raster_pages)
-    if checkpoint:checkpoint(report)
+    save_progress()
     if len(report['review_candidates']) > 500:
         raise ValueError('Too many OCR review candidates; split source documents')
     return report

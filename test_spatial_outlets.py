@@ -68,6 +68,43 @@ class SpatialOutletTests(unittest.TestCase):
         self.assertEqual(len(outlets),3)
         self.assertEqual(sum(o['design_cfm'] for o in outlets),750)
 
+    def test_mixed_floor_plan_and_symbol_schedule(self):
+        from abp_symbol_examples import symbol_examples, is_symbol_example
+        doc=pymupdf.open()
+        page=doc.new_page(width=760,height=500)
+        page.insert_text((20,30),'2nd Floor Plan - Mechanical')
+        page.insert_text((40,90),'HVAC SYMBOL SCHEDULE')
+        page.insert_text((150,158),'TYPE "C" CEILING DIFFUSER. BALANCE TO 250 CFM.',fontsize=10)
+        for x,y in [(65,160),(410,160),(610,230)]:
+            page.insert_text((x,y),'C',fontsize=10)
+            page.insert_text((x-5,y+17),'250',fontsize=10)
+        words=page.get_text('words')
+        regions=symbol_examples(words)
+        self.assertEqual(len(regions),1)
+        self.assertFalse(symbol_examples([w for w in words if w[4]!='SYMBOL']))
+        self.assertFalse(symbol_examples([w for w in words if w[4]!='BALANCE']))
+        self.assertFalse(is_symbol_example({'type':'B','position':[65,155],'design_cfm':250},regions))
+        self.assertFalse(is_symbol_example({'type':'C','position':[65,155],'design_cfm':225},regions))
+        self.assertTrue(is_symbol_example({'type':'C','position':[65,155],
+                                          'review_values':{'design_cfm':250}},regions))
+        snapshots=[]
+        _,_,outlets=parse_pdf('plan.pdf',doc.tobytes(),checkpoint=lambda *args:snapshots.append(list(args[2])))
+        self.assertEqual([o['design_cfm'] for o in outlets],[250,250])
+        self.assertTrue(all(o['position'][0]>400 for o in outlets))
+        self.assertTrue(all(len(items)==2 for items in snapshots))
+        # Tile OCR may see the example without seeing its explanatory paragraph.
+        tile_words=[{'box':list(w[:4]),'text':w[4],'confidence':95} for w in words
+                    if w[4] in ('C','250') and (w[0]<80 or w[0]>400)]
+        saved=[]
+        ocr=extract_local(doc.tobytes(),'MECHANICAL-FLOOR-PLAN.pdf',Budget(max_regions_per_page=3),
+                          region_engine=lambda *a,**kw:tile_words,
+                          selector=lambda *a,**kw:([[0,0,760,500]],1,False),
+                          checkpoint=lambda report:saved.append(list(report['review_candidates'])))
+        out=[c for c in ocr['review_candidates'] if c['kind']=='diffuser']
+        self.assertEqual(len(out),2)
+        self.assertTrue(all(c['position'][0]>400 for candidates in saved for c in candidates if c['kind']=='diffuser'))
+        doc.close()
+
     def test_plan_tiles_preserve_budget_and_avoid_overlap_duplicates(self):
         d=pymupdf.open();d.new_page(width=600,height=400)
         calls=[]

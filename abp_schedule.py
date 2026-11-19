@@ -713,6 +713,7 @@ def parse_supply_outlets(words, page_number, name):
 
 def parse_pdf(name, data=None, *, path=None, page_numbers=None, checkpoint=None):
     import pymupdf
+    from abp_symbol_examples import is_symbol_example, symbol_examples
     warnings = []
     found = []
     outlets = []
@@ -757,6 +758,9 @@ def parse_pdf(name, data=None, *, path=None, page_numbers=None, checkpoint=None)
             outlets.extend(coded_outlets(words,index+1,name))
             outlets.extend(sized_registers(words,index+1,name))
             outlets.extend(numbered_supply_outlets(words,index+1,name))
+            examples=symbol_examples(words)
+            if examples:
+                outlets=[o for o in outlets if o.get('reference')!=f'page {index+1}' or not is_symbol_example(o,examples)]
             outlets=distinct_outlets(outlets)
             for outlet in outlets:
                 if outlet.get('reference') == f'page {index+1}':
