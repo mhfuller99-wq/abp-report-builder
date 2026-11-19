@@ -34,6 +34,28 @@ class SpatialOutletTests(unittest.TestCase):
         self.assertTrue(all(o['include'] is False and o['system']=='' and o['size']=='' for o in found))
         self.assertEqual(len(distinct_outlets(found+found)),3)
 
+    def test_each_marker_requires_centering_and_reviewed_locations(self):
+        words=sample()+[(89,83,94,93,'2',91),(96,83,118,93,'EACH',91)]
+        found=centered_outlets(words,1,'plan.pdf')
+        self.assertEqual(len(found),3)
+        self.assertEqual([o.get('quantity') for o in found],[2,None,None])
+        self.assertTrue(found[0]['quantity_unresolved'])
+        self.assertFalse(found[0]['include'])
+        self.assertEqual(found[0]['design_cfm'],250)
+        # "2 EACH UNIT" is adjacent prose. A distant note also cannot set a count.
+        prose=words+[(120,83,142,93,'UNIT',91)]
+        self.assertNotIn('quantity',centered_outlets(prose,1,'plan.pdf')[0])
+        moved=words[:-2]+[(45,83,50,93,'2',91),(52,83,74,93,'EACH',91)]
+        self.assertNotIn('quantity',centered_outlets(moved,1,'plan.pdf')[0])
+        ocr_words=[{'box':list(w[:4]),'text':w[4],'confidence':95} for w in words]
+        ocr=diffuser_candidates(ocr_words,'plan.pdf',1)
+        self.assertEqual(ocr[0]['quantity'],2)
+        ocr_words[-2]['confidence']=40
+        uncertain=diffuser_candidates(ocr_words,'plan.pdf',1)[0]
+        self.assertTrue(uncertain['quantity_unresolved'])
+        self.assertNotIn('quantity',uncertain)
+        self.assertEqual(uncertain['review_values']['design_cfm'],250)
+
     def test_notes_schedules_and_competing_flow_are_not_outlets(self):
         w=sample();w[0]=(*w[0][:4],'MECHANICAL SCHEDULE',99)
         self.assertEqual(centered_outlets(w,1,'schedules.pdf'),[])

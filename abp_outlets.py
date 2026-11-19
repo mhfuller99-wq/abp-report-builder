@@ -78,7 +78,7 @@ def numbered_supply_outlets(words, page_number, source):
             'evidence':f'{w[4]} / {n[4]} CFM; confirm supply service, neck, room, system and revision'})
     return result
 
-def centered_outlets(words, page_number, source, legend=None, *, plan_confirmed=False):
+def centered_outlets(words, page_number, source, legend=None, *, plan_confirmed=False, word_confidence=None):
     """Read centered type-over-flow bubbles, including comma-formatted CFM.
 
     A single near number is insufficient. Require an isolated two-word native
@@ -116,6 +116,29 @@ def centered_outlets(words, page_number, source, legend=None, *, plan_confirmed=
         if prose:continue
         isolated=len(w)>5 and len(n)>5 and w[5]==n[5] and set(blocks[w[5]])=={i,j}
         pairs.append((i,j,isolated));use[j].append(i)
+    # A separate "2 EACH" line can apply to one type-over-CFM annotation.
+    # Keep one source candidate until a reviewer locates its physical outlets.
+    repeat_markers=defaultdict(list)
+    marker_uses=defaultdict(int)
+    if any(word[4].upper()=='EACH' for word in words):
+        for i,j,_ in pairs:
+            w=words[i]; h=w[3]-w[1]
+            near=nearby(w)
+            if len(near)>128:continue
+            for k in near:
+                each=words[k]
+                if each[4].upper()!='EACH' or not 0<=w[1]-each[3]<=1.5*h:continue
+                for m in near:
+                    number=words[m]
+                    if not re.fullmatch(r'(?:[2-9]|[1-9]\d|100)',number[4]):continue
+                    if not (0<=each[0]-number[2]<=.8*h and abs(number[1]-each[1])<=.25*h
+                            and abs((number[0]+each[2]-w[0]-w[2])/2)<=.7*h):continue
+                    extension=any(a not in (k,m) and abs(words[a][1]-each[1])<=.25*h
+                                  and (0<=words[a][0]-each[2]<=h or 0<=number[0]-words[a][2]<=h)
+                                  for a in near)
+                    if not extension:
+                        repeat_markers[i].append((m,k))
+                        marker_uses[m,k]+=1
     result=[]
     for i,j,isolated in pairs:
         if len(use[j])!=1 or not (isolated or len(pairs)>=3):continue
@@ -126,6 +149,17 @@ def centered_outlets(words, page_number, source, legend=None, *, plan_confirmed=
                        'evidence_box':[min(w[0],n[0]),w[1],max(w[2],n[2]),n[3]],
                        'evidence':f'{w[4]} / {n[4]}; centered type-over-airflow plan callout; confirm supply service, neck size, room, system and revision',
                        'shape':('rectangular' if 'x' in size.lower() else 'round') if size else 'unknown'})
+        markers=repeat_markers[i]
+        if markers:
+            item=result[-1]
+            item['quantity_unresolved']=True
+            m,k=markers[0]
+            if len(markers)==1 and marker_uses[m,k]==1 and (word_confidence is None or
+                    all((word_confidence[a] or 0)>=80 for a in (m,k,i,j))):
+                item['quantity']=int(words[m][4])
+                item['evidence']+=f"; {words[m][4]} EACH above callout; confirm each physical location"
+            else:
+                item['evidence']+='; verify repeated outlet count and locations on the drawing'
     return result
 
 def necked_outlets(words, page_number, source, *, plan_confirmed=False):

@@ -812,7 +812,8 @@ def diffuser_candidates(words, source, page, *, plan_confirmed=False):
         return []
     tuples = [(*w['box'], w['text']) for w in words]
     found = distinct_outlets(parse_supply_outlets(tuples, page, source) + keyed_outlets(tuples, page, source, {})
-                            + centered_outlets(tuples,page,source,plan_confirmed=plan_confirmed)
+                            + centered_outlets(tuples,page,source,plan_confirmed=plan_confirmed,
+                                               word_confidence=[w.get('confidence') for w in words])
                             + necked_outlets(tuples,page,source,plan_confirmed=plan_confirmed)
                             + coded_outlets(tuples,page,source,plan_confirmed=plan_confirmed)
                             + sized_registers(tuples,page,source,plan_confirmed=plan_confirmed))
