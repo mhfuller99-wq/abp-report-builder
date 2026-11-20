@@ -14,6 +14,9 @@ TTL=2*60*60
 MAX_RETAINED_BYTES=350_000_000
 MAX_JOBS=24
 
+class JobUnavailable(KeyError):
+    """The requested temporary job is absent from this server."""
+
 def validate_recovery_sources(expected, actual):
     """Only reconnect the identical source set; filenames alone are not identity."""
     if not isinstance(expected,list) or not 1<=len(expected)<=100:
@@ -229,9 +232,10 @@ class Jobs:
             except Exception:
                 shutil.rmtree(root);del self.jobs[token];raise
     def get(self,token):
-        if not re.fullmatch(r'[a-f0-9]{48}',token):raise KeyError('Unknown job')
+        if not re.fullmatch(r'[a-f0-9]{48}',token):raise JobUnavailable('Unknown job')
         with self.lock:
             self.prune()
+            if token not in self.jobs:raise JobUnavailable('Unknown job')
             job=self.jobs[token];job['updated']=time.time();return job
     def public(self,job):
         return {k:job[k] for k in ('id','kind','status','created','updated','progress','sources')}|{'retention_seconds':TTL,'storage':'Temporary on this server; browser review is saved separately. Reattach sources after a server restart.'}

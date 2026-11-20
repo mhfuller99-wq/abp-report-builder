@@ -1121,7 +1121,7 @@ p{margin:0 0 28px;color:var(--muted);max-width:460px}
 </body>
 </html>'''
 NOT_FOUND_BYTES=NOT_FOUND_HTML.encode('utf-8')
-from abp_jobs import Jobs
+from abp_jobs import Jobs, JobUnavailable
 JOBS=Jobs(WORK_LOCK,read_sources,build,build_reference,janitor=True)
 class Handler(BaseHTTPRequestHandler):
     def secure_request(self):
@@ -1252,7 +1252,7 @@ class Handler(BaseHTTPRequestHandler):
                     finally:WORK_LOCK.release()
                     self.respond(image,'image/png')
                 else:self.respond(b'{"error":"Job result is not ready"}',code=409)
-            except KeyError:self.respond(b'{"error":"Job expired or server restarted. Your saved browser review is retained; reattach sources to scan again."}',code=404)
+            except JobUnavailable:self.respond(b'{"reason":"job_expired","error":"The temporary job expired or the server restarted."}',code=404)
             except (ValueError,IndexError) as exc:self.respond(json.dumps({'error':str(exc)}).encode(),code=400)
             return
         if path=='/':self.respond(PAGE_BYTES,'text/html; charset=utf-8')
@@ -1331,7 +1331,7 @@ class Handler(BaseHTTPRequestHandler):
                         if pages is not None and (not isinstance(pages,list) or not pages or len(pages)>300 or any(type(p)!=int or not 1<=p<=300 for p in pages)):raise ValueError('Select valid page numbers')
                         job=JOBS.create('scan',parent=token,retry={'source_index':index,'page_numbers':pages,'stage':stage})
                 self.respond(json.dumps(job).encode(),code=202)
-            except KeyError:self.respond(b'{"error":"Previous job expired. Reattach sources; your current review is preserved."}',code=404)
+            except JobUnavailable:self.respond(b'{"reason":"job_expired","error":"The previous scan expired. Reattach the original source files to recover your review."}',code=404)
             except Exception as exc:
                 self.close_connection=True;self.respond(json.dumps({'error':str(exc)}).encode(),code=400)
             return

@@ -358,9 +358,20 @@ function workflowControls(busy){
 }
 async function retrySource(name,stage,pages){
  if(workflowBusy)throw Error('Wait for the current document job.');
- const selection=parseRetryPages(pages),index=sourceIndex(name);if(index<0||!scanJobId)throw Error('Reattach sources before retrying.');
- workflowJob={...(await readApiJson(await fetch('/api/jobs/'+scanJobId+'/retry',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({source_index:index,stage,page_numbers:selection})}))),retry_source:name,retry_pages:selection,retry_stage:stage,source_revision:workflowSourceRevision};
- workflowSave();await followWorkflowJob();
+ const parent=scanJobId,selection=parseRetryPages(pages),index=sourceIndex(name);
+ if(index<0||!parent)throw Error('Reattach sources before retrying.');
+ try{
+  workflowControls(true);
+  const job=await readApiJson(await fetch('/api/jobs/'+parent+'/retry',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({source_index:index,stage,page_numbers:selection})}));
+  workflowJob={...job,retry_source:name,retry_pages:selection,retry_stage:stage,source_revision:workflowSourceRevision,download_scan:$('auto-download-scan').checked};
+  workflowSave();await followWorkflowJob();
+ }catch(error){
+  if(isExpiredJob(error)&&scanJobId===parent){
+   scanJobId=null;sourceManifest=[];workflowSave();
+   $('scanstatus').textContent=error.message;
+  }
+  throw error;
+ }finally{workflowControls(false);}
 }
 async function recoverSources(){
  if(workflowBusy)throw Error('Wait for the current document job.');
@@ -371,7 +382,7 @@ async function recoverSources(){
   const form=new FormData();for(const file of sourceFiles)form.append('files',file);form.append('recovery_sources',JSON.stringify(expected));
   const job=await readApiJson(await fetch('/api/jobs/scan',{method:'POST',body:form}));
   recoverySourceIdentities(expected,job.sources||[]);
-  workflowJob={...job,recovery_sources:expected,source_revision:workflowSourceRevision};workflowSave();await followWorkflowJob();
+  workflowJob={...job,recovery_sources:expected,source_revision:workflowSourceRevision,download_scan:$('auto-download-scan').checked};workflowSave();await followWorkflowJob();
  }finally{workflowControls(false);}
 }
 function applyScanResult(data,retrySourceName,recoverySources){
@@ -401,20 +412,65 @@ async function workflowRecommendations(data){
  document.querySelectorAll('.template input').forEach(x=>x.checked=chosen.has(x.value));
  $('template-recommendations').textContent='Recommended '+chosen.size+' original ABP worksheets. Review equipment forms and selections before building. '+(rec.review_note||'');
 }
+function isExpiredJob(error){
+ return error.status===404&&error.reason==='job_expired';
+}
+function clearScanDownload(){
+ const link=$('download-scan');
+ if(link.href)URL.revokeObjectURL(link.href);
+ link.removeAttribute('href');link.hidden=true;
+ $('scan-export-status').textContent='';
+}
+function offerScanDownload(data,job){
+ clearScanDownload();
+ // Snapshot the server response before applying worksheet choices or editing any rows.
+ const link=$('download-scan');
+ const file=new Blob([JSON.stringify(data)],{type:'application/json'});
+ link.href=URL.createObjectURL(file);
+ link.download=($('project').value.trim().replace(/[^a-z0-9_-]+/gi,'-')||'ABP')+'-scan.json';
+ link.hidden=false;
+ if(job.download_scan===true){
+  link.click();job.download_scan=false;workflowSave();
+ }
+}
+function finishUnavailableJob(job,message){
+ if(workflowJob!==job)return;
+ if(scanJobId===job.id){scanJobId=null;sourceManifest=[];}
+ const scan=job.kind==='scan';
+ let action='Choose Build report to try again.';
+ if(scan){
+  action=scanState.source_checkpoints.length&&(records.length||diffusers.length||exhaustOutlets.length)
+   ?'Reattach the original files and choose Recover sources and keep reviewed values.'
+   :'Select the source files and choose Scan uploaded files to start a new scan.';
+ }else if(job.kind==='reference'){
+  action='Review the reference workbook and choose Build report again.';
+ }
+ const notice=message+' '+action;
+ $('job-status').textContent=notice;$(scan?'scanstatus':'status').textContent=notice;
+ $('reconnect-job').hidden=true;workflowJob=null;workflowSave();
+}
 async function followWorkflowJob(){
- if(!workflowJob)return;workflowControls(true);$('reconnect-job').hidden=true;
+ const job=workflowJob;
+ if(!job)return;workflowControls(true);$('reconnect-job').hidden=true;
  try{
-  while(workflowJob){
-   const status=await readApiJson(await fetch('/api/jobs/'+workflowJob.id));const p=status.progress||{};
+  while(workflowJob===job){
+   const status=await readApiJson(await fetch('/api/jobs/'+job.id));const p=status.progress||{};
+   if(workflowJob!==job)return;
    $('job-status').textContent=(status.kind==='scan'?'Scanning documents':'Building report')+' · '+status.status+' · '+(p.source||'')+' · '+(p.stage||'')+' · '+(p.message||'')+(p.completed_pages?' · native pages retained: '+p.completed_pages.join(', '):'')+(p.pages_completed!==undefined?' · image pages retained: '+p.pages_completed:'');
-   if(status.status==='failed')throw Error(p.message||'Document job failed. Your review was preserved.');
+   if(status.status==='failed'){finishUnavailableJob(job,p.message||'The document job failed.');return;}
    if(status.status==='done'){
     const finished=workflowJob;
     if(status.kind==='scan'){
-     if(finished.source_revision!==undefined&&finished.source_revision!==workflowSourceRevision){$('job-status').textContent='The source list changed after this scan started. Your review was preserved. Scan the new source list before building.';return;}
+     if(finished.source_revision!==undefined&&finished.source_revision!==workflowSourceRevision){
+      const notice='The selected source files changed during the scan. Choose Scan uploaded files for the current selection.';
+      $('job-status').textContent=notice;$('scanstatus').textContent=notice;workflowJob=null;workflowSave();return;
+     }
      const data=await readApiJson(await fetch('/api/jobs/'+status.id+'/result'));
+     if(workflowJob!==job)return;
+     try{offerScanDownload(data,job);}
+     catch{clearScanDownload();$('scan-export-status').textContent='The browser could not prepare the scan download. You can still review the results.';}
      if(!finished.retry_source&&!finished.recovery_sources&&(records.length||diffusers.length||exhaustOutlets.length)&&!confirm('Replace the current review with these scan results? Cancel preserves your current review.')){
-      $('job-status').textContent='Scan finished. Current review kept. Use Reconnect completed job to review its results.';$('reconnect-job').hidden=false;return;
+      $('job-status').textContent='Scan finished. Current review kept. Use Reconnect completed job to review its results.';$('reconnect-job').textContent='Reconnect completed job';$('reconnect-job').hidden=false;return;
      }
      applyScanResult(data,finished.retry_source,finished.recovery_sources);
      let recommendationWarning='';
@@ -433,8 +489,11 @@ async function followWorkflowJob(){
    }
    await new Promise(resolve=>setTimeout(resolve,1500));
   }
- }catch(e){$('job-status').textContent=e.message+' Your browser review is preserved.';$('reconnect-job').hidden=false;workflowSave();}
- finally{workflowControls(false);updateWorkspace();renderComparison();}
+ }catch(e){
+  if(workflowJob!==job)return;
+  if(isExpiredJob(e)){finishUnavailableJob(job,e.message);return;}
+  $('job-status').textContent=e.message+' Your browser review is preserved.';$('reconnect-job').textContent='Reconnect to job';$('reconnect-job').hidden=false;workflowSave();
+ }finally{if(!workflowJob||workflowJob===job){workflowControls(false);updateWorkspace();renderComparison();}}
 }
 function renderComparison(){
  renderReadiness();
@@ -450,14 +509,17 @@ function renderComparison(){
  wrap.append(table);box.append(wrap);
 }
 function restoreWorkflow(saved){
- humanSourceReview=null;humanReviewNote=typeof saved.review?.human_review_note==='string'?saved.review.human_review_note:'';humanPageReviews=Array.isArray(saved.review?.human_page_reviews)?saved.review.human_page_reviews:[];
  const data=validateSavedReview(saved.review,[...document.querySelectorAll('.template input')].map(x=>x.value),unitForms,savedTagPattern);
+ humanSourceReview=null;humanReviewNote=typeof saved.review?.human_review_note==='string'?saved.review.human_review_note:'';humanPageReviews=Array.isArray(saved.review?.human_page_reviews)?saved.review.human_page_reviews:[];
+ clearScanDownload();
  scanState=validateScanState(data.scan_state);renderScanReview();records=data.records;tags=records.map(r=>r.tag);diffusers=data.diffusers||[];airPaths=data.air_paths||[];exhaustOutlets=data.exhaust_outlets||[];imageReview=data.image_review||[];imageCoverage=data.image_coverage||[];imageCoverageTruncated=data.image_coverage_truncated===true;
  $('project').value=data.project;$('location').value=data.location;$('standard').value=data.standard;document.querySelectorAll('.template input').forEach(x=>x.checked=data.templates.includes(x.value));
  scanJobId=typeof saved.scan_job_id==='string'&&/^[a-f0-9]{48}$/.test(saved.scan_job_id)?saved.scan_job_id:null;
  sourceManifest=Array.isArray(saved.source_manifest)?saved.source_manifest.filter(s=>typeof s.name==='string'&&s.name.length<=160).slice(0,100):[];
  workflowSourceRevision=Number.isInteger(saved.source_revision)?saved.source_revision:0;
  completedBuild=saved.completed_build&&/^[a-f0-9]{48}$/.test(saved.completed_build.id)?saved.completed_build:null;
+ $('download-report').hidden=!completedBuild;
+ if(!completedBuild)$('download-report').removeAttribute('href');
  if(completedBuild){const link=$('download-report');link.href='/api/jobs/'+completedBuild.id+'/result';link.download=String(completedBuild.project||'ABP').replace(/[^a-z0-9_-]+/gi,'_')+'_PreField_TAB.xlsx';link.hidden=false;link.textContent='Download previous checked report (temporary server copy)';}
  workflowJob=saved.active_job&&/^[a-f0-9]{48}$/.test(saved.active_job.id)&&['scan','build','reference'].includes(saved.active_job.kind)?saved.active_job:null;
  renderReview();renderOutlets();renderImageReview();renderImageCoverage();updateWorkspace();
@@ -479,6 +541,12 @@ function installWorkflow(){
  jobs.append(status,reconnect);$('build-card').prepend(jobs);
  new MutationObserver(()=>{if(workflowJob?.kind==='scan')$('scanstatus').textContent=status.textContent;}).observe(status,{childList:true});
  const autosave=workflowElement('p');autosave.id='autosave-status';$('build-card').append(autosave);
+ const scanFiles=workflowElement('div'),autoLabel=workflowElement('label'),autoInput=workflowElement('input');
+ autoInput.type='checkbox';autoInput.id='auto-download-scan';autoLabel.append(autoInput,' Download scan results automatically when finished (.json)');
+ const scanLink=workflowElement('a','Download original scan results (.json)');scanLink.id='download-scan';scanLink.hidden=true;
+ const exportStatus=workflowElement('span');exportStatus.id='scan-export-status';exportStatus.setAttribute('role','status');
+ scanFiles.append(autoLabel,scanLink,exportStatus);$('scan').after(scanFiles);
+ $('scanstatus').after($('review-tools'));
  const download=workflowElement('a');download.id='download-report';download.hidden=true;$('build-card').append(download);
  const compare=workflowElement('details');compare.id='office-comparison-panel';compare.append(workflowElement('summary','Compare with your completed office report'));
  compare.append(workflowElement('p','Choose the office XLSX for comparison. It is read only in this browser and is never uploaded or saved with the review. Its measurements are ignored.'));
@@ -488,7 +556,7 @@ function installWorkflow(){
  $('scan').onclick=async()=>{
   if(!templatesReady||workflowBusy)return;if(!sourceFiles.length){$('scanstatus').textContent='Choose source files first.';return;}
   try{workflowControls(true);$('job-status').textContent='Uploading source documents…';const form=new FormData();for(const file of sourceFiles)form.append('files',file);
-   workflowJob={...(await readApiJson(await fetch('/api/jobs/scan',{method:'POST',body:form}))),source_revision:workflowSourceRevision};workflowSave();await followWorkflowJob();
+   workflowJob={...(await readApiJson(await fetch('/api/jobs/scan',{method:'POST',body:form}))),source_revision:workflowSourceRevision,download_scan:autoInput.checked};workflowSave();await followWorkflowJob();
   }catch(e){$('job-status').textContent=e.message;workflowControls(false);}
  };
  $('generate').onclick=async()=>{
@@ -509,7 +577,7 @@ function installWorkflow(){
   }catch(e){$('status').textContent=e.message;workflowControls(false);}
  };
  document.addEventListener('input',workflowChanged);document.addEventListener('change',workflowChanged);
- const oldSourcesChanged=sourcesChanged;sourcesChanged=function(){workflowSourceRevision++;scanJobId=null;sourceManifest=[];oldSourcesChanged();renderReadiness();workflowSave();};
+ const oldSourcesChanged=sourcesChanged;sourcesChanged=function(){workflowSourceRevision++;scanJobId=null;sourceManifest=[];clearScanDownload();oldSourcesChanged();renderReadiness();workflowSave();};
  const oldLoadProject=$('loadproject').onchange;
  $('loadproject').onchange=async event=>{
   if(workflowBusy)return;await oldLoadProject(event);
@@ -517,7 +585,7 @@ function installWorkflow(){
    // A downloaded review has no authenticated link to this browser's old job.
    // Common filenames from a different project must never show the wrong PDF.
    workflowSourceRevision++;scanJobId=null;sourceManifest=[];completedBuild=null;
-   $('download-report').hidden=true;renderReadiness();workflowSave();
+   clearScanDownload();$('download-report').hidden=true;renderReadiness();workflowSave();
   }
  };
  const saved=localStorage.getItem(workflowDraftKey);
@@ -525,11 +593,33 @@ function installWorkflow(){
  if(!workflowJob&&sessionStorage.getItem('abp-reference-job')){
   try{const job=JSON.parse(sessionStorage.getItem('abp-reference-job'));if(job.kind==='reference'&&/^[a-f0-9]{48}$/.test(job.id)){workflowJob=job;followWorkflowJob().then(()=>{if(!workflowJob)sessionStorage.removeItem('abp-reference-job');});}}catch{}
  }
- const recent=workflowElement('details');recent.append(workflowElement('summary','Recover a saved browser review'));
- for(const key of Object.keys(localStorage).filter(k=>k.startsWith('abp-review-v2:')).slice(-10)){
-  try{const saved=JSON.parse(localStorage.getItem(key));if(!saved.review?.project)continue;recent.append(workflowButton(saved.review.project+' · '+new Date(saved.saved_at).toLocaleString(),()=>{if(workflowBusy)return;try{restoreWorkflow(saved);workflowSave();if(workflowJob)followWorkflowJob();}catch(e){autosave.textContent=e.message;}}));}catch{}
+ const recent=workflowElement('div'),drafts=[];
+ for(const key of Object.keys(localStorage).filter(k=>k.startsWith('abp-review-v2:')&&k!==workflowDraftKey)){
+  try{
+   const draft=JSON.parse(localStorage.getItem(key));
+   if(draft.review?.project)drafts.push({key,project:draft.review.project,time:draft.saved_at});
+  }catch{}
  }
- $('review-tools').append(recent);renderReadiness();
+ if(drafts.length){
+  recent.append(workflowElement('p','Saved project reviews on this device'));
+  for(const draft of drafts.sort((a,b)=>b.time-a.time)){
+   recent.append(workflowButton(draft.project+' · '+new Date(draft.time).toLocaleString(),()=>{
+    if(workflowBusy)return;
+    if(($('project').value.trim()||records.length||diffusers.length||sourceFiles.length)&&!confirm('Load this saved project in the current workspace? Save your current review first if you want a separate copy.'))return;
+    try{
+     const saved=JSON.parse(localStorage.getItem(draft.key));
+     if(!saved)throw Error('This saved review is no longer available on this device.');
+     restoreWorkflow(saved);sourceFiles=[];$('files').value='';renderSourceFiles();
+     officeComparison=null;input.value='';compareStatus.textContent='';compareResults.replaceChildren();
+     renderReadiness();workflowSave();
+     if(workflowJob)followWorkflowJob();
+    }catch(e){autosave.textContent=e.message;}
+   }));
+  }
+  $('review-tools').append(recent);
+  if(!saved)$('review-tools').open=true;
+ }
+ renderReadiness();
 }
 let workflowInstallAttempts=0;
 const workflowInstallTimer=setInterval(()=>{if(templatesReady){clearInterval(workflowInstallTimer);installWorkflow();}else if(++workflowInstallAttempts>120)clearInterval(workflowInstallTimer);},250);

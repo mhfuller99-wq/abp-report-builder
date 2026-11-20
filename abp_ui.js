@@ -178,7 +178,12 @@ async function readApiJson(response) {
   let data;
   try { data=await response.json(); }
   catch { throw Error(`The server did not return a valid response (HTTP ${response.status}). Your current review has been preserved. Please try again.`); }
-  if(!response.ok) throw Error(data?.error||'The request could not be completed. Please try again.');
+  if(!response.ok) {
+    const error=Error(data?.error||'The request could not be completed. Please try again.');
+    error.status=response.status;
+    if(typeof data?.reason==='string')error.reason=data.reason;
+    throw error;
+  }
   return data;
 }
 function validateSavedReview(data, templates, forms, tagPattern) {

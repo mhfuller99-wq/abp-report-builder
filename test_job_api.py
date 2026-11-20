@@ -83,7 +83,10 @@ class JobApiTests(unittest.TestCase):
                     if jobs.worker:jobs.worker.join(3)
                     status,data=request('GET','/api/jobs/'+token+'/result');self.assertEqual(status,200)
                     self.assertEqual(json.loads(data)['records'][0]['tag'],'EF-1')
-                    self.assertEqual(request('GET','/api/jobs/'+'f'*48)[0],404)
+                    missing='/api/jobs/'+'f'*48
+                    for method,path,content in [('GET',missing,None),('GET',missing+'/result',None),('POST',missing+'/retry','{}')]:
+                        status,data=request(method,path,content,{'Content-Type':'application/json'})
+                        self.assertEqual(status,404);self.assertEqual(json.loads(data)['reason'],'job_expired')
                     invalid={'project':'Blocked','templates':['Notes.xlsx'],'scan_state':{'status':'incomplete','complete_takeoff':False,'source_checkpoints':[],'warnings':[]}}
                     status,data=request('POST','/api/jobs/build',json.dumps(invalid),{'Content-Type':'application/json'})
                     self.assertEqual(status,400);self.assertIn(b'incomplete',data)
