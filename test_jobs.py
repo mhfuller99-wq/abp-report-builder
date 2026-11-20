@@ -4,6 +4,22 @@ from unittest.mock import patch
 from abp_jobs import Jobs,merge_pages,SourceRunner,validate_recovery_sources
 
 class JobTests(unittest.TestCase):
+    def test_interrupted_retry_keeps_prior_work_and_flags_unfinished_pages(self):
+        old={'review_candidates':[{'page':p,'tag':f'OLD-{p}'} for p in (1,2,3)],
+             'coverage':[{'page':p,'status':'partial_review_required'} for p in (1,2,3)],'warnings':[]}
+        new={'review_candidates':[{'page':p,'tag':f'NEW-{p}'} for p in (1,2)],
+             'coverage':[{'page':p,'status':'partial_review_required'} for p in (1,2)],
+             'warnings':['image worker failed'],'in_progress_page':2,'interrupted':True}
+        for pages in (None,[1,2,3]):
+            result=merge_pages(old,new,pages,'images')
+            self.assertEqual({r['tag'] for r in result['review_candidates']},{'NEW-1','OLD-2','NEW-2','OLD-3'})
+            self.assertTrue(result['interrupted'])
+            self.assertFalse(result['complete_takeoff'])
+            self.assertIn('Retry',result['coverage'][2]['unexamined_content'])
+        failed=merge_pages(old,{'coverage':[],'warnings':['busy']},[2],'images')
+        self.assertEqual(failed['review_candidates'],old['review_candidates'])
+        self.assertEqual(failed['coverage'][0],old['coverage'][0])
+
     def test_cached_reader_and_source_identity_must_both_match(self):
         with tempfile.TemporaryDirectory() as directory:
             job={'root':Path(directory),'sources':[{'name':'synthetic.pdf','sha256':'a'*64}]}

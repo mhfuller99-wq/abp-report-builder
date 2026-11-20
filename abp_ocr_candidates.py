@@ -109,6 +109,12 @@ def _merge_type(old, incoming):
     _reason(old, 'Different OCR types were read at this physical outlet; alternatives are retained. Confirm the printed type before including. Unresolved type conflicts are blank.')
 
 
+def repeated_equipment(existing, incoming):
+    return incoming.get('kind')=='equipment' and any(
+        old.get('kind')=='equipment' and all(old.get(key)==incoming.get(key) for key in
+        ('page','source','tag','region','review_values')) for old in existing)
+
+
 def merge_diffuser_candidate(existing, incoming, *, tolerance=6):
     """Return True when an unverified repeat was merged; otherwise append it.
 

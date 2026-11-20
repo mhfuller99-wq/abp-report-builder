@@ -13,7 +13,7 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 from abp_ocr_regions import render_geometry, raster_regions, ruled_regions, hood_information_candidates, information_parser_limited, complete_raster_tables, circle_regions
-from abp_ocr_candidates import merge_diffuser_candidate
+from abp_ocr_candidates import merge_diffuser_candidate, repeated_equipment
 from abp_plan_regions import paired_text_regions
 from abp_keynotes import keynote_regions, keynote_candidates
 from abp_ocr_batch import tesseract_batch_words
@@ -266,6 +266,8 @@ def extract_local(data, source='synthetic.pdf', budget=Budget(), engine=tesserac
     budgets, and all areas outside the crops stay explicit in compact coverage.
     """
     import pymupdf
+    region_errors = (OSError, ValueError, RuntimeError, MemoryError, pymupdf.mupdf.FzErrorBase)
+    ocr_errors = region_errors + (subprocess.SubprocessError,)
     region_engine = region_engine or tesseract_region_words
     if batch_engine is None and region_engine is tesseract_region_words:batch_engine=tesseract_batch_words
     selector = selector or ruled_regions
@@ -285,10 +287,11 @@ def extract_local(data, source='synthetic.pdf', budget=Budget(), engine=tesserac
             report['review_candidates'][:] = [c for c in report['review_candidates']
                 if c.get('kind') != 'diffuser' or not is_symbol_example(c, printed_examples.get(c.get('page')))]
 
+    active_page=None
     def save_progress():
         if checkpoint:
             remove_printed_examples()
-            checkpoint(report)
+            checkpoint({**report,'in_progress_page':active_page})
 
     def record_region(coverage, region):
         nonlocal coverage_count, coverage_warning
@@ -309,7 +312,9 @@ def extract_local(data, source='synthetic.pdf', budget=Budget(), engine=tesserac
         ordered_pages=prioritized_pages(doc,page_numbers,started+budget.total_seconds)
         for page_offset,index in enumerate(ordered_pages):
             number, page = index+1,doc[index]
+            active_page=None
             save_progress()
+            active_page=number
             if page_numbers is not None and number not in page_numbers:continue
             entry = {'page': number, 'ocr_status': 'not_needed'}
             coverage = {'page': number, 'status': 'native_text_only',
@@ -475,11 +480,7 @@ def extract_local(data, source='synthetic.pdf', budget=Budget(), engine=tesserac
                     for candidate in candidates:
                         # Overlapping plan tiles must not create duplicate physical outlets.
                         if merge_diffuser_candidate(report['review_candidates'],candidate):continue
-                        if candidate.get('kind')=='equipment' and any(
-                            old.get('kind')=='equipment' and old.get('page')==number and old.get('source')==source
-                            and old.get('tag')==candidate.get('tag') and old.get('region')==candidate.get('region')
-                            and old.get('review_values')==candidate.get('review_values')
-                            for old in report['review_candidates']):continue
+                        if repeated_equipment(report['review_candidates'],candidate):continue
                         report['review_candidates'].append(candidate)
                     r['status'] = 'review_candidate' if candidates else ('no_supported_table_recognized' if ocr else 'no_text')
                     if parser_limited:
@@ -489,7 +490,7 @@ def extract_local(data, source='synthetic.pdf', budget=Budget(), engine=tesserac
                             r['status'] = 'parser_limited'
                     r['candidate_count'] = len(candidates)
                     return candidates, r
-                except (OSError, ValueError, RuntimeError, MemoryError, subprocess.SubprocessError) as exc:
+                except ocr_errors as exc:
                     r['status'] = 'failed'
                     r['reason'] = type(exc).__name__ + '; manual review required.'
                     report['warnings'].append(f'Page {number}: OCR failed ({type(exc).__name__}); manual review required.')
@@ -552,7 +553,7 @@ def extract_local(data, source='synthetic.pdf', budget=Budget(), engine=tesserac
                                 if not merge_diffuser_candidate(report['review_candidates'],candidate):report['review_candidates'].append(candidate)
                             r['status']='review_candidate' if candidates else ('no_supported_table_recognized' if words else 'no_text')
                             r['candidate_count']=len(candidates);pending['status']=r['status'];statuses.append(r['status'])
-                    except (OSError,ValueError,RuntimeError,MemoryError,subprocess.SubprocessError) as exc:
+                    except ocr_errors as exc:
                         report['warnings'].append(f'Page {number}: OCR batch failed ({type(exc).__name__}); unfinished crops require review.')
                         for pending,r in reserved:
                             if pending['status']=='not_examined':
@@ -595,7 +596,7 @@ def extract_local(data, source='synthetic.pdf', budget=Budget(), engine=tesserac
                 # A visually ruled schedule need not intersect an embedded
                 # bitmap: CAD frequently outlines its text. Raster filtering
                 # here discarded real schedules and kept only title blocks.
-            except (OSError, ValueError, RuntimeError, MemoryError) as exc:
+            except region_errors as exc:
                 preview_failed = True
                 coverage['selection_failed'] = type(exc).__name__
                 report['warnings'].append(f'Page {number}: table preview failed; bounded full-page fallback attempted if budget permits.')
@@ -642,7 +643,7 @@ def extract_local(data, source='synthetic.pdf', budget=Budget(), engine=tesserac
                             read_small_crops(contexts,6,parse=False,capture=True,on_batch=save_outlines)
                             save_outlines()
                             save_progress()
-                    except (OSError,ValueError,RuntimeError,MemoryError) as exc:
+                    except region_errors as exc:
                         coverage['outline_selection_failed']=type(exc).__name__
                         report['warnings'].append(f'Page {number}: outlined-callout reading incomplete; manual review required.')
                     finally:
@@ -654,7 +655,7 @@ def extract_local(data, source='synthetic.pdf', budget=Budget(), engine=tesserac
                 # confidence checks still determine candidate values.
                 try:
                     callouts,limited=paired_text_regions(page,deadline=page_deadline)
-                except (OSError,ValueError,RuntimeError,MemoryError) as exc:
+                except region_errors as exc:
                     callouts,limited=[],True
                     coverage['callout_selection_failed']=type(exc).__name__
                 coverage['callout_selection_truncated']=limited
@@ -671,7 +672,7 @@ def extract_local(data, source='synthetic.pdf', budget=Budget(), engine=tesserac
                 coverage['planned_tiles']=tiles
                 try:
                     markers,notes,key_limited=keynote_regions(page,deadline=page_deadline)
-                except (OSError,ValueError,RuntimeError,MemoryError) as exc:
+                except region_errors as exc:
                     markers,notes,key_limited=[],[],True
                     coverage['keynote_selection_failed']=type(exc).__name__
                 coverage['keynote_selection_truncated']=key_limited
@@ -713,7 +714,7 @@ def extract_local(data, source='synthetic.pdf', budget=Budget(), engine=tesserac
                 # them. Every recognition still uses the same shared budgets.
                 try:
                     circles,limited=circle_regions(page,page_deadline)
-                except (OSError, ValueError, RuntimeError, MemoryError) as exc:
+                except region_errors as exc:
                     circles,limited=[],True
                     coverage['circle_selection_failed']=type(exc).__name__
                 if limited:
@@ -778,6 +779,7 @@ def extract_local(data, source='synthetic.pdf', budget=Budget(), engine=tesserac
                 raise ValueError('Too many OCR review candidates; split source documents')
     report.update(ocr_attempted_pages=attempted, ocr_regions_attempted=regions_attempted,
                   pixels_processed=total_pixels, raster_pages_attempted=raster_pages)
+    active_page=None
     save_progress()
     if len(report['review_candidates']) > 500:
         raise ValueError('Too many OCR review candidates; split source documents')
@@ -844,6 +846,29 @@ import threading
 _OCR_SLOT = threading.BoundedSemaphore(1)
 
 
+def interrupted_result(root, source, kind):
+    """Recover only the worker's last atomic snapshot after a terminal exit."""
+    import json
+    reason='image stage failed to finish within its time budget' if kind=='time_budget' else 'image worker failed'
+    warning=f'{source}: {reason}. Unfinished pages require retry or manual review.'
+    report={'review_candidates':[], 'coverage':[], 'warnings':[]}
+    saved=root/'checkpoint.json'
+    if saved.is_file() and saved.stat().st_size<=2_000_000:
+        snapshot=json.loads(saved.read_bytes())
+        if (isinstance(snapshot,dict) and snapshot.get('complete_takeoff') is False
+                and all(isinstance(snapshot.get(k),list) for k in report)):
+            report=snapshot
+            for item in report['review_candidates']:
+                item['source']=source
+            for page in report['coverage']:
+                if page['page']==report.get('in_progress_page'):
+                    page['status']='partial_review_required'
+                    page['unexamined_content']='Page reading was interrupted. Retry this page or review the original.'
+    report.update(interrupted=True, failure_kind=kind, complete_takeoff=False)
+    report['warnings'].append(warning)
+    return report
+
+
 def extract(data, source='source.pdf', timeout=65, *, path=None, page_numbers=None, progress=None):
     """Run all OCR parsing/rendering in a memory/CPU/wall-clock bounded process.
 
@@ -894,21 +919,14 @@ def extract(data, source='source.pdf', timeout=65, *, path=None, page_numbers=No
             except subprocess.TimeoutExpired:
                 os.killpg(child.pid, signal.SIGKILL)
                 child.wait()
-                saved=root/'checkpoint.json'
-                if saved.exists() and saved.stat().st_size<=2_000_000:
-                    report=json.loads(saved.read_text(encoding='utf-8'))
-                    report['warnings'].append('Image time budget reached; completed image-region results preserved. Unfinished regions and pages require retry or manual review.')
-                    report['interrupted']=True
-                    for item in report['review_candidates']:item['source']=source
-                    return report
-                return {'review_candidates':[],'coverage':[],'warnings':[source+': image stage failed to finish within its time budget; no page completed. Retry selected pages.'],'failure_kind':'time_budget'}
+                return interrupted_result(root,source,'time_budget')
             finally:
                 # Clean up any descendant recognizer even if worker crashes.
                 try: os.killpg(child.pid, signal.SIGKILL)
                 except ProcessLookupError: pass
             output = root / 'result.json'
             if child.returncode or not output.exists() or output.stat().st_size > 2_000_000:
-                raise ValueError('OCR worker failed or exceeded limits')
+                return interrupted_result(root,source,'worker_failure')
             report = json.loads(output.read_text())
             for item in report['review_candidates']:
                 item['source'] = source
@@ -933,7 +951,8 @@ def _worker(directory):
     root = Path(directory)
     request=json.loads((root/'request.json').read_text(encoding='utf-8')) if (root/'request.json').exists() else {}
     def checkpoint(report):
-        compact={'review_candidates':[], 'warnings':report['warnings'][-200:],'coverage':report['coverage'], 'complete_takeoff':False}
+        compact={'review_candidates':[], 'warnings':report['warnings'][-200:],'coverage':report['coverage'],
+                 'in_progress_page':report['in_progress_page'],'complete_takeoff':False}
         for candidate in report['review_candidates']:
             item=dict(candidate)
             if 'evidence' in item:

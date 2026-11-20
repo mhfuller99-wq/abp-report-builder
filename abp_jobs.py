@@ -41,7 +41,40 @@ def page_of(item):
     return int(found[1]) if found else None
 
 def merge_pages(old,new,pages,kind):
-    if not old or pages is None:return new
+    if not old:return new
+    image_coverage=new.get('coverage',[]) if kind=='images' else []
+    unread={row['page'] for row in image_coverage if row['status'] in ('failed','budget_skipped','native_word_budget_skipped')}
+    if kind=='images' and (new.get('interrupted') or unread or not image_coverage):
+        # A retry can die before reaching its selected pages. Preserve earlier
+        # evidence for unfinished pages and merge any new unverified readings.
+        reached={row['page'] for row in image_coverage}
+        previous={page_of(row) for row in old.get('review_candidates',[])}
+        current=new.get('in_progress_page')
+        preserve=previous & (unread|{current})
+        replace=reached-preserve
+        prior_coverage={row['page']:row for row in old.get('coverage',[])}
+        prior_coverage.update({row['page']:row for row in new.get('coverage',[]) if row['page'] in replace})
+        pending=(set(pages if pages is not None else prior_coverage)-replace)|unread
+        if current is not None:pending.add(current)
+        for page in pending:
+            prior_coverage[page]={**prior_coverage.get(page,{}),'page':page,'status':'partial_review_required',
+                'unexamined_content':'Retry did not finish this page. Review the original or retry again.'}
+        candidates=[copy.deepcopy(r) for r in old.get('review_candidates',[]) if page_of(r) not in replace]
+        from abp_ocr_candidates import merge_diffuser_candidate, repeated_equipment
+        warnings=list(dict.fromkeys(old.get('warnings',[])+new.get('warnings',[])))
+        for item in new.get('review_candidates',[]):
+            if page_of(item) in preserve:
+                if item in candidates or repeated_equipment(candidates,item) or merge_diffuser_candidate(candidates,item):
+                    continue
+            if len(candidates)>=500:
+                warnings.append('Image retry reached the 500-candidate limit. Review the remaining source evidence manually.')
+                break
+            candidates.append(item)
+        return {**new,'interrupted':True,'complete_takeoff':False,
+            'review_candidates':candidates,
+            'coverage':[prior_coverage[p] for p in sorted(prior_coverage)],
+            'warnings':warnings}
+    if pages is None:return new
     result=dict(old)
     if kind=='native':
         for field in ('candidates','outlets'):
@@ -64,6 +97,8 @@ def merge_pages(old,new,pages,kind):
         result['coverage']=[coverage[p] for p in sorted(coverage)]
         result['warnings']=list(dict.fromkeys([w for w in old.get('warnings',[]) if not any(f'Page {p}:' in w for p in pages)]+new.get('warnings',[])))
         result['interrupted']=bool(new.get('interrupted'))
+        result.pop('failure_kind',None)
+        result.pop('in_progress_page',None)
     return result
 
 class SourceRunner:

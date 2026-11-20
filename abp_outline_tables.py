@@ -68,28 +68,41 @@ def read(page, box, native, pixels, timeout, engine, transposed_hint=None):
         # Read the furnace section separately; condenser/coil marks and ratings
         # are associated components and never independent air-moving units.
         render_rect.x1=marks[1]['box'][0]-4
-    paths=page.get_cdrawings()
-    # The count covers the whole sheet, while the rendered selection is capped
-    # below at 3,000 local glyph paths / 50,000 operations. Dense unrelated
-    # details must not veto a small schedule. Keep a hard traversal ceiling and
-    # the existing deadline, raster and local geometry caps.
-    if len(paths)>50_000:
-        return None
     selected=[];operations=0
     matrix=page.rotation_matrix
-    for index,path in enumerate(paths):
-        if index%128==0 and time.monotonic()-started>=timeout:
-            raise TimeoutError('Outlined schedule selection deadline')
-        bounds=pymupdf.Rect(path['rect'])*matrix
+    seen=0
+    previous_fill=None
+    limited=False
+    deadline=started+timeout
+
+    def select(path):
+        nonlocal seen, previous_fill, operations, limited
+        seen+=1
+        if limited or seen>50_000 or (seen%128==0 and time.monotonic()>=deadline):
+            limited=True
+            return
+        # The streaming API emits fill and stroke as separate events. The
+        # list API merged identical consecutive fill/stroke paths as 'fs',
+        # which the glyph reader excludes. Keep only one small fill to compare.
         items=path.get('items',[])
+        filled=previous_fill
+        previous_fill=items if path.get('type')=='f' and len(items)<=80 else None
+        if path.get('type')!='s' or not 1<=len(items)<=80 or items==filled:
+            return
+        bounds=pymupdf.Rect(path['rect'])*matrix
         if (render_rect.contains(bounds) and 0<=bounds.height<=20 and 0<=bounds.width<=25
-                and path.get('type')=='s' and 1<=len(items)<=80
                 and all(item[0] in ('l','c') for item in items)
                 and all(math.isfinite(v) for v in bounds)):
-            selected.append(path);operations+=len(items)
-            if len(selected)>3000 or operations>50_000:
-                return None
-    if len(selected)<20:
+            operations+=len(items)
+            if len(selected)>=3000 or operations>50_000:
+                limited=True
+                return
+            selected.append(path)
+
+    page.get_cdrawings(callback=select)
+    if time.monotonic()>=deadline:
+        raise TimeoutError('Outlined schedule selection deadline')
+    if limited or len(selected)<20:
         return None
     with pymupdf.open() as doc:
         target=doc.new_page(width=render_rect.width+20,height=render_rect.height+20)

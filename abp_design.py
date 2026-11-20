@@ -4,7 +4,6 @@ Rules follow recurring report structures. Historical job values are never used
 as defaults for another job, and extracted candidates still require review.
 """
 import re
-from openpyxl.utils import get_column_letter
 from abp_job import canonical_tag
 
 
@@ -54,6 +53,7 @@ def extract_design_rows(rows, sheet, tag_pattern):
     A bare CFM/GPM heading is accepted only within a named schedule or beneath
     an explicit Design header. Actual/Initial/Final columns are never inputs.
     """
+    from openpyxl.utils import get_column_letter
     results=[]
     def tag_at(value):
         value=canonical_tag(str(value or ''))

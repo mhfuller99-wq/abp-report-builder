@@ -1,12 +1,62 @@
 """Synthetic ordering regressions; no customer documents or text."""
-import copy,io,tempfile,time,unittest
+import copy,io,json,os,subprocess,sys,tempfile,time,unittest
 from pathlib import Path
 from unittest.mock import patch
 import pymupdf
-from abp_ocr import Budget,extract_local,prioritized_pages
+from abp_ocr import Budget,extract_local,interrupted_result,prioritized_pages
 
 
 class PriorityTests(unittest.TestCase):
+    @unittest.skipUnless(os.name=='posix','production supervisor uses POSIX process groups')
+    def test_supervisor_recovers_checkpoint_when_a_worker_exits_nonzero(self):
+        from abp_ocr import extract
+        def stopped_worker(args,**kwargs):
+            root=Path(args[-1])
+            (root/'checkpoint.json').write_text(json.dumps({'complete_takeoff':False,'coverage':[],
+                'warnings':[],'review_candidates':[{'source':'worker','page':1,'values':{},'include':False}]}))
+            from unittest.mock import Mock
+            return Mock(pid=12345,returncode=1,poll=lambda:1)
+        with patch('subprocess.Popen',side_effect=stopped_worker),patch('os.killpg'):
+            result=extract(b'synthetic worker input','schedule.pdf')
+        self.assertEqual(result['review_candidates'][0]['source'],'schedule.pdf')
+        self.assertFalse(result['complete_takeoff'])
+        self.assertEqual(result['failure_kind'],'worker_failure')
+
+    def test_native_raster_allocation_failure_keeps_the_page_in_review(self):
+        def failed_preview(*args,**kwargs):
+            raise pymupdf.mupdf.FzErrorSystem('synthetic allocation failure')
+        with pymupdf.open() as doc:
+            doc.new_page()
+            result=extract_local(doc.tobytes(),selector=failed_preview,engine=lambda *args:[])
+        self.assertEqual(result['coverage'][0]['selection_failed'],'FzErrorSystem')
+        self.assertFalse(result['complete_takeoff'])
+        self.assertTrue(any('preview failed' in warning for warning in result['warnings']))
+
+    def test_schedule_worker_can_select_equipment_forms_without_loading_spreadsheets(self):
+        subprocess.run([sys.executable,'-c',
+            'import sys; from abp_design import inferred_form; '
+            'assert inferred_form("RTU-1")=="Air Moving Equipment.xlsx"; '
+            'assert "openpyxl" not in sys.modules and "numpy" not in sys.modules'],
+            cwd=Path(__file__).resolve().parent,check=True)
+
+    def test_crash_and_timeout_preserve_only_the_atomic_snapshot_as_incomplete(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root=Path(directory)
+            snapshot={'review_candidates':[{'source':'uploaded PDF','page':2,'include':False,'values':{}}],
+                      'warnings':[],'complete_takeoff':False,'in_progress_page':2,
+                      'coverage':[{'page':1,'status':'native_text_only'},{'page':2,'status':'native_text_only'}]}
+            (root/'checkpoint.tmp').write_text('unfinished')
+            self.assertEqual(interrupted_result(root,'drawing.pdf','worker_failure')['coverage'],[])
+            (root/'checkpoint.json').write_text(json.dumps(snapshot))
+            for kind in ('time_budget','worker_failure'):
+                result=interrupted_result(root,'drawing.pdf',kind)
+                self.assertTrue(result['interrupted'])
+                self.assertFalse(result['complete_takeoff'])
+                self.assertEqual(result['failure_kind'],kind)
+                self.assertEqual(result['review_candidates'],[{**snapshot['review_candidates'][0],'source':'drawing.pdf'}])
+                self.assertEqual(result['coverage'][0],snapshot['coverage'][0])
+                self.assertEqual(result['coverage'][1]['status'],'partial_review_required')
+
     def test_small_table_gets_first_pass_when_only_one_region_fits(self):
         calls=[]
         with pymupdf.open() as doc:

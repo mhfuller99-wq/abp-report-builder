@@ -92,6 +92,19 @@ class FurnaceTests(unittest.TestCase):
 
 
 class OutlineTableTests(unittest.TestCase):
+    def test_fill_and_stroke_symbols_are_excluded_from_streamed_glyphs(self):
+        with pymupdf.open() as doc:
+            page=doc.new_page()
+            native=[word(5,5,250,15,'EXHAUST FAN SCHEDULE ID E.S.P. CFM')]
+            for i in range(30):
+                x=10+7*i
+                shape=page.new_shape()
+                shape.draw_line((x,40),(x+5,45))
+                shape.draw_line((x+5,45),(x,49))
+                shape.finish(color=(0,0,0),fill=(0,0,0))
+                shape.commit()
+            self.assertIsNone(read(page,[0,0,300,100],native,100000,3,None))
+
     def test_glyph_paths_keep_identical_pixels_with_one_content_stream(self):
         with pymupdf.open() as doc:
             page=doc.new_page(width=600,height=800)
