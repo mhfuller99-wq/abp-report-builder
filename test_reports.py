@@ -222,7 +222,8 @@ class WorksheetAutoSelectTests(unittest.TestCase):
         self.assertFalse(any('VAV' in name.upper() for name in self.names(['VAV-1'], ['vav'])))
         self.assertIn('Supply Diffusers.xlsx', self.names([], ['diffusers']))
         self.assertIn('Supply Diffusers.xlsx', self.names([], ['supply_outlets']))
-        self.assertIn('Exhaust Grilles.xlsx.xlsx', self.names([], ['exhaust_grilles']))
+        self.assertIn('Exhaust Grills.xlsx', self.names([], ['exhaust_grilles']))
+        self.assertNotIn('Exhaust Grilles.xlsx.xlsx', self.names([], ['exhaust_grilles']))
         self.assertFalse(any('heater' in name.lower() for name in self.names(['UH-1'], ['unit_heater'])))
         saved=abp_server.LOOKUP.get('Supply Diffusers.xlsx')
         abp_server.LOOKUP['VAV Boxes.xlsx']=abp_server.LOOKUP['Notes.xlsx']

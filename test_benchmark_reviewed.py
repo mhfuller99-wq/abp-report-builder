@@ -1,0 +1,236 @@
+import copy,json,tempfile,unittest
+from pathlib import Path
+from abp_benchmark import evaluate,run_suite,digest
+from abp_benchmark_reviewed import evaluate_reviewed,same_reviewed
+from test_benchmark import example
+
+
+def reviewed_example():
+    project,raw=example()
+    project['sources'][0]['sha256']='a'*64
+    raw['scan_state']['source_checkpoints'][0].update(sha256='a'*64,pages=2)
+    for outlet in project['expected']['outlets']:
+        outlet['review_fields']={'system':'RTU-1','location':'ROOM A','size':'8'}
+    review=copy.deepcopy(raw)
+    review.update(project='SYNTHETIC',location='TEST',templates=['Air Moving Equipment.xlsx'])
+    review['records'][0].update(status='VERIFIED',design_cfm=300,esp=.5,template='Air Moving Equipment.xlsx')
+    for outlet in review['diffusers']:outlet.update(include=True,system='RTU-1',location='ROOM A',size='8',reference='page 1')
+    # Explicit synthetic approval fixture, not the application's gate or writer.
+    approval={'version':1,'approved':True,'scan_state':copy.deepcopy(review['scan_state']),
+        'note':'Reviewed all source pages and confirmed the complete design inventory.',
+        'pages':[{'source':'plan.pdf','sha256':'a'*64,'page':p,'disposition':'reviewed',
+                  'note':'Checked schedule and physical plan connections.'} for p in (1,2)]}
+    approval['inventory']={'project':'SYNTHETIC','location':'TEST','templates':['Air Moving Equipment.xlsx'],'standard':'Commercial',
+        'records':[{k:v for k,v in review['records'][0].items() if k!='candidates'}],
+        'diffusers':[{k:v for k,v in d.items() if k not in ('page','position_coordinate_space')} for d in review['diffusers']],
+        'image_decisions':[]}
+    review['source_review']=approval
+    return project,raw,review
+
+
+class ReviewedBenchmarkTests(unittest.TestCase):
+    def test_exhaust_inventory_is_separate_required_and_not_a_raw_manual_success(self):
+        project,raw,review=reviewed_example()
+        expected={'id':'EXHAUST-NORTH','source':'plan.pdf','page':2,'position':[80,90],
+            'values':{'type':'EAG-3','design_cfm':90},'review_fields':{'system':'EF-7','location':'RESTROOM','size':'8'},
+            'must_withhold':['actual_cfm','initial_cfm']}
+        project['expected'].update(exhaust_outlets=[expected],exhaust_outlet_inventory_complete=True)
+        self.assertEqual(evaluate(project,raw)['exhaust_outlet_counts'],{'expected':1,'actual':0,'matched':0})
+        self.assertFalse(evaluate_reviewed(project,review)['reviewed_inventory_pass'])
+        fan={'tag':'EF-7','status':'VERIFIED','template':'Exhaust Fans _Sm._.xlsx','design_cfm':90}
+        project['expected']['equipment'].append({'tag':'EF-7','source':'plan.pdf','page':2,'values':{'design_cfm':90},'reviewed_values':{'template':fan['template'],'design_cfm':90}})
+        review['records'].append(fan);review['templates']+=['Exhaust Grills.xlsx',fan['template']]
+        grille={'include':True,**expected['values'],**expected['review_fields'],'source':'plan.pdf','reference':'page 2',
+            'source_sha256':'a'*64,'position':[80,90],'position_coordinate_space':'displayed_pdf_points','manual_locator':'NORTH INLET',
+            'evidence':'Independent physical plan and fan connection reviewed.', 'quantity':1,'quantity_unresolved':False}
+        review['exhaust_outlets']=[grille]
+        review['source_review']['inventory']['records'].append(copy.deepcopy(fan))
+        review['source_review']['inventory']['templates']=copy.deepcopy(review['templates'])
+        review['source_review']['inventory']['exhaust_outlets']=copy.deepcopy(review['exhaust_outlets'])
+        result=evaluate_reviewed(project,review)
+        self.assertTrue(result['reviewed_inventory_pass'],result['errors'])
+        self.assertEqual(result['matched_exhaust_outlets'],1);self.assertEqual(result['physical_equipment_count'],2)
+        for key,value in [('design_cfm',91),('size','12'),('system','RTU-1'),('source_sha256','b'*64),('reference','page 1'),('quantity',True),('manual_locator',''),('evidence','ok'),('actual_cfm',88)]:
+            changed=copy.deepcopy(review);changed['exhaust_outlets'][0][key]=value
+            changed['source_review']['inventory']['exhaust_outlets'][0][key]=value
+            self.assertFalse(evaluate_reviewed(project,changed)['reviewed_inventory_pass'],key)
+        changed=copy.deepcopy(review);changed['exhaust_outlets'][0]['design_cfm']=91
+        self.assertIn('human_source_approval_missing_or_stale',[e['code'] for e in evaluate_reviewed(project,changed)['errors']])
+        changed=copy.deepcopy(review);changed['exhaust_outlets']*=2;changed['source_review']['inventory']['exhaust_outlets']=copy.deepcopy(changed['exhaust_outlets'])
+        self.assertFalse(evaluate_reviewed(project,changed)['reviewed_inventory_pass'])
+        raw['exhaust_outlets']=[{**grille,'include':False}]
+        self.assertIn('manual_source_entry_in_raw',[e['code'] for e in evaluate(project,raw)['errors']])
+        raw['exhaust_outlets'][0].pop('manual_locator')
+        self.assertNotIn('manual_source_entry_in_raw',[e['code'] for e in evaluate(project,raw)['errors']])
+        raw['exhaust_outlets'][0]['review_history']=[{'kind':'manual_source_entry'}]
+        self.assertIn('manual_source_entry_in_raw',[e['code'] for e in evaluate(project,raw)['errors']])
+
+    def test_zero_and_boolean_equipment_quantities_do_not_default_to_one(self):
+        for quantity in (0,False,True,'NaN','0'):
+            project,_,review=reviewed_example();review['records'][0]['quantity']=quantity
+            review['source_review']['inventory']['records'][0]['quantity']=quantity
+            self.assertFalse(evaluate_reviewed(project,review)['reviewed_inventory_pass'],quantity)
+
+    def test_linked_form_has_its_own_source_values_and_does_not_double_count_parent(self):
+        project,raw,review=reviewed_example()
+        child={'tag':'RTU-1 EXHAUST','component_of':'RTU-1','component_kind':'integral_exhaust',
+            'template':'Exhaust Fans _Std._.xlsx','status':'VERIFIED','design_cfm':60,'esp':.2,
+            'source':'plan.pdf','reference':'page 2','component_source_sha256':'a'*64,
+            'component_note':'Separate integral exhaust performance listed in the rooftop schedule.'}
+        project['expected']['report_components']=[{'tag':child['tag'],'component_of':'RTU-1','component_kind':'integral_exhaust',
+            'source':'plan.pdf','page':2,'values':{'design_cfm':60,'esp':.2},'must_withhold':['motor_fla']}]
+        self.assertFalse(evaluate(project,raw)['candidate_checks_pass'])
+        self.assertFalse(evaluate_reviewed(project,review)['reviewed_inventory_pass'])
+        review['records'].append(child);review['templates'].append(child['template'])
+        review['source_review']['inventory']['templates']=copy.deepcopy(review['templates'])
+        review['source_review']['inventory']['records'].append(copy.deepcopy(child))
+        checked=evaluate_reviewed(project,review)
+        self.assertTrue(checked['reviewed_inventory_pass'],checked['errors'])
+        self.assertEqual(checked['physical_equipment_count'],1);self.assertEqual(checked['component_form_count'],1)
+        for key,value in [('component_of','RTU-9'),('component_kind','return'),('component_source_sha256','b'*64),
+                          ('reference','page 1'),('component_note','ok'),('design_cfm',61),('motor_fla',5)]:
+            changed=copy.deepcopy(review);changed['records'][1][key]=value
+            changed['source_review']['inventory']['records'][1][key]=value
+            self.assertFalse(evaluate_reviewed(project,changed)['reviewed_inventory_pass'],key)
+        project['known_report_omissions']=[{'kind':'EXHAUST GRILLES','count':2}]
+        self.assertFalse(evaluate_reviewed(project,review)['reviewed_inventory_pass'])
+
+    def test_multiple_supply_motors_require_complete_source_bound_group(self):
+        project,raw,review=reviewed_example()
+        project['expected']['equipment'][0]['reviewed_values']={
+            **project['expected']['equipment'][0]['values'],'supply_fan_count':2}
+        review['records'][0]['supply_fan_count']=2
+        project['expected']['report_components']=[]
+        for index in (1,2):
+            tag='RTU-1 SUPPLY FAN '+str(index)
+            project['expected']['report_components'].append({'tag':tag,'component_of':'RTU-1',
+                'component_kind':'integral_supply','component_index':index,'component_count':2,
+                'source':'plan.pdf','page':2,'values':{'motor_hp':2},
+                'must_withhold':['design_cfm','osa_cfm','esp','motor_rpm','motor_fla']})
+            review['records'].append({'tag':tag,'component_of':'RTU-1','component_kind':'integral_supply',
+                'component_index':index,'component_count':2,'source':'plan.pdf','reference':'page 2',
+                'component_source_sha256':'a'*64,'component_note':'Original schedule identifies two individual supply fan motors.',
+                'status':'VERIFIED','template':'Air Moving Equipment.xlsx','coil_template':'','motor_hp':2})
+        def approve(value):
+            value['source_review']['inventory']['records']=[
+                {k:v for k,v in r.items() if k!='candidates'} for r in value['records']]
+        approve(review)
+        checked=evaluate_reviewed(project,review)
+        self.assertTrue(checked['reviewed_inventory_pass'],checked['errors'])
+        self.assertEqual(checked['physical_equipment_count'],1)
+        self.assertEqual(checked['component_form_count'],2)
+        self.assertFalse(evaluate(project,raw)['candidate_checks_pass'])
+        mutations=[lambda p:p['records'].pop(),lambda p:p['records'].__setitem__(slice(1,3),[]),
+            lambda p:p['records'].append(copy.deepcopy(p['records'][1])),
+            lambda p:p['records'][0].update(supply_fan_count=3),lambda p:p['records'][0].update(supply_fan_count=True),
+            lambda p:p['records'][0].pop('supply_fan_count'),lambda p:p['records'][0].update(motor_hp=2),
+            lambda p:p['records'][1].update(component_index=2),lambda p:p['records'][1].update(component_index=True),
+            lambda p:p['records'][1].update(component_count=3),lambda p:p['records'][1].update(status='EXCLUDED'),
+            lambda p:p['records'][1].update(component_source_sha256='b'*64),lambda p:p['records'][1].update(reference='page 1'),
+            lambda p:p['records'][1].update(design_cfm=150),lambda p:p['records'][1].update(osa_cfm=50),
+            lambda p:p['records'][1].update(esp=.5),lambda p:p['records'][1].update(motor_rpm=900),
+            lambda p:p['records'][1].update(coil_template='Coil DX GAS HT.xlsx'),lambda p:p['records'][1].update(motor_hp=3)]
+        for mutate in mutations:
+            changed=copy.deepcopy(review);mutate(changed);approve(changed)
+            self.assertFalse(evaluate_reviewed(project,changed)['reviewed_inventory_pass'])
+        changed=copy.deepcopy(review);changed['records'][0]['supply_fan_count']='2';approve(changed)
+        self.assertTrue(evaluate_reviewed(project,changed)['reviewed_inventory_pass'])
+
+    def test_passive_path_requires_independent_component_source_and_approval(self):
+        project,_,review=reviewed_example()
+        project['expected']['associated_components']=[{'tag':'L-7','kind':'PASSIVE SUPPLY INLET'}]
+        path={'tag':'L-7','kind':'passive_supply','status':'VERIFIED','source':'plan.pdf','source_sha256':'a'*64,
+            'reference':'page 1','location':'ROOM A','note':'Original drawing shows the passive supply intake duct.'}
+        review['air_paths']=[path];review['source_review']['inventory']['air_paths']=copy.deepcopy([path])
+        self.assertTrue(evaluate_reviewed(project,review)['reviewed_inventory_pass'])
+        for field,value in [('status','UNVERIFIED'),('source_sha256','b'*64),('reference','page 3'),('tag','L-99'),('motor_hp',1)]:
+            changed=copy.deepcopy(review);changed['air_paths'][0][field]=value
+            changed['source_review']['inventory']['air_paths']=copy.deepcopy(changed['air_paths'])
+            self.assertFalse(evaluate_reviewed(project,changed)['reviewed_inventory_pass'])
+        review['air_paths']=[];review['source_review']['inventory'].pop('air_paths')
+        self.assertFalse(evaluate_reviewed(project,review)['reviewed_inventory_pass'])
+
+    def test_reviewed_annotation_anchor_uses_the_original_callout_box(self):
+        project,raw,review=reviewed_example()
+        review['diffusers'][0].update(position=[95,80],evidence_box=[95,80,108,105])
+        review['source_review']['inventory']['diffusers'][0]['position']=[95,80]
+        self.assertTrue(evaluate_reviewed(project,review)['reviewed_inventory_pass'])
+        review['diffusers'][0]['evidence_box']=[0,0,1500,1500]
+        self.assertFalse(evaluate_reviewed(project,review)['reviewed_inventory_pass'])
+    def test_browser_numeric_strings_keep_exact_value_comparison(self):
+        for actual,expected in [('0.5',.5),('1075',1075),('57',57.0),('1.2e2',120)]:
+            self.assertTrue(same_reviewed(actual,expected))
+        for actual in ('',' ',True,'NaN','Infinity','120 V','1,200','121'):
+            self.assertFalse(same_reviewed(actual,120))
+        self.assertFalse(same_reviewed('001','1'))
+        project,raw,review=reviewed_example()
+        review['records'][0]['design_cfm']='300'
+        review['source_review']['inventory']['records'][0]['design_cfm']='300'
+        self.assertTrue(evaluate_reviewed(project,review)['reviewed_inventory_pass'])
+        review['records'][0]['design_cfm']='301'
+        review['source_review']['inventory']['records'][0]['design_cfm']='301'
+        self.assertFalse(evaluate_reviewed(project,review)['reviewed_inventory_pass'])
+
+    def test_reviewed_success_does_not_erase_missing_raw_fields(self):
+        project,raw,review=reviewed_example()
+        raw['records'][0]['candidates'][0]['values'].pop('esp')
+        self.assertFalse(evaluate(project,raw)['candidate_checks_pass'])
+        before=copy.deepcopy((project,raw,review))
+        self.assertTrue(evaluate_reviewed(project,review)['reviewed_inventory_pass'])
+        self.assertEqual((project,raw,review),before)
+
+    def test_changed_approval_input_fails_even_when_not_an_expected_numeric_field(self):
+        for mutate in (lambda r:r.update(project='OTHER JOB'),
+                       lambda r:r['records'][0].update(manufacturer='UNSUPPORTED'),
+                       lambda r:r['diffusers'][0].update(quantity_unresolved=True),
+                       lambda r:r['source_review'].update(note='ok')):
+            project,_,review=reviewed_example();mutate(review)
+            self.assertFalse(evaluate_reviewed(project,review)['reviewed_inventory_pass'])
+
+    def test_wrong_values_quantities_duplicate_rows_and_coverage_fail(self):
+        for mutate in (lambda r:r['diffusers'][0].update(design_cfm=200),
+                       lambda r:r['records'][0].update(quantity=2),
+                       lambda r:r['diffusers'].append(copy.deepcopy(r['diffusers'][0])),
+                       lambda r:r['source_review']['pages'].pop(),
+                       lambda r:r['scan_state'].update(complete_takeoff=True)):
+            project,_,review=reviewed_example();mutate(review)
+            self.assertFalse(evaluate_reviewed(project,review)['reviewed_inventory_pass'])
+
+    def test_reviewed_release_requires_exact_bound_workbook_evidence(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root=Path(directory)
+            def file(name,value):
+                path=root/name;path.write_text(value if isinstance(value,str) else json.dumps(value))
+                return {'path':str(path),'sha256':digest(path)}
+            project,raw,review=reviewed_example();source=file('source','SYNTHETIC SOURCE')
+            project['sources']=[{'name':'plan.pdf',**source}]
+            for r in (raw,review):r['scan_state']['source_checkpoints'][0]['sha256']=source['sha256']
+            review['source_review']['scan_state']=copy.deepcopy(review['scan_state'])
+            for p in review['source_review']['pages']:p['sha256']=source['sha256']
+            raw['records'][0]['candidates'][0]['values'].pop('esp')
+            project['truth_artifacts']=[file('truth','INDEPENDENT SYNTHETIC ANSWERS')]
+            suite=file('suite',{'version':1,'projects':[project]})
+            entry={'project_id':'synthetic',**file('raw',raw),'commit':'current','suite_sha256':suite['sha256'],
+                'mode':'live_raw','acceptance_mode':'reviewed_workflow'}
+            entry['reviewed_review']={**file('reviewed',review),'commit':'current','raw_review_sha256':entry['sha256'],'mode':'website_reviewed'}
+            audit={'commit':'current','raw_review_sha256':entry['sha256'],'review_sha256':entry['reviewed_review']['sha256'],
+                'website_job_id':'b'*48,'workbook':file('book','WORKBOOK BYTES'),
+                'original_templates':[file('template','ORIGINAL TEMPLATE BYTES')]}
+            audit.update({k:True for k in ('original_formulas_preserved','blank_actuals','original_layout_preserved',
+                'grouped_equipment','required_traverses','exact_design_values','all_caps','diffuser_totals_adjacent',
+                'no_unnecessary_comments','no_unexplained_omissions')})
+            def check():
+                entry['workbook_audit']={**file('audit',audit),'commit':'current','review_sha256':entry['reviewed_review']['sha256']}
+                index=file('index',{'version':1,'reports':[entry]})
+                return run_suite(suite['path'],index['path'],'current')
+            result=check()
+            self.assertTrue(result['release_gate_pass'],result['blockers'])
+            self.assertFalse(result['all_raw_candidate_checks_pass'])
+            audit['website_job_id']='missing';self.assertFalse(check()['release_gate_pass'])
+            audit['website_job_id']='b'*48;audit['exact_design_values']=False
+            self.assertFalse(check()['release_gate_pass'])
+            audit['exact_design_values']=True;entry['reviewed_review']['raw_review_sha256']='wrong'
+            self.assertFalse(check()['release_gate_pass'])
+
+
+if __name__=='__main__':unittest.main()

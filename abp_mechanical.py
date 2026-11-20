@@ -147,7 +147,7 @@ def _ac_schedule_context(header, mark):
     title_pattern = re.compile(
         r'(?:(?:HEATING (?:&|AND) )?AIR CONDITIONING|AIR CONDITIONER|'
         r'PACKAGED (?:GAS[ /-]*(?:ELECTRIC|ELEC(?:TRIC)?\.?)|AIR CONDITIONING))'
-        r'(?: UNIT)? SCHEDULE', re.I)
+        r'(?: UNIT)? SCHEDULE|INDOOR DUCTLESS UNIT SCHEDULE', re.I)
     titles = []
     for line in rows(header):
         segments = [[]]
@@ -163,6 +163,13 @@ def _ac_schedule_context(header, mark):
         return None
     title_y = titles[0][0][1]
     columns = [w for w in header if w[1] > title_y + 3]
+    if ' '.join(w[4].upper() for w in titles[0]) == 'INDOOR DUCTLESS UNIT SCHEDULE':
+        # A rated maximum at different cooling/heating speeds is not a selected
+        # balancing target. Retain the indoor identity without importing those
+        # flows, basis-of-design brand, outdoor motor values or capacities.
+        if not phrases(columns,r'COOLING DATA') or not phrases(columns,r'HEATING DATA'):
+            return None
+        return {'identity_only':True,'flows':[],'words':titles[0]}
     flows = list(phrases(columns, r'SUPPLY(?: AIR)? (?:CFM|AIRFLOW)(?: \(CFM\))?'))
     groups = phrases(columns, r'(?:SUPPLY|EVAPORATOR) FAN')
     for anchor in phrases(columns, r'CFM|AIRFLOW'):
@@ -243,12 +250,24 @@ def schedule_candidates(words, page_number, name):
         ac_context = _ac_schedule_context(header, mark) if family == 'AC' else None
         if family == 'AC' and not ac_context:
             continue
+        if ac_context and ac_context.get('identity_only'):
+            for tag in tags:
+                found.append({'tag':tag,'values':{},'text':{'unit_type':'INDOOR DUCTLESS'},
+                    'value_words':{},'source':name,'reference':f'page {page_number}',
+                    'evidence':'INDOOR DUCTLESS UNIT SCHEDULE: '+tag+'; identity only; select design flow from approved source, not cooling/heating maximum ratings.',
+                    'basis':'PLAN_SCHEDULE'})
+            continue
         values = {}
         text = {}
         value_words = {}
 
         def take(pattern, field, scale=1):
             anchors = phrases(header, pattern)
+            if field == 'quantity':
+                # Internal fan/motor counts do not count whole equipment units.
+                anchors=[a for a in anchors if not any(w[4].upper() in {'FAN','MOTOR','COMPRESSOR'}
+                    and (abs(center(w)-center(a))<20 and 0<a[1]-w[1]<38
+                         or abs(a[1]-w[1])<3 and 0<=a[0]-w[2]<18) for w in header)]
             if field.startswith('heater_'):
                 motor = phrases(header, r'(?:MOTOR|FAN) (?:VOLTS?|VOLTAGE|PHASE|PH|AMPS|FLA|KW)')
                 anchors = [a for a in anchors if not any(abs(a[1]-b[1]) < 3 and b[0] <= a[0] and b[2] >= a[2] for b in motor)]
@@ -324,6 +343,7 @@ def schedule_candidates(words, page_number, name):
         take(r'MOTOR FLA', 'motor_fla')
         take(r'MOTOR VOLTS|VOLTAGE \(V\)', 'motor_volts')
         take(r'FAN RPM', 'fan_rpm')
+        take(r'QTY\.?|QUANTITY', 'quantity')
         take(r'MCA', 'unit_mca')
         if (family == 'AHU' and phrases(header,r'NATURAL GAS FURNACE')
                 and phrases(header,r'TYPE') and phrases(header,r'TOTAL')
@@ -350,6 +370,25 @@ def schedule_candidates(words, page_number, name):
                     if field not in values:
                         values[field] = float(choices[0][4].replace(',', ''))
                         value_words[field] = [tagword, choices[0]] + [w for w in header if abs(center(w)-center(anchor)) < 30 and 0 <= anchor[1]-w[1] < 38]
+                        return True
+            return False
+        # Three-line SA / FLOW / (CFM) columns are common in compact rooftop
+        # schedules. Require all three labels aligned in one unambiguous column.
+        # OA, EA and RA columns cannot satisfy the supply-air target.
+        vertical_flows=[]
+        for units in header:
+            if not re.fullmatch(r'\(?CFM\)?',units[4],re.I):continue
+            roles=[w for w in header if w[4].upper() in {'SA','S.A.','OA','O.A.','EA','E.A.','RA','R.A.'}
+                   and abs(center(w)-center(units))<12 and 10<units[1]-w[1]<42]
+            flows=[w for w in header if w[4].upper()=='FLOW' and abs(center(w)-center(units))<12
+                   and 3<units[1]-w[1]<22]
+            if len(roles)==len(flows)==1 and 3<flows[0][1]-roles[0][1]<22:
+                vertical_flows.append((roles[0][4].upper().replace('.',''),units,[roles[0],flows[0],units]))
+        for role,field in [('SA','design_cfm'),('OA','osa_cfm')]:
+            choices=[(anchor,evidence) for label,anchor,evidence in vertical_flows if label==role]
+            if len(choices)==1:
+                anchor,evidence=choices[0]
+                if below(anchor,field):value_words[field]+=evidence
         for anchor in phrases(header, r'CFM|AIRFLOW|ESP|E\.S\.P\.|HP'):
             context = ' '.join(w[4].upper() for w in sorted(header,key=lambda w:(w[1],w[0]))
                                if abs(center(w)-center(anchor)) < 30 and 0 <= anchor[1]-w[1] < 38)
@@ -583,11 +622,15 @@ def keyed_outlets(words, page_number, name, legend):
         quantities=[re.fullmatch(r'\(TYP[- ](\d+)\)',w[4],re.I) for w in words
                     if abs(center(w)-center(word)) < 25 and 0 < w[1]-numbers[0][1] < 18]
         quantities=[int(m[1]) for m in quantities if m]
-        if len(quantities)==1 and 1 < quantities[0] <= 50:
+        quantities=sorted(set(q for q in quantities if q>1))
+        if quantities:
             item=result[-1]
-            item['evidence'] += f'; explicitly repeated TYP-{quantities[0]}; confirm each physical location'
-            for occurrence in range(2,quantities[0]+1):
-                result.append({**item,'evidence':item['evidence']+f'; occurrence {occurrence}'})
+            item['evidence'] += '; repeated TYP count '+'/'.join(map(str,quantities))+'; confirm each physical location'
+            # One annotation is not N independently located physical outlets.
+            # Keep its count through deduplication for explicit source review.
+            if len(quantities)==1:item['quantity']=quantities[0]
+            else:item['quantity_candidates']=quantities
+            item['quantity_unresolved']=True
     return sorted(result, key=lambda item: (item['position'][1], item['position'][0]))
 
 

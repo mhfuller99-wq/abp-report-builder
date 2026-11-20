@@ -3,7 +3,7 @@ import math
 import re
 from collections import defaultdict
 
-MARK = re.compile(r'(?:[A-Z]|S[A-Z]|SD\d?)$')
+MARK = re.compile(r'(?:[A-Z]|S[A-Z]|SD\d?|S(?:AG|AD|AR|D)-\d{1,3}[A-Z]?)$')
 FLOW = re.compile(r'(?:\d{1,4}|\d{1,2},\d{3})$')
 # These ambiguous equipment families cannot be used as unclassified outlets.
 EQUIPMENT_MARKS = {'SF', 'EF', 'RF', 'PF', 'FS', 'UH', 'CU', 'AHU', 'RTU', 'FCU', 'MAU', 'MUA', 'DOAS'}
@@ -78,14 +78,14 @@ def numbered_supply_outlets(words, page_number, source):
             'evidence':f'{w[4]} / {n[4]} CFM; confirm supply service, neck, room, system and revision'})
     return result
 
-def centered_outlets(words, page_number, source, legend=None, *, plan_confirmed=False):
+def centered_outlets(words, page_number, source, legend=None, *, plan_confirmed=False, word_confidence=None):
     """Read centered type-over-flow bubbles, including comma-formatted CFM.
 
     A single near number is insufficient. Require an isolated two-word native
     text block or a repeated, isolated callout grammar. Mutual uniqueness prevents
     assigning one flow to adjacent type marks. Coordinates remain PDF points.
     """
-    if not plan_confirmed and not plan_context(words):return []
+    if len(words)>30000 or (not plan_confirmed and not plan_context(words)):return []
     legend = legend or {}
     blocks = defaultdict(list); grid = defaultdict(list)
     for i,w in enumerate(words):
@@ -116,6 +116,29 @@ def centered_outlets(words, page_number, source, legend=None, *, plan_confirmed=
         if prose:continue
         isolated=len(w)>5 and len(n)>5 and w[5]==n[5] and set(blocks[w[5]])=={i,j}
         pairs.append((i,j,isolated));use[j].append(i)
+    # A separate "2 EACH" line can apply to one type-over-CFM annotation.
+    # Keep one source candidate until a reviewer locates its physical outlets.
+    repeat_markers=defaultdict(list)
+    marker_uses=defaultdict(int)
+    if any(word[4].upper()=='EACH' for word in words):
+        for i,j,_ in pairs:
+            w=words[i]; h=w[3]-w[1]
+            near=nearby(w)
+            if len(near)>128:continue
+            for k in near:
+                each=words[k]
+                if each[4].upper()!='EACH' or not 0<=w[1]-each[3]<=1.5*h:continue
+                for m in near:
+                    number=words[m]
+                    if not re.fullmatch(r'(?:[2-9]|[1-9]\d|100)',number[4]):continue
+                    if not (0<=each[0]-number[2]<=.8*h and abs(number[1]-each[1])<=.25*h
+                            and abs((number[0]+each[2]-w[0]-w[2])/2)<=.7*h):continue
+                    extension=any(a not in (k,m) and abs(words[a][1]-each[1])<=.25*h
+                                  and (0<=words[a][0]-each[2]<=h or 0<=number[0]-words[a][2]<=h)
+                                  for a in near)
+                    if not extension:
+                        repeat_markers[i].append((m,k))
+                        marker_uses[m,k]+=1
     result=[]
     for i,j,isolated in pairs:
         if len(use[j])!=1 or not (isolated or len(pairs)>=3):continue
@@ -126,6 +149,17 @@ def centered_outlets(words, page_number, source, legend=None, *, plan_confirmed=
                        'evidence_box':[min(w[0],n[0]),w[1],max(w[2],n[2]),n[3]],
                        'evidence':f'{w[4]} / {n[4]}; centered type-over-airflow plan callout; confirm supply service, neck size, room, system and revision',
                        'shape':('rectangular' if 'x' in size.lower() else 'round') if size else 'unknown'})
+        markers=repeat_markers[i]
+        if markers:
+            item=result[-1]
+            item['quantity_unresolved']=True
+            m,k=markers[0]
+            if len(markers)==1 and marker_uses[m,k]==1 and (word_confidence is None or
+                    all((word_confidence[a] or 0)>=80 for a in (m,k,i,j))):
+                item['quantity']=int(words[m][4])
+                item['evidence']+=f"; {words[m][4]} EACH above callout; confirm each physical location"
+            else:
+                item['evidence']+='; verify repeated outlet count and locations on the drawing'
     return result
 
 def necked_outlets(words, page_number, source, *, plan_confirmed=False):
@@ -146,7 +180,7 @@ def necked_outlets(words, page_number, source, *, plan_confirmed=False):
                 and abs((a[0]+a[2]-b[0]-b[2])/2)<.45*h)
     pairs=[];used=defaultdict(int)
     for i,w in enumerate(words):
-        if not re.fullmatch(r'(?:CSD\d+|SD\d*|S[A-Z]|[A-Z])',w[4]) or w[4] in EQUIPMENT_MARKS:continue
+        if not (MARK.fullmatch(w[4]) or re.fullmatch(r'(?:CSD\d+|SD\d*)',w[4])) or w[4] in EQUIPMENT_MARKS:continue
         if not 3<=w[3]-w[1]<=30:continue
         neighbors=near(w)
         if any(re.search(r'\b(?:INDICATES|TYPICAL|SYMBOL|LEGEND)\b',words[k][4],re.I)
@@ -311,5 +345,24 @@ def distinct_outlets(items):
                        all(item.get(k)==old.get(k) for k in ('source','reference','type','design_cfm')) and
                        math.dist(p,old['position'])<4),None)
         if duplicate is None:result.append(item)
-        elif not duplicate.get('size') and item.get('size'):duplicate['size']=item['size'];duplicate['shape']=item['shape']
+        else:
+            if not duplicate.get('size') and item.get('size'):duplicate['size']=item['size'];duplicate['shape']=item['shape']
+            merge_outlet_quantity(duplicate,item)
     return result
+
+
+def merge_outlet_quantity(existing,incoming):
+    """A parser which misses a repeat marker cannot erase its quantity witness."""
+    if not any(row.get('quantity_unresolved') or row.get('quantity_candidates')
+               or type(row.get('quantity'))==int and row['quantity']>1
+               for row in (existing,incoming)):return
+    existing['quantity_unresolved']=True
+    counts=set()
+    for row in (existing,incoming):
+        for value in [row.get('quantity'),*(row.get('quantity_candidates') or [])]:
+            if type(value)==int and value>1:counts.add(value)
+    if len(counts)==1 and not existing.get('quantity_candidates') and not incoming.get('quantity_candidates'):
+        existing['quantity']=counts.pop()
+    elif counts:
+        existing.pop('quantity',None)
+        existing['quantity_candidates']=sorted(counts)

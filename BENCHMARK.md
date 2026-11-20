@@ -47,3 +47,50 @@ The private gate is a local release check, not a GitHub branch-protection rule.
 A failed gate blocks a claim that the application is generally ready; a narrowly
 scoped correction must still state its verified scope and unresolved limitations.
 Reserve new validation projects after using a held-out project to develop a fix.
+
+Reviewed workflow acceptance is a separate, explicit mode. Set a report entry's
+`acceptance_mode` to `reviewed_workflow` and provide `reviewed_review` with its
+path, hash, commit, `raw_review_sha256` and `mode: website_reviewed`. Keep the raw
+export unchanged. Its errors and automatic readiness remain visible even when
+the independently checked reviewed inventory and workbook pass. The reviewed
+inventory is compared against complete frozen source answers, including physical
+quantity, per-unit locations, deliberate blanks, page accounting and approval
+bound to the exact inventory. This evaluator does not call the application gate.
+
+For this mode the workbook audit binds the reviewed export's hash and also records
+`raw_review_sha256` and the actual `website_job_id`. It must affirm
+`exact_design_values`, `all_caps`, `diffuser_totals_adjacent`,
+`no_unnecessary_comments` and `no_unexplained_omissions` in addition to the original
+template checks above. These are evidence requirements, not automatic assertions.
+Set suite-level `required_holdouts: 2` when two qualified held-out projects are
+required. Neither reviewed acceptance nor a passing suite upgrades automatic scan
+coverage or certifies field measurements.
+
+Repeated annotations such as `TYP-20` remain a single unresolved source witness.
+They may not be included as one outlet or silently expanded into identical rows.
+The browser's repeated-callout review retains the original count observations,
+requires an explicit reviewed count and distinct physical locators, and starts
+every resulting physical row unchecked. The original annotation remains excluded
+in the review log. Save/restore and retries retain those identities; missing or
+duplicated physical rows block both partial and fully reviewed builds. For these
+cases, private expected outlets can identify each physical row with an
+`instance_locator` in addition to its common source/page/annotation position.
+
+Exhaust grille rows are a separate `exhaust_outlets` inventory, with the same
+independent physical source anchors and field expectations. They cannot satisfy
+supply outlet matches. Reviewed rows also require their source SHA, a distinct
+physical locator, evidence, and one verified exhaust fan. The genuine original
+`Exhaust Grills.xlsx` form has 29 inlet rows per page and no total formula; the
+writer preserves that design. The older similarly named pack file contains a fan
+form and cannot substitute for it. A suite can bind `required_exhaust_template`
+by name and SHA in addition to checking the downloaded workbook. Manual exhaust
+entries remain manual work and cannot turn a failed raw scan into a raw pass.
+
+Multiple supply motors are linked `report_components` with kind `integral_supply`,
+an explicit `component_index`, and the source-confirmed `component_count`.
+The parent's reviewed `supply_fan_count` witnesses missing groups after retries
+and restores. Each motor retains its own original Air Moving Equipment form;
+whole-unit airflow, pressure, coils and traverses remain on the parent. A motor
+form never inherits or divides unit airflow. Source-count changes invalidate
+the parent and its linked forms, and every declared motor must be reviewed.
+The independent benchmark counts physical equipment and component forms separately.

@@ -25,10 +25,28 @@ def preserve_template_parts(data, origins):
     """
     with zipfile.ZipFile(io.BytesIO(data)) as z:files={n:z.read(n) for n in z.namelist()}
     destinations=sheet_paths(files);ct=ET.fromstring(files['[Content_Types].xml'])
+    workbook=ET.fromstring(files['xl/workbook.xml'])
     for index,(title,(source,original_title)) in enumerate(origins.items()):
         with zipfile.ZipFile(io.BytesIO(source)) as z:src={n:z.read(n) for n in z.namelist()}
         srcpath=sheet_paths(src)[original_title];dstpath=destinations[title]
         original=ET.fromstring(src[srcpath]);dest=ET.fromstring(files[dstpath])
+        if original_title=='NOTES':
+            # Bound Notes to the original cells. The declared dimension and
+            # row metadata include an unused row above its first actual cell.
+            # Keep that blank row outside the printed form to avoid spillover.
+            names=workbook.find('{'+NS+'}definedNames')
+            if names is None:
+                names=ET.Element('{'+NS+'}definedNames')
+                calc=workbook.find('{'+NS+'}calcPr')
+                workbook.insert(list(workbook).index(calc) if calc is not None else len(workbook),names)
+            index=str(list(destinations).index(title))
+            if not any(n.get('name')=='_xlnm.Print_Area' and n.get('localSheetId')==index for n in names):
+                from openpyxl.utils.cell import absolute_coordinate,range_boundaries,get_column_letter
+                name=ET.SubElement(names,'{'+NS+'}definedName',name='_xlnm.Print_Area',localSheetId=index)
+                c1,_,c2,r2=range_boundaries(original.find('{'+NS+'}dimension').get('ref'))
+                r1=min(range_boundaries(cell.get('r'))[1] for cell in original.iter('{'+NS+'}c'))
+                area=get_column_letter(c1)+str(r1)+':'+get_column_letter(c2)+str(r2)
+                name.text="'"+title.replace("'","''")+"'!"+absolute_coordinate(area)
         formulas=lambda root:{c.attrib['r']:ET.tostring(c.find('{'+NS+'}f'),encoding='unicode') for c in root.iter('{'+NS+'}c') if c.find('{'+NS+'}f') is not None}
         # openpyxl expands shared formulas and omits Excel calculation flags.
         # Restore the original formula XML after the semantic guard at build time.
@@ -47,6 +65,20 @@ def preserve_template_parts(data, origins):
             target.insert(0,deepcopy(formula))
             target.attrib.pop('t',None)
         if fmap(original)!=fmap(dest):raise ValueError('Template formula preservation failed: '+title)
+        # openpyxl turns every stored row height into customHeight=1 and drops
+        # descent metadata. Those flags affect print pagination even when the
+        # numeric heights compare equal. Restore the exact original row flags,
+        # retaining remapped styles and the requested diffuser-row hiding.
+        original_rows={row.get('r'):row for row in original.find('{'+NS+'}sheetData')}
+        for row in dest.find('{'+NS+'}sheetData'):
+            source_row=original_rows.get(row.get('r'))
+            if source_row is None:continue
+            style=row.get('s');hidden=row.get('hidden')
+            compact=(original_title=='SUPPLY DIFFUSERS' and 6<=int(row.get('r'))<=26 and hidden=='1')
+            row.attrib.clear();row.attrib.update(source_row.attrib)
+            row.attrib.pop('s',None)
+            if style is not None:row.set('s',style)
+            if compact:row.set('hidden','1')
         # Preserve view/print/protection flags even when the library omits
         # disabled settings during serialization. These have no style indices.
         metadata={'sheetViews','sheetFormatPr','sheetProtection','printOptions','pageMargins',
@@ -101,6 +133,7 @@ def preserve_template_parts(data, origins):
                 dest.insert(position,child)
             files[dr]=ET.tostring(links,encoding='utf-8',xml_declaration=True)
         files[dstpath]=ET.tostring(dest,encoding='utf-8',xml_declaration=True)
+    files['xl/workbook.xml']=ET.tostring(workbook,encoding='utf-8',xml_declaration=True)
     files['[Content_Types].xml']=ET.tostring(ct,encoding='utf-8',xml_declaration=True)
     out=io.BytesIO()
     with zipfile.ZipFile(out,'w',zipfile.ZIP_DEFLATED) as z:
