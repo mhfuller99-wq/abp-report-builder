@@ -68,6 +68,56 @@ def outlets(review):
     return result
 
 
+def outlet_anchor(row):
+    """Require an explicit common frame before treating two readings as one."""
+    source=row.get('source')
+    number=page(row)
+    pos=point(row)
+    if not isinstance(source,str) or not source or not number or number<1 or pos is None:
+        return None
+    if 'page' in row and type(row['page']) is not int:
+        return None
+    if 'reference' in row and page({'reference':row['reference']})!=number:
+        return None
+    if any(row.get(k) not in (None,'displayed_pdf_points') for k in
+           ('coordinate_space','position_coordinate_space','region_coordinate_space')):
+        return None
+    return source,number
+
+
+def linked_outlet_observations(rows,expected):
+    """Verify the scanner's link against both the exported native row and the frozen plan."""
+    native={}
+    proposed={}
+    for index,row in enumerate(rows):
+        anchor=outlet_anchor(row)
+        if row['lane']=='native' and anchor:
+            native.setdefault(anchor,[]).append(index)
+    for index,image in enumerate(rows):
+        if (image['lane']!='image' or image.get('native_outlet_match') is not True
+                or image.get('native_reconciled') is not True or image.get('native_outlet_ambiguous')):
+            continue
+        anchor=outlet_anchor(image)
+        nearby=[i for i in native.get(anchor,[]) if math.dist(point(image),point(rows[i]))<=6]
+        if len(nearby)!=1:
+            continue
+        parent=nearby[0]
+        row=rows[parent]
+        if (image.get('page_rotation') is not None and row.get('page_rotation') is not None
+                and image['page_rotation']!=row['page_rotation']):
+            continue
+        # Old exports without a native witness and stale links stay separate.
+        if not any(isinstance(w,dict) and w.get('source')==anchor[0] and w.get('page')==anchor[1]
+                   and w.get('position')==row.get('position') for w in image.get('native_readings') or []):
+            continue
+        if any(same_annotation(image,e) and not same_annotation(row,e) for e in expected
+               if (e['source'],e['page'])==anchor):
+            continue
+        proposed.setdefault(parent,[]).append(index)
+    # Multiple independent image rows near one label could be adjacent outlets.
+    return {images[0]:parent for parent,images in proposed.items() if len(images)==1}
+
+
 def evaluate(project,review):
     """Score per physical outlet/field, not aggregate totals; never waive omissions."""
     errors=[];manual=[];matches=[]
@@ -85,9 +135,13 @@ def evaluate(project,review):
             error('unknown_image_candidate_kind',kind=item.get('kind'))
         if item.get('accepted'):error('manually_accepted_raw_candidate')
     known=project['expected'];actual=outlets(review);used=set()
+    linked=linked_outlet_observations(actual,known.get('outlets',[]))
+    physical=[i for i in range(len(actual)) if i not in linked]
+    expected_for={}
     for expected in known.get('outlets',[]):
         choices=[]
-        for i,item in enumerate(actual):
+        for i in physical:
+            item=actual[i]
             if (item.get('source')==expected['source'] and page(item)==expected['page'] and same_annotation(item,expected)):
                 choices.append(i)
         if len(choices)!=1:
@@ -96,6 +150,7 @@ def evaluate(project,review):
         i=choices[0]
         if i in used:error('shared_physical_candidate',id=expected['id']);continue
         used.add(i);item=actual[i];matches.append({'id':expected['id'],'candidate':i})
+        expected_for[i]=expected
         for field,value in expected['values'].items():
             if not same(item.get(field),value):
                 code='missing_field' if item.get(field) in (None,'') else 'wrong_field'
@@ -108,7 +163,26 @@ def evaluate(project,review):
         for field in expected.get('must_withhold',[]):
             if item.get(field) not in (None,''):error('unresolved_conflict_populated',id=expected['id'],field=field)
     if known.get('outlet_inventory_complete'):
-        for i in set(range(len(actual)))-used:error('unexpected_outlet',candidate=i)
+        for i in sorted(set(physical)-used):error('unexpected_outlet',candidate=i)
+    for index,parent in linked.items():
+        image=actual[index]
+        target=expected_for.get(parent,{})
+        wanted={**target.get('values',{}),**target.get('review_fields',{})}
+        conflicts=set(image.get('native_conflict_fields') or [])|set(image.get('field_conflicts') or {})
+        withheld=set(target.get('must_withhold',[]))
+        for field in {'type','size','design_cfm','quantity','location','system'}|wanted.keys()|withheld:
+            value=image.get(field)
+            if value in (None,''):
+                continue
+            if (field in withheld or
+                    any(v not in (None,'') and not same(value,v) for v in (actual[parent].get(field),wanted.get(field)))):
+                conflicts.add(field)
+        if image.get('type_conflict_unresolved'):conflicts.add('type')
+        if image.get('printed_flow_conflict'):conflicts.add('design_cfm')
+        if conflicts:
+            error('conflicting_outlet_observations',candidate=index,native_candidate=parent,fields=sorted(conflicts))
+        if image.get('quantity_unresolved') or image.get('ocr_readings_truncated') or image.get('native_reconciliation_log_truncated'):
+            manual.append({'candidate':index,'native_candidate':parent,'reason':'Review repeat quantity or incomplete observation history'})
     for item in actual:
         if item.get('include'):error('raw_outlet_auto_included')
         if item['lane']=='image' and (item.get('values') or item.get('status')!='UNVERIFIED'):error('image_outlet_auto_verified')
@@ -163,7 +237,9 @@ def evaluate(project,review):
                     and known.get('equipment_inventory_complete') is True)
     return {'project_id':project['id'],'split':project['split'],'candidate_checks_pass':not errors,
             'truth_complete':truth_complete,'errors':errors,'manual_review':manual,'physical_matches':matches,
-            'outlet_counts':{'expected':len(known.get('outlets',[])),'actual':len(actual),'matched':len(matches)},
+            'outlet_counts':{'expected':len(known.get('outlets',[])),'actual':len(physical),'matched':len(matches)},
+            'outlet_observations':{'total':len(actual),'linked_to_native':[
+                {'image_candidate':i,'native_candidate':parent} for i,parent in linked.items()]},
             'exhaust_outlet_counts':{'expected':len(known.get('exhaust_outlets',[])),'actual':len(exhaust),'matched':len(exhaust_matches)},
             'equipment_tags':sorted(tags),
             'automatic_report_ready':not errors and truth_complete and not manual,
