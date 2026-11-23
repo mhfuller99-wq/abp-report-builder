@@ -750,6 +750,11 @@ def parse_pdf(name, data=None, *, path=None, page_numbers=None, checkpoint=None)
             if len(text_of(words).strip()) < 40:
                 warnings.append(f'{name}: page {index + 1} has no readable text and may be a scanned sheet; manual takeoff required')
             found.extend(parse_page(words, index + 1, name))
+            from abp_designation import designation_records
+            try:
+                found.extend(designation_records(page, words, name))
+            except (ValueError, RuntimeError, pymupdf.mupdf.FzErrorBase):
+                warnings.append(f'{name}: page {index+1} ruled equipment schedule requires source review')
             outlets.extend(parse_supply_outlets(words, index + 1, name))
             outlets.extend(keyed_outlets(words, index + 1, name, legend))
             outlets.extend(centered_outlets(words, index + 1, name, legend))
