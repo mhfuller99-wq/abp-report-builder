@@ -4,8 +4,8 @@ import math,re
 EXHAUST_TEMPLATE='Exhaust Grills.xlsx'
 EXHAUST_FORMS=('Exhaust Fans _Std._.xlsx','Exhaust Fans _Sm._.xlsx')
 EXHAUST_FIELDS=('include','type','size','system','location','design_cfm','source','reference','source_sha256',
-    'evidence','position','position_coordinate_space','manual_locator','quantity','quantity_unresolved','exclusion_note')
-EXHAUST_EXTRA=('review_history','review_notice','latest_observation')
+    'evidence','position','position_coordinate_space','manual_locator','quantity','quantity_unresolved','exclusion_note','native_exhaust_callout')
+EXHAUST_EXTRA=('review_history','review_notice','latest_observation','prior_inclusion')
 
 
 def exhaust_errors(payload, *, require_review=True, check_sources=True):
@@ -24,6 +24,10 @@ def exhaust_errors(payload, *, require_review=True, check_sources=True):
         if not isinstance(item,dict) or set(item)-set(EXHAUST_FIELDS+EXHAUST_EXTRA):
             errors.append('Invalid exhaust grille fields; measurements are not design inputs');continue
         if type(item.get('include'))!=bool:errors.append('Choose whether to include each exhaust grille')
+        native=item.get('native_exhaust_callout') is True
+        if 'native_exhaust_callout' in item and not native:errors.append('Invalid native exhaust observation')
+        if native and (not item.get('position') or not item.get('type')):errors.append('A printed exhaust callout needs its type and drawing position')
+        if 'prior_inclusion' in item and type(item['prior_inclusion'])!=bool:errors.append('Invalid prior exhaust grille inclusion')
         for key,limit in [('type',120),('size',120),('system',120),('location',120),('source',160),('reference',80),('manual_locator',120)]:
             if not isinstance(item.get(key,''),str) or len(item.get(key,''))>limit:errors.append('Invalid exhaust grille text')
         if item.get('quantity')!=1 or type(item.get('quantity'))!=int or item.get('quantity_unresolved') is not False:
@@ -42,7 +46,7 @@ def exhaust_errors(payload, *, require_review=True, check_sources=True):
                 errors.append('Exhaust grille source changed or is missing; review the original source again')
         note=item.get('evidence')
         if not isinstance(note,str) or not 20<=len(note.strip())<=500:errors.append('Record 20–500 characters of exhaust inlet source evidence')
-        if not all(isinstance(item.get(k),str) and item[k].strip() for k in ('type','system','location','manual_locator')):
+        if (not native or item.get('include') is True) and not all(isinstance(item.get(k),str) and item[k].strip() for k in ('type','system','location','manual_locator')):
             errors.append('Exhaust grilles need a type, exhaust fan, room and distinct physical locator')
         if isinstance(item.get('type'),str) and re.match(r'^(?:SAG|SAD|SAR|RAG|SUPPLY|RETURN)(?:\W|\d|$)',item['type'],re.I):
             errors.append('Supply and return devices do not belong on the exhaust grille sheet')
@@ -51,8 +55,9 @@ def exhaust_errors(payload, *, require_review=True, check_sources=True):
                 or item.get('position_coordinate_space')!='displayed_pdf_points'):
             errors.append('Invalid exhaust grille source position')
         key=tuple(str(item.get(k,'')) for k in ('source','reference','manual_locator'))
-        if key in seen:errors.append('Duplicate physical exhaust grille locator')
-        seen.add(key)
+        if item.get('manual_locator') or not native:
+            if key in seen:errors.append('Duplicate physical exhaust grille locator')
+            seen.add(key)
         if item.get('include') is True:
             fans=[r for r in records if isinstance(r,dict) and r.get('tag')==item.get('system')
                   and r.get('template') in EXHAUST_FORMS and r.get('status')!='EXCLUDED']

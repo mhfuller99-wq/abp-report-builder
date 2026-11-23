@@ -758,6 +758,7 @@ def parse_pdf(name, data=None, *, path=None, page_numbers=None, checkpoint=None)
             outlets.extend(parse_supply_outlets(words, index + 1, name))
             outlets.extend(keyed_outlets(words, index + 1, name, legend))
             outlets.extend(centered_outlets(words, index + 1, name, legend))
+            outlets.extend(centered_outlets(words, index + 1, name, exhaust=True))
             outlets.extend(necked_outlets(words, index + 1, name))
             from abp_outlets import coded_outlets
             outlets.extend(coded_outlets(words,index+1,name))

@@ -4,6 +4,7 @@ import re
 from collections import defaultdict
 
 MARK = re.compile(r'(?:[A-Z]|S[A-Z]|SD\d?|S(?:AG|AD|AR|D)-\d{1,3}[A-Z]?)$')
+EXHAUST_MARK = re.compile(r'EAG-\d{1,3}[A-Z]?$')
 FLOW = re.compile(r'(?:\d{1,4}|\d{1,2},\d{3})$')
 # These ambiguous equipment families cannot be used as unclassified outlets.
 EQUIPMENT_MARKS = {'SF', 'EF', 'RF', 'PF', 'FS', 'UH', 'CU', 'AHU', 'RTU', 'FCU', 'MAU', 'MUA', 'DOAS'}
@@ -78,14 +79,16 @@ def numbered_supply_outlets(words, page_number, source):
             'evidence':f'{w[4]} / {n[4]} CFM; confirm supply service, neck, room, system and revision'})
     return result
 
-def centered_outlets(words, page_number, source, legend=None, *, plan_confirmed=False, word_confidence=None):
+def centered_outlets(words, page_number, source, legend=None, *, plan_confirmed=False, word_confidence=None, exhaust=False):
     """Read centered type-over-flow bubbles, including comma-formatted CFM.
 
     A single near number is insufficient. Require an isolated two-word native
     text block or a repeated, isolated callout grammar. Mutual uniqueness prevents
     assigning one flow to adjacent type marks. Coordinates remain PDF points.
     """
-    if len(words)>30000 or (not plan_confirmed and not plan_context(words)):return []
+    if len(words)>30000:return []
+    if exhaust and not any(EXHAUST_MARK.fullmatch(w[4]) for w in words):return []
+    if not plan_confirmed and not plan_context(words):return []
     legend = legend or {}
     blocks = defaultdict(list); grid = defaultdict(list)
     for i,w in enumerate(words):
@@ -95,8 +98,9 @@ def centered_outlets(words, page_number, source, legend=None, *, plan_confirmed=
         x,y=int(w[0]//48),int(w[1]//48)
         return [i for dx in (-1,0,1) for dy in (-1,0,1) for i in grid.get((x+dx,y+dy),[])]
     pairs=[]; use=defaultdict(list)
+    pattern = EXHAUST_MARK if exhaust else MARK
     for i,w in enumerate(words):
-        if not MARK.fullmatch(w[4]) or w[4] in EQUIPMENT_MARKS:continue
+        if not pattern.fullmatch(w[4]) or w[4] in EQUIPMENT_MARKS:continue
         h=w[3]-w[1]
         if not 3<=h<=30:continue
         options=[]
@@ -115,6 +119,18 @@ def centered_outlets(words, page_number, source, legend=None, *, plan_confirmed=
                   and abs(words[k][1]-w[1])<h and abs(words[k][0]-w[0])<2*h for k in nearby(w))
         if prose:continue
         isolated=len(w)>5 and len(n)>5 and w[5]==n[5] and set(blocks[w[5]])=={i,j}
+        if exhaust:
+            if len(w)<6 or len(n)<6 or w[5]!=n[5]:continue
+            # CAD can group several adjacent callouts in one PDF text block.
+            # Require complete type/number pairs. A schedule or note is insufficient.
+            block=blocks[w[5]]
+            if len(block)>32 or len(block)%2 or not all(
+                    EXHAUST_MARK.fullmatch(words[block[k]][4]) and FLOW.fullmatch(words[block[k+1]][4])
+                    for k in range(0,len(block),2)):continue
+            if not any(block[k:k+2]==[i,j] for k in range(0,len(block),2)):continue
+            if any(re.fullmatch(r'(?:EACH|TYP(?:ICAL)?\.?|QTY|\d+[xX]|[xX]\d+|EXISTING|DEMO(?:LITION)?|LEGEND|EXAMPLE|SYMBOLS?|SCHEDULE|MAX(?:IMUM)?|ACTUAL|MEASURED)',words[k][4],re.I)
+                   and abs(words[k][1]-w[1])<4*h and abs(words[k][0]-w[0])<6*h for k in nearby(w)):continue
+            isolated=True
         pairs.append((i,j,isolated));use[j].append(i)
     # A separate "2 EACH" line can apply to one type-over-CFM annotation.
     # Keep one source candidate until a reviewer locates its physical outlets.
@@ -143,6 +159,13 @@ def centered_outlets(words, page_number, source, legend=None, *, plan_confirmed=
     for i,j,isolated in pairs:
         if len(use[j])!=1 or not (isolated or len(pairs)>=3):continue
         w,n=words[i],words[j];size=legend.get(w[4],'')
+        if exhaust:
+            result.append({'native_exhaust_callout':True,'include':False,'type':w[4],'design_cfm':int(n[4].replace(',','')),
+                           'system':'','location':'','size':'','manual_locator':'','source':source,'reference':f'page {page_number}',
+                           'position':[round((w[0]+w[2])/2,2),round((w[1]+w[3])/2,2)],
+                           'evidence':f'{w[4]} above {n[4]} on the mechanical plan.',
+                           'quantity':1,'quantity_unresolved':False})
+            continue
         result.append({'include':False,'type':w[4],'size':size,'system':'','location':'',
                        'design_cfm':int(n[4].replace(',','')),'source':source,'reference':f'page {page_number}',
                        'position':[round(w[0],2),round(w[1],2)],

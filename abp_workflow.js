@@ -265,10 +265,11 @@ function renderPassivePaths(box,previous){
 }
 function renderExhaustGrilles(box,previous){
  const panel=workflowElement('details');panel.id='exhaust-grille-review';panel.open=previous?.open||exhaustOutlets.length>0;
- panel.append(workflowElement('summary','Exhaust grilles: '+exhaustOutlets.length+' source review rows'),workflowElement('p','These inlets use the original Exhaust Grills worksheet. Review the connected exhaust fan, room, neck size and design airflow. They do not populate Supply Diffusers. Automatic extraction remains separately recorded.'));
+ panel.append(workflowElement('summary','Exhaust grilles: '+exhaustOutlets.length+' source review rows'),workflowElement('p','Review the fan connection, room, neck size and design airflow for each inlet before including it on the original Exhaust Grills worksheet.'));
  const totals=new Map();
  for(const [index,o] of exhaustOutlets.entries()){
   const row=workflowElement('fieldset');row.append(workflowElement('legend','Exhaust grille '+(index+1)+' · '+o.source+' · '+o.reference));
+  if(o.native_exhaust_callout)row.append(workflowElement('p','The scanner read the printed grille type and airflow. Trace the inlet to its fan and enter its physical location.'));
   const label=workflowElement('label'),include=workflowElement('input');include.type='checkbox';include.checked=o.include===true;include.setAttribute('aria-label','Include exhaust grille '+(index+1));label.append(include,document.createTextNode(' Include this physical exhaust grille'));row.append(label);
   const status=workflowElement('p');status.setAttribute('role','status');
   const changed=()=>{humanSourceReview=null;workflowSave();};
@@ -401,7 +402,7 @@ function applyScanResult(data,retrySourceName,recoverySources){
 imageCoverage=data.image_coverage||[];imageCoverageTruncated=data.image_coverage_truncated===true;
  scanJobId=data.job_id;sourceManifest=data.source_manifest||[];
  renderReview();renderOutlets();renderImageReview();renderImageCoverage();
- $('scanstatus').textContent=(data.scan_status==='incomplete'?'SCAN INCOMPLETE. Completed results retained. ':'Source results ready for review. ')+scanCandidateSummary(records,diffusers,imageReview)+(recoverySources?'Original sources recovered. Reviewed values retained; equipment and outlet inclusion require fresh verification. ':retrySourceName?'Retried '+retrySourceName+'; affected equipment requires fresh verification. ':'')+(data.warnings||[]).join(' | ');
+ $('scanstatus').textContent=(data.scan_status==='incomplete'?'SCAN INCOMPLETE. Completed results retained. ':'Source results ready for review. ')+scanCandidateSummary(records,diffusers,imageReview,exhaustOutlets)+(recoverySources?'Original sources recovered. Reviewed values retained; equipment and outlet inclusion require fresh verification. ':retrySourceName?'Retried '+retrySourceName+'; affected equipment requires fresh verification. ':'')+(data.warnings||[]).join(' | ');
  workflowSave();
 }
 async function workflowRecommendations(data){

@@ -20,7 +20,7 @@ from abp_review_gate import partial_review_allowed, partial_review_lines
 from abp_ocr_candidates import reconcile_diffuser_sources,retain_image_quantity_guards
 from abp_inventory import validate_inventory, expand_instances
 from abp_components import is_component,component_errors
-from abp_exhaust import EXHAUST_TEMPLATE,exhaust_errors,populate_exhaust
+from abp_exhaust import EXHAUST_FIELDS,EXHAUST_TEMPLATE,exhaust_errors,populate_exhaust
 from abp_source_review import source_review_approved,air_path_errors
 
 ROOT=Path(__file__).resolve().parent
@@ -73,6 +73,7 @@ def excel_safe(value):
 def read_sources(blobs, *, runner=None):
     """Collect every occurrence and provenance. Do not invent values from surrounding text."""
     warnings=[];records={};sources=[];total_chars=0;preview=[];signals=set();diffusers=[];image_review=[];image_coverage=[];image_coverage_truncated=False
+    exhaust_outlets=[]
     import time
     from abp_resilient import deferred_ocr
     blobs=list(blobs)
@@ -123,15 +124,20 @@ def read_sources(blobs, *, runner=None):
                 source_digest=identity['sha256']
                 ocr_queue.append((name,stream,identity,native.get('pages'),checkpoint))
                 warnings.extend(native['warnings'])
-                if len(diffusers)+len(native['outlets'])>500:
+                if len(diffusers)+len(exhaust_outlets)+len(native['outlets'])>500:
                     checkpoint.update(native_status='incomplete',reason='outlet review capacity exceeded')
                     warnings.append(name+': outlet review capacity exceeded; this source outlet candidates were not added. Review manually or rescan separately.')
                 else:
                     for outlet in native['outlets']:
+                        if outlet.get('native_exhaust_callout') is True:
+                            row={k:outlet[k] for k in EXHAUST_FIELDS if k in outlet}
+                            exhaust_outlets.append({**row,'source_sha256':source_digest})
+                            signals.add('exhaust_callouts')
+                            continue
                         if outlet.get('service_hint') == 'possible_exhaust':
                             outlet['source_sha256'] = source_digest
-                    diffusers.extend(native['outlets'])
-                if native['outlets']:signals.add('supply_outlets')
+                        diffusers.append(outlet)
+                        signals.add('supply_outlets')
                 chunks=native['chunks']
                 for place,txt in chunks:
                     for candidate in performance_candidates(txt,TAGS):
@@ -277,7 +283,7 @@ def read_sources(blobs, *, runner=None):
     ambiguous_names={name for name in names if names.count(name)>1}
     reconcile_diffuser_sources([o for o in diffusers if o.get('source') not in ambiguous_names], image_review)
     retain_image_quantity_guards([o for o in diffusers if o.get('source') not in ambiguous_names], image_review)
-    return {'scan_status':'incomplete' if incomplete_sources else 'review_required','complete_takeoff':False,'source_checkpoints':checkpoints,'tags':list(records)[:MAX_RECORDS],'records':list(records.values())[:MAX_RECORDS],'diffusers':diffusers[:500],'image_review':image_review,'image_coverage':image_coverage,'image_coverage_truncated':image_coverage_truncated,'warnings':warnings,'characters':total_chars,'sources':sources,'preview':'\n'.join(preview)[:1800],'signals':sorted(signals),'sparse':sparse}
+    return {'scan_status':'incomplete' if incomplete_sources else 'review_required','complete_takeoff':False,'source_checkpoints':checkpoints,'tags':list(records)[:MAX_RECORDS],'records':list(records.values())[:MAX_RECORDS],'diffusers':diffusers[:500],'exhaust_outlets':exhaust_outlets,'image_review':image_review,'image_coverage':image_coverage,'image_coverage_truncated':image_coverage_truncated,'warnings':warnings,'characters':total_chars,'sources':sources,'preview':'\n'.join(preview)[:1800],'signals':sorted(signals),'sparse':sparse}
 
 # These labels only suggest which original ABP workbook to include.
 # They do not verify equipment quantities, schedules, or field measurements.
@@ -372,8 +378,9 @@ def suggested_templates(tags,signals=None,*,sparse=False):
         reason='Supply outlets read from plan symbols' if 'supply_outlets' in signals else 'Supply diffuser schedule heading'
         for name in lookup_templates(r'diffuser'):
             add(name,reason)
-    if 'exhaust_grilles' in signals:
-        add(EXHAUST_TEMPLATE,'Exhaust grille schedule detected; review physical inlets and their serving fans',True)
+    if 'exhaust_grilles' in signals or 'exhaust_callouts' in signals:
+        reason='Exhaust grille callouts on the plan' if 'exhaust_callouts' in signals else 'Exhaust grille schedule detected'
+        add(EXHAUST_TEMPLATE,reason+'; review physical inlets and their serving fans',True)
     if tagged('EUH') or 'unit_heater_electric' in signals:add('Unit Heater ELE.xlsx','Electric unit heater tag or source heating type; review design')
     if tagged('GUH') or 'unit_heater_gas' in signals:add('Unit Heater GAS.xlsx','Gas unit heater tag or source heating type; review design')
     if 'unit_heater_hot_water' in signals:add('Unit Heater WTR.xlsx','Source explicitly identifies hot-water unit heater; review design')

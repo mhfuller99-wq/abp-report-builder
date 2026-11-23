@@ -52,4 +52,15 @@ assert.equal(migrated.source_review,null);assert(migrated.template_migration_not
 assert(migrated.templates.includes('Exhaust Grills.xlsx'));assert.equal(JSON.stringify(migrated.exhaust_outlets),JSON.stringify(saved.exhaust_outlets));assert.equal(JSON.stringify(old),before);
 const inventory=ctx.sourceInventorySnapshot(saved);assert.equal(inventory.exhaust_outlets[0].source_sha256,'a'.repeat(64));
 assert.equal(inventory.exhaust_outlets[0].review_history,undefined);
+const raw={...item,native_exhaust_callout:true,system:'',location:'',manual_locator:'',size:'',include:false};
+delete raw.review_history;
+const draft={...saved,exhaust_outlets:[raw,{...raw,position:[140,220]}]};
+assert.equal(ctx.exhaustOutletErrors(draft,false).length,0);
+assert(ctx.exhaustOutletErrors(draft).length);
+const reloaded=ctx.validateSavedReview(JSON.parse(ctx.serializeSavedReview(draft)),templates,forms,pattern);
+assert.deepEqual(reloaded.exhaust_outlets.map(o=>o.position),[[100,200],[140,220]]);
+const retried=ctx.reconcileReviewedOutlets(reloaded.exhaust_outlets,draft.exhaust_outlets,[],'plan.pdf');
+assert(retried.every(o=>o.include===false && o.prior_inclusion===false));
+assert.equal(ctx.exhaustOutletErrors({...draft,exhaust_outlets:retried},false).length,0);
+assert(ctx.exhaustOutletErrors({...draft,exhaust_outlets:[{...raw,include:true}]}).length);
 console.log('Exhaust grilles: original form migration, source identity, one physical inlet, verified fan, supply separation, blank actuals and saved-review persistence passed.');

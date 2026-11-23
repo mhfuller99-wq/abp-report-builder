@@ -1,5 +1,5 @@
 """Genuine grille form, source review and separate physical inventories."""
-import copy,hashlib,io,unittest,zipfile
+import copy,hashlib,io,sys,unittest,zipfile
 from unittest.mock import patch
 from openpyxl import load_workbook
 from openpyxl.formula.translate import Translator
@@ -22,6 +22,59 @@ def exhaust_payload(count=1):
 
 
 class ExhaustTests(unittest.TestCase):
+    def test_printed_callouts_are_separate_from_supply_and_can_be_saved_unassigned(self):
+        from abp_outlets import centered_outlets
+        def word(x,y,text,block):
+            width=len(text)*4
+            return (x-width/2,y,x+width/2,y+10,text,block,0,0)
+        words=[word(30,50,'EAG-8',1),word(30,63,'125',1),
+               word(100,50,'EAG-8',1),word(100,63,'250',1)]
+        get=lambda sample: centered_outlets(sample,1,'synthetic.pdf',plan_confirmed=True,exhaust=True)
+        self.assertEqual(centered_outlets(words,1,'synthetic.pdf',plan_confirmed=True),[])
+        self.assertEqual(centered_outlets(words,1,'synthetic.pdf',exhaust=True),[])
+        raw=get(words)
+        self.assertEqual([r['design_cfm'] for r in raw],[125,250])
+        for extra in ['EACH','TYP.','LEGEND','MEASURED','DEMO']:
+            self.assertEqual(get(words[:2]+[word(30,33,extra,2)]),[])
+        self.assertEqual(get([words[0],word(30,63,'125',4)]),[])
+        self.assertEqual(get([*words[:2],word(30,65,'90',9)]),[])
+        self.assertEqual(get([*words[:2],word(30,38,'MAX',1)]),[])
+        p=exhaust_payload()
+        for o in raw:
+            o.update(source_sha256='a'*64,position_coordinate_space='displayed_pdf_points')
+            self.assertFalse(o['include'])
+            self.assertEqual((o['system'],o['location'],o['size'],o['manual_locator']),('','','',''))
+        p['exhaust_outlets']=raw
+        self.assertFalse(exhaust_errors(p,require_review=False))
+        self.assertTrue(exhaust_errors(p))
+        for o in raw:o['exclusion_note']='Source revision excludes this inlet.'
+        self.assertFalse(exhaust_errors(p))
+        raw[0]['include']=True
+        self.assertTrue(exhaust_errors(p))
+
+    def test_pdf_callouts_and_supervised_scan_routing(self):
+        import pymupdf
+        from abp_schedule import parse_pdf
+        with pymupdf.open() as doc:
+            p=doc.new_page()
+            p.insert_text((60,40),'MECHANICAL FLOOR PLAN',fontsize=10)
+            for x,top,mark,flow in [(80,110,'EAG-4','1,750'),(240,250,'SAG-2','2,250')]:
+                for y,value in [(top,mark),(top+14.5,flow)]:
+                    p.insert_text((x-pymupdf.get_text_length(value,fontname='cour',fontsize=10)/2,y),value,fontsize=10,fontname='cour')
+            data=doc.tobytes()
+        _,_,outlets=parse_pdf('plan.pdf',data)
+        self.assertEqual(sorted((o['type'],o['design_cfm']) for o in outlets),[('EAG-4',1750),('SAG-2',2250)])
+        if sys.platform!='linux':
+            self.skipTest('PDF extraction passed. Production worker supervision requires Linux.')
+        result=app.read_sources([('plan.pdf',data)])
+        self.assertEqual(result['source_checkpoints'][0]['native_status'],'completed_native_stage')
+        self.assertEqual([r['type'] for r in result['diffusers']],['SAG-2'])
+        row,=result['exhaust_outlets']
+        self.assertEqual((row['type'],row['design_cfm'],row['include']),('EAG-4',1750,False))
+        self.assertEqual(row['source_sha256'],hashlib.sha256(data).hexdigest())
+        self.assertEqual(row['position_coordinate_space'],'displayed_pdf_points')
+        self.assertFalse(exhaust_errors({**result,'scan_state':result},require_review=False))
+
     def test_original_grilles_group_and_paginate_without_touching_formulas(self):
         p=exhaust_payload(30)
         p['records'].append({'tag':'EF-8','template':'Exhaust Fans _Sm._.xlsx','status':'VERIFIED','design_cfm':65})
