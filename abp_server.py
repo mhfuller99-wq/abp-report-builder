@@ -1071,6 +1071,7 @@ print('ABP auth configuration: '+('password loaded' if ACCESS_PASSWORD else 'PAS
 
 # Stateless HMAC-signed session cookies; changing ABP_ACCESS_PASSWORD revokes existing sessions.
 SESSION_LIFETIME=8*60*60
+LOGIN_FORM_LIFETIME=60*60
 FAILED_LOGINS={}
 LOGIN_LOCK=threading.Lock()
 LOGIN_HTML='''<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
@@ -1078,7 +1079,42 @@ LOGIN_HTML='''<!doctype html><html lang="en"><head><meta charset="utf-8"><meta n
 <h1>Welcome back</h1><p>Sign in to build your TAB reports with Air Balance Professionals.</p>
 {{ERROR}}<form action="/login" method="post"><input type="hidden" name="csrf" value="{{CSRF}}"><label for="user">Username</label><input id="user" name="username" autocomplete="username" value="abp" readonly>
 <label for="pass">Password</label><input id="pass" name="password" type="password" autocomplete="current-password" required autofocus placeholder="Enter your password">
-<button type="submit">Sign in to build reports</button></form><div class="note">Access is limited to authorized ABP team members. Contact your administrator for your credentials.</div></main></body></html>'''
+<button type="submit">Sign in to build reports</button><div role="status" id="login-status"></div></form><div class="note">Access is limited to authorized ABP team members. Contact your administrator for your credentials.</div></main>
+<script>
+const loginForm=document.querySelector('form');
+const loginToken=loginForm.elements.namedItem('csrf');
+const loginButton=loginForm.querySelector('button');
+const loginStatus=document.getElementById('login-status');
+let renewing=false;
+window.addEventListener('pageshow',()=>{renewing=false;loginButton.disabled=false;});
+loginForm.addEventListener('submit',async event=>{
+ if(renewing){event.preventDefault();return;}
+ const age=Date.now()-Number(loginToken.value.split('.')[0])*1000;
+ if(Number.isFinite(age)&&age>=0&&age<{{RENEW_AFTER_MS}})return;
+ event.preventDefault();
+ renewing=true;loginButton.disabled=true;
+ loginStatus.textContent='Refreshing your sign-in form…';
+ const controller=new AbortController();
+ const timer=setTimeout(()=>controller.abort(),20000);
+ let navigating=false;
+ try{
+  const response=await fetch('/login',{cache:'no-store',mode:'same-origin',credentials:'same-origin',signal:controller.signal});
+  if(!response.ok)throw Error();
+  if(response.redirected&&new URL(response.url).pathname==='/'){location.assign('/');navigating=true;return;}
+  const page=new DOMParser().parseFromString(await response.text(),'text/html');
+  const fresh=page.querySelector('form[action="/login"] input[name="csrf"]');
+  if(!fresh||!fresh.value)throw Error();
+  loginToken.value=fresh.value;
+  loginStatus.textContent='';
+  if(loginForm.reportValidity()){loginForm.submit();navigating=true;}
+ }catch{
+  loginStatus.textContent='The sign-in form could not refresh. Check your connection and select Sign in again.';
+ }finally{
+  clearTimeout(timer);
+  if(!navigating){renewing=false;loginButton.disabled=false;}
+ }
+});
+</script></body></html>'''
 FAVICON_PNG=(ROOT/'04_Company_Branding/favicon.png').read_bytes()
 FAVICON_ICO=(ROOT/'04_Company_Branding/favicon.ico').read_bytes()
 # Static page chrome for unknown browser routes. Report APIs keep their own responses.
@@ -1169,7 +1205,8 @@ class Handler(BaseHTTPRequestHandler):
         key=hashlib.sha256(('abp-login-csrf-v2:'+ACCESS_PASSWORD).encode()).digest()
         signature=hmac.new(key,payload.encode(),hashlib.sha256).hexdigest()
         csrf=payload+'.'+signature
-        html_page=LOGIN_HTML.replace('{{ERROR}}',notice).replace('{{CSRF}}',csrf)
+        html_page=(LOGIN_HTML.replace('{{ERROR}}',notice).replace('{{CSRF}}',csrf)
+                   .replace('{{RENEW_AFTER_MS}}',str((LOGIN_FORM_LIFETIME-60)*1000)))
         self.respond(html_page.encode(),'text/html; charset=utf-8')
     def valid_login_csrf(self,value):
         if not isinstance(value,str):return False
@@ -1177,7 +1214,7 @@ class Handler(BaseHTTPRequestHandler):
         if not match:return False
         stamp,nonce,signature=match.groups()
         age=time.time()-int(stamp)
-        if not 0<=age<3600:return False
+        if not 0<=age<LOGIN_FORM_LIFETIME:return False
         key=hashlib.sha256(('abp-login-csrf-v2:'+ACCESS_PASSWORD).encode()).digest()
         expected=hmac.new(key,(stamp+'.'+nonce).encode(),hashlib.sha256).hexdigest()
         return secrets.compare_digest(signature,expected)
