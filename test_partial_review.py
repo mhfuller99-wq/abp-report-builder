@@ -2,7 +2,7 @@ import copy, io, unittest
 from unittest.mock import patch
 from openpyxl import load_workbook
 import abp_server as app
-from abp_review_gate import partial_review_allowed, partial_review_lines
+from abp_review_gate import partial_review_allowed, partial_review_lines, _compact_page_warnings
 
 
 class PartialReviewTests(unittest.TestCase):
@@ -35,6 +35,29 @@ class PartialReviewTests(unittest.TestCase):
         state=copy.deepcopy(self.state);state['warnings']=['x'*2000]*100
         with self.assertRaisesRegex(ValueError,'no disclosure was truncated'):
             partial_review_lines(state,dict(self.ack,scan_state=state))
+
+    def test_group_only_equal_source_qualified_messages(self):
+        warnings = ['a.pdf: page 4 caution', 'b.pdf: page 4 caution', 'a.pdf: page 5 caution',
+                    'Page 2: unknown source', 'a.pdf: page 7 caution', 'a.pdf: page 7 caution',
+                    'a.pdf: page 6 different', 'a.pdf: page 60 outside', 'a.pdf: a.pdf: page 5 caution']
+        sources = [{'name':name,'pages':10} for name in ('a.pdf','b.pdf')]
+        self.assertEqual(list(_compact_page_warnings(warnings,sources)),
+                         ['a.pdf: pages 4-5, 7, 7 | caution','b.pdf: page 4 caution',
+                          'Page 2: unknown source','a.pdf: page 6 different','a.pdf: page 60 outside',
+                          'a.pdf: a.pdf: page 5 caution'])
+        self.assertEqual(list(_compact_page_warnings(warnings,sources+[sources[0]])), warnings)
+
+    def test_overflow_compacts_page_repetitions_without_changing_scan_state(self):
+        state=copy.deepcopy(self.state)
+        state['source_checkpoints'][0]['pages']=100
+        body='image content may be incomplete. Compare this schedule against the original drawing. '*3
+        state['warnings']=[f'schedule.pdf: Page {i}: {body}' for i in range(1,101)]
+        snapshot=copy.deepcopy(state)
+        lines=partial_review_lines(state,dict(self.ack,scan_state=copy.deepcopy(state)))
+        self.assertLess(len(lines),360)
+        self.assertIn('Pages 1-100',' '.join(lines))
+        self.assertIn('SOURCE SCAN INCOMPLETE',lines[0])
+        self.assertEqual(state,snapshot)
 
     def test_partial_workbook_keeps_template_and_blank_actuals(self):
         # Enough warning lines to exercise multiple intact Notes pages.

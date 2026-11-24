@@ -14,6 +14,23 @@ def formulas(data,title):
     return {c.attrib['r']:(c.find('{'+NS+'}f').text,c.find('{'+NS+'}f').attrib) for c in root.iter('{'+NS+'}c') if c.find('{'+NS+'}f') is not None}
 
 class FidelityTests(unittest.TestCase):
+    def test_notes_labels_survive_reset_and_round_traverse_row_flags_survive_copy(self):
+        with patch.object(app,'BLANK_RECT_FORMS',1),patch.object(app,'BLANK_RND_FORMS',2):
+            generated=build({'project':'Printed original forms','templates':['Notes.xlsx']})
+        book=load_workbook(io.BytesIO(generated));notes=book['NOTES']
+        self.assertEqual([notes.cell(3,c).value for c in range(1,6)],['DATE','DESIGNATION','COMMENT',None,'STATUS'])
+        self.assertEqual(str(notes.print_area),"'NOTES'!$A$2:$E$43")
+        self.assertTrue(all(notes.cell(r,c).value is None for r in range(4,40) for c in range(1,6)))
+        def rows(data,title):
+            with zipfile.ZipFile(io.BytesIO(data)) as z:parts={n:z.read(n) for n in z.namelist()}
+            sheet=ET.fromstring(parts[sheet_paths(parts)[title]])
+            return {int(row.get('r')):{k:v for k,v in row.attrib.items() if k not in ('r','s')}
+                    for row in sheet.find('{'+NS+'}sheetData')}
+        source=rows(LOOKUP[RND_TEMPLATE].read_bytes(),'DUCT TRAVERSE RND')
+        output=rows(generated,'DUCT TRAVERSE RND')
+        for off in (0,27):
+            for r,attrs in source.items():self.assertEqual(output[r+off],attrs)
+
     def test_every_master_preserves_formula_xml_and_formatting(self):
         for name,path in LOOKUP.items():
             if banned_initial_template(name):
@@ -51,7 +68,7 @@ class FidelityTests(unittest.TestCase):
                             for node in expected:
                                 if node.text:node.text=header_text(node.text,'Template fidelity','')
                         self.assertEqual(ET.tostring(expected),ET.tostring(getattr(d,attr).to_tree()),(name,attr))
-                    self.assertEqual(str(s.print_area),str(d.print_area))
+                    self.assertEqual("'NOTES'!$A$2:$E$43" if s.title=='NOTES' and not s.print_area else str(s.print_area),str(d.print_area))
                     for key,dim in s.row_dimensions.items():
                         self.assertEqual({k:v for k,v in dict(dim).items() if k!='s'},{k:v for k,v in dict(d.row_dimensions[key]).items() if k!='s'},(name,'row',key))
                         for attr in ('font','fill','border','alignment','number_format','protection'):

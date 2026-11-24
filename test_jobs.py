@@ -1,13 +1,39 @@
-import io,json,tempfile,threading,time,unittest
+import hashlib,io,json,tempfile,threading,time,unittest
 from pathlib import Path
 from unittest.mock import patch
-from abp_jobs import Jobs,merge_pages,SourceRunner
+from abp_jobs import Jobs,merge_pages,SourceRunner,validate_recovery_sources
 
 class JobTests(unittest.TestCase):
+    def test_interrupted_retry_keeps_prior_work_and_flags_unfinished_pages(self):
+        old={'review_candidates':[{'page':p,'tag':f'OLD-{p}'} for p in (1,2,3)],
+             'coverage':[{'page':p,'status':'partial_review_required'} for p in (1,2,3)],'warnings':[]}
+        new={'review_candidates':[{'page':p,'tag':f'NEW-{p}'} for p in (1,2)],
+             'coverage':[{'page':p,'status':'partial_review_required'} for p in (1,2)],
+             'warnings':['image worker failed'],'in_progress_page':2,'interrupted':True}
+        for pages in (None,[1,2,3]):
+            result=merge_pages(old,new,pages,'images')
+            self.assertEqual({r['tag'] for r in result['review_candidates']},{'NEW-1','OLD-2','NEW-2','OLD-3'})
+            self.assertTrue(result['interrupted'])
+            self.assertFalse(result['complete_takeoff'])
+            self.assertIn('Retry',result['coverage'][2]['unexamined_content'])
+        failed=merge_pages(old,{'coverage':[],'warnings':['busy']},[2],'images')
+        self.assertEqual(failed['review_candidates'],old['review_candidates'])
+        self.assertEqual(failed['coverage'][0],old['coverage'][0])
+
+    def test_cached_reader_and_source_identity_must_both_match(self):
+        with tempfile.TemporaryDirectory() as directory:
+            job={'root':Path(directory),'sources':[{'name':'synthetic.pdf','sha256':'a'*64}]}
+            runner=SourceRunner(job,lambda **k:None)
+            runner.save(0,'native',{'pages':2,'status':'completed_native_stage'})
+            self.assertEqual(runner.load(0,'native')['pages'],2)
+            with patch('abp_jobs.READER_VERSION','different-reader'):
+                self.assertIsNone(runner.load(0,'native'))
+            job['sources'][0]['sha256']='b'*64
+            self.assertIsNone(runner.load(0,'native'))
     def test_short_image_sources_allow_both_page_passes_within_existing_caps(self):
         for count,remaining,expected in ((2,900,90),(20,900,120),(2,25,25)):
             with tempfile.TemporaryDirectory() as directory:
-                job={'root':Path(directory),'sources':[{'name':'synthetic.pdf'}]}
+                job={'root':Path(directory),'sources':[{'name':'synthetic.pdf','sha256':'a'*64}]}
                 with patch('abp_jobs.time.monotonic',return_value=100):
                     runner=SourceRunner(job,lambda **k:None);runner.deadline=100+remaining
                     result={'review_candidates':[],'coverage':[],'warnings':[]}
@@ -74,5 +100,25 @@ class JobTests(unittest.TestCase):
         nextjob=jobs.create('scan',parent=first['id'],retry={'source_index':0,'stage':'images','page_numbers':[2]});child=self.finish(jobs,nextjob['id'])
         self.assertFalse((child['root']/'inflight.tmp').exists())
         self.assertEqual(parent['sources'],child['sources']);self.assertEqual((parent['root']/'source-0.pdf').read_bytes(),(child['root']/'source-0.pdf').read_bytes())
+
+    def test_recovery_matches_server_computed_bytes_before_scanning(self):
+        calls=[]
+        def read(blobs,runner):calls.append([name for name,_ in blobs]);return {'records':[]}
+        jobs=Jobs(threading.Lock(),read,None)
+        values=[('plan.pdf',b'original plan'),('selection.pdf',b'original selection')]
+        expected=[{'name':name,'sha256':hashlib.sha256(data).hexdigest()} for name,data in values]
+        for altered in ([('plan.pdf',b'changed plan'),values[1]],values[:1],values+[('extra.pdf',b'extra')]):
+            with self.assertRaisesRegex(ValueError,'differ from the saved review'):
+                jobs.create('scan',parts=[('files',name,io.BytesIO(data)) for name,data in altered],expected_sources=expected)
+            self.assertEqual(jobs.jobs,{});self.assertEqual(calls,[]);self.assertEqual([p for p in jobs.root().iterdir() if p.name!='owner.json'],[])
+        created=jobs.create('scan',parts=[('files',name,io.BytesIO(data)) for name,data in reversed(values)],expected_sources=expected)
+        restored=self.finish(jobs,created['id']);self.assertEqual(restored['status'],'done')
+        self.assertEqual(calls,[['selection.pdf','plan.pdf']])
+        self.assertFalse(any(restored['root'].glob('*-native.json'))) # No client-supplied checkpoint was trusted.
+
+    def test_recovery_rejects_missing_duplicate_or_invalid_identity(self):
+        valid={'name':'plan.pdf','sha256':'a'*64}
+        for expected in (None,[],[valid,valid],[dict(valid,name='../plan.pdf')],[dict(valid,sha256='wrong')]):
+            with self.assertRaises(ValueError):validate_recovery_sources(expected,[valid])
 
 if __name__=='__main__':unittest.main()

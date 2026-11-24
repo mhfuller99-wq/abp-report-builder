@@ -41,7 +41,7 @@ This only requests a reread. Concatenated fragments never become a value here.
     return found[:4]
 
 
-def read(page, box, native, pixels, timeout, engine):
+def read(page, box, native, pixels, timeout, engine, transposed_hint=None):
     import pymupdf
     started = time.monotonic()
     rect = pymupdf.Rect(box)
@@ -51,7 +51,9 @@ def read(page, box, native, pixels, timeout, engine):
     # A register range table or generic catalog page is not an equipment table.
     furnace = all(token in title for token in ('SPLIT', 'SCHEDULE', 'FURNACE', 'MARK', 'E.S.P.', 'CFM'))
     fan = all(token in title for token in ('EXHAUST', 'FAN', 'SCHEDULE', 'ID', 'E.S.P.', 'CFM'))
-    if not (furnace or fan) or len(headers)>500 or pixels<10_000:
+    from abp_transposed import reread_requested
+    transposed = bool(transposed_hint) and reread_requested(transposed_hint)
+    if not (furnace or fan or transposed) or len(headers)>500 or pixels<10_000:
         return None
     if any(re.fullmatch(r'ACTUAL|MEASURED|INITIAL|FINAL', w['text'], re.I) for w in headers):
         return None
@@ -66,39 +68,59 @@ def read(page, box, native, pixels, timeout, engine):
         # Read the furnace section separately; condenser/coil marks and ratings
         # are associated components and never independent air-moving units.
         render_rect.x1=marks[1]['box'][0]-4
-    paths=page.get_cdrawings()
-    if len(paths)>20_000:
-        return None
     selected=[];operations=0
     matrix=page.rotation_matrix
-    for index,path in enumerate(paths):
-        if index%128==0 and time.monotonic()-started>=timeout:
-            raise TimeoutError('Outlined schedule selection deadline')
-        bounds=pymupdf.Rect(path['rect'])*matrix
+    seen=0
+    previous_fill=None
+    limited=False
+    deadline=started+timeout
+
+    def select(path):
+        nonlocal seen, previous_fill, operations, limited
+        seen+=1
+        if limited or seen>50_000 or (seen%128==0 and time.monotonic()>=deadline):
+            limited=True
+            return
+        # The streaming API emits fill and stroke as separate events. The
+        # list API merged identical consecutive fill/stroke paths as 'fs',
+        # which the glyph reader excludes. Keep only one small fill to compare.
         items=path.get('items',[])
+        filled=previous_fill
+        previous_fill=items if path.get('type')=='f' and len(items)<=80 else None
+        if path.get('type')!='s' or not 1<=len(items)<=80 or items==filled:
+            return
+        bounds=pymupdf.Rect(path['rect'])*matrix
         if (render_rect.contains(bounds) and 0<=bounds.height<=20 and 0<=bounds.width<=25
-                and path.get('type')=='s' and 1<=len(items)<=80
                 and all(item[0] in ('l','c') for item in items)
                 and all(math.isfinite(v) for v in bounds)):
-            selected.append(path);operations+=len(items)
-            if len(selected)>3000 or operations>50_000:
-                return None
-    if len(selected)<20:
+            operations+=len(items)
+            if len(selected)>=3000 or operations>50_000:
+                limited=True
+                return
+            selected.append(path)
+
+    page.get_cdrawings(callback=select)
+    if time.monotonic()>=deadline:
+        raise TimeoutError('Outlined schedule selection deadline')
+    if limited or len(selected)<20:
         return None
     with pymupdf.open() as doc:
         target=doc.new_page(width=render_rect.width+20,height=render_rect.height+20)
         def point(value):
             p=pymupdf.Point(value)*matrix
             return pymupdf.Point(p.x-render_rect.x0+10,p.y-render_rect.y0+10)
+        # Finish each path independently (including its stroke width), but
+        # write the accumulated PDF content once. One commit per glyph grows
+        # thousands of content streams and exhausts constrained-host deadlines.
+        shape=target.new_shape()
         for index,path in enumerate(selected):
             if index%128==0 and time.monotonic()-started>=timeout:
                 raise TimeoutError('Outlined schedule rendering deadline')
-            shape=target.new_shape()
             for item in path['items']:
                 if item[0]=='l':shape.draw_line(point(item[1]),point(item[2]))
                 else:shape.draw_bezier(*[point(p) for p in item[1:]])
             shape.finish(color=(0,0,0),width=path.get('width',1),closePath=False)
-            shape.commit()
+        shape.commit()
         remaining=timeout-(time.monotonic()-started)
         if remaining<=0:raise TimeoutError('Outlined schedule rendering deadline')
         words=engine(target,pixels,remaining,clip=list(target.rect),psm=11,max_zoom=5)

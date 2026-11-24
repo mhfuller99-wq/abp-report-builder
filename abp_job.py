@@ -1,7 +1,7 @@
 """Source-based equipment review and job-specific ABP form assembly."""
 import re
 
-NUMERIC_FIELDS = ('design_cfm','osa_cfm','osa_min_cfm','esp','total_sp','motor_hp','motor_volts','motor_fla','design_gpm',
+NUMERIC_FIELDS = ('quantity','supply_fan_count','design_cfm','osa_cfm','osa_min_cfm','esp','total_sp','motor_hp','motor_volts','motor_phase','motor_fla','motor_rpm','design_gpm',
                   'cooling_edb','cooling_ewb','cooling_ldb','cooling_lwb',
                   'heating_cfm','heating_edb','heating_ldb','heating_input_btu','heating_output_btu',
                   'cooling_total_btu','cooling_sensible_btu','electric_heating_edb','electric_heating_ldb',
@@ -78,7 +78,8 @@ def populate_identity(ws, record, safe):
 
 def populate_support(wb, records, selected, lookup, add, reset, sheet_name):
     from abp_design import unit_form
-    verified=[r for r in records if r.get('status')=='VERIFIED' and unit_form(r)=='Air Moving Equipment.xlsx']
+    from abp_components import is_component
+    verified=[r for r in records if r.get('status')=='VERIFIED' and not is_component(r) and unit_form(r)=='Air Moving Equipment.xlsx']
     coil='Coil DX GAS HT.xlsx'
     gas_units=[r for r in verified if support_form(r,selected)==coil]
     if coil in selected and gas_units:

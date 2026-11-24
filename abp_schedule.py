@@ -11,12 +11,14 @@ never stored as motor FLA.
 import re
 from abp_mechanical import schedule_candidates, diffuser_legend, keyed_outlets, packaged_submittals, TAG, expand_marks, page_words, selection_airflows, readable_text
 from abp_outlets import centered_outlets, necked_outlets, distinct_outlets, sized_registers, numbered_supply_outlets
+from abp_transposed import candidates as transposed_candidates
 
 LEAD = re.compile(
     r'^(' + TAG.split('(?:', 1)[1].split(')', 1)[0] + r')-\d+(?:\.\d+)*[A-Z]?(?:-\d+(?:\.\d+)*[A-Z]?)?\b', re.I)
 MAPPED = re.compile(r'^(?:EF|VRF|DOAS|SSAU)-\d+[A-Z]?$', re.I)
 VOLT = re.compile(r'\b(\d{2,3}(?:-\d{2,3})?)/(\d+)/(\d)\b')
 UNIT_TOTALS = {
+    'quantity',
     'design_cfm', 'osa_cfm', 'esp', 'total_sp', 'motor_hp', 'motor_fla', 'motor_volts',
     'cooling_edb', 'cooling_ewb', 'cooling_ldb', 'cooling_lwb',
     'heating_edb', 'heating_ldb', 'heating_cfm',
@@ -242,7 +244,7 @@ def wrapped_words(index, rows):
 
 def parse_page(words, page_number, name):
     reference = f'page {page_number}'
-    found = schedule_candidates(words, page_number, name)
+    found = schedule_candidates(words, page_number, name) + transposed_candidates(words, page_number, name)
     scheduled = {item['tag'] for item in found}
     # A complete printed plan mark remains a review item even when it is not
     # the first word of a visual row. It supplies no inferred design values.
@@ -496,6 +498,8 @@ def parse_fan_submittal(doc, name):
                 values[field] = number(match.group(1).replace(',', ''))
 
         grab(r'Requested Volume \(CFM\)\s*([\d,]+)', 'design_cfm')
+        if len(tags)==1:
+            grab(r'\bQuantity\s+(\d+)\b', 'quantity')
         grab(r'Actual Volume \(CFM\)\s*([\d,]+)', 'selected_cfm')
         grab(r'Fan RPM\s*(\d+)', 'fan_rpm')
         motor_fla, fla_words = fan_motor_fla_rows(spatial_rows)
@@ -709,6 +713,7 @@ def parse_supply_outlets(words, page_number, name):
 
 def parse_pdf(name, data=None, *, path=None, page_numbers=None, checkpoint=None):
     import pymupdf
+    from abp_symbol_examples import is_symbol_example, symbol_examples
     warnings = []
     found = []
     outlets = []
@@ -745,15 +750,31 @@ def parse_pdf(name, data=None, *, path=None, page_numbers=None, checkpoint=None)
             if len(text_of(words).strip()) < 40:
                 warnings.append(f'{name}: page {index + 1} has no readable text and may be a scanned sheet; manual takeoff required')
             found.extend(parse_page(words, index + 1, name))
+            from abp_designation import designation_records
+            try:
+                found.extend(designation_records(page, words, name))
+            except (ValueError, RuntimeError, pymupdf.mupdf.FzErrorBase):
+                warnings.append(f'{name}: page {index+1} ruled equipment schedule requires source review')
             outlets.extend(parse_supply_outlets(words, index + 1, name))
             outlets.extend(keyed_outlets(words, index + 1, name, legend))
             outlets.extend(centered_outlets(words, index + 1, name, legend))
+            outlets.extend(centered_outlets(words, index + 1, name, exhaust=True))
             outlets.extend(necked_outlets(words, index + 1, name))
             from abp_outlets import coded_outlets
             outlets.extend(coded_outlets(words,index+1,name))
             outlets.extend(sized_registers(words,index+1,name))
             outlets.extend(numbered_supply_outlets(words,index+1,name))
+            examples=symbol_examples(words)
+            if examples:
+                outlets=[o for o in outlets if o.get('reference')!=f'page {index+1}' or not is_symbol_example(o,examples)]
             outlets=distinct_outlets(outlets)
+            if examples:
+                from abp_grille_service import grille_hints
+                current = [o for o in outlets if o.get('reference') == f'page {index+1}']
+                try:
+                    grille_hints(page, words, current, examples)
+                except (RuntimeError, ValueError) as exc:
+                    warnings.append(f'{name}: page {index+1} grille symbol review unavailable ({str(exc)[:100]}); check service on the drawing')
             for outlet in outlets:
                 if outlet.get('reference') == f'page {index+1}':
                     outlet['position_coordinate_space']='displayed_pdf_points'

@@ -146,9 +146,25 @@ def group_template_sheets(data, origins):
             merge_artwork(src,srcpath,offset)
             removed.add(title)
         dimension.set('ref','A1:'+get_column_letter(maxcol)+str(height*len(titles)))
-        extents[first]=(maxcol,height*len(titles))
+        last_col=get_column_letter(maxcol)
+        print_ranges=[f'$A$1:${last_col}${height*len(titles)}']
         setup=dest.find(q('pageSetup'))
-        if setup is not None and setup.attrib.get('fitToHeight')=='1':setup.set('fitToHeight','0')
+        if original=='DUCT TRAVERSE RND':
+            # Excel fits each print area independently. A continuous area
+            # leaves the technician and test-date line on a second page.
+            print_ranges=[f'$A${offset+1}:${last_col}${offset+height}'
+                          for offset in range(0,height*len(titles),height)]
+            sheet_pr=dest.find(q('sheetPr'))
+            if sheet_pr is None:sheet_pr=ET.SubElement(dest,q('sheetPr'))
+            props=sheet_pr.find(q('pageSetUpPr'))
+            if props is None:props=ET.SubElement(sheet_pr,q('pageSetUpPr'))
+            if setup is None:setup=ET.SubElement(dest,q('pageSetup'))
+            props.set('fitToPage','1')
+            setup.set('fitToWidth','1')
+            setup.set('fitToHeight','1')
+        elif setup is not None and setup.attrib.get('fitToHeight')=='1':
+            setup.set('fitToHeight','0')
+        extents[first]=print_ranges
         # Keep worksheet children in the ECMA worksheet sequence.
         order='sheetPr dimension sheetViews sheetFormatPr cols sheetData sheetCalcPr sheetProtection protectedRanges scenarios autoFilter sortState dataConsolidate customSheetViews mergeCells phoneticPr conditionalFormatting dataValidations hyperlinks printOptions pageMargins pageSetup headerFooter rowBreaks colBreaks customProperties cellWatches ignoredErrors smartTags drawing legacyDrawing legacyDrawingHF picture oleObjects controls webPublishItems tableParts extLst'.split()
         dest[:]=sorted(dest,key=lambda e:order.index(e.tag.split('}')[-1]) if e.tag.split('}')[-1] in order else len(order))
@@ -167,10 +183,22 @@ def group_template_sheets(data, origins):
             name.set('localSheetId',str(new_order.index(renamed.get(old_title,old_title))))
         if name.text:
             for old,new in renamed.items():name.text=name.text.replace("'"+old.replace("'","''")+"'!","'"+new.replace("'","''")+"'!")
-    for title,(col,row) in extents.items():
+    for title,print_ranges in extents.items():
         target=renamed.get(title,title)
         name=ET.SubElement(names,q('definedName'),name='_xlnm.Print_Area',localSheetId=str(new_order.index(target)))
-        name.text="'"+target.replace("'","''")+"'!$A$1:$"+get_column_letter(col)+'$'+str(row)
+        prefix="'"+target.replace("'","''")+"'!"
+        name.text=','.join(prefix+area for area in print_ranges)
+    files['xl/workbook.xml']=ET.tostring(workbook,encoding='utf-8',xml_declaration=True)
+    # Master workbooks each carry their selected tab. Copying that UI state to
+    # every sheet opens the report in Excel's grouped-edit mode. Select only
+    # the first report tab without touching cell data, formulas or print layout.
+    for view in workbook.findall('.//'+q('workbookView')):
+        view.set('activeTab','0');view.set('firstSheet','0')
+    for index,path in enumerate(sheet_paths(files).values()):
+        root=ET.fromstring(files[path])
+        for view in root.findall('./'+q('sheetViews')+'/'+q('sheetView')):
+            view.set('tabSelected','1' if index==0 else '0')
+        files[path]=ET.tostring(root,encoding='utf-8',xml_declaration=True)
     files['xl/workbook.xml']=ET.tostring(workbook,encoding='utf-8',xml_declaration=True)
     out=io.BytesIO()
     with zipfile.ZipFile(out,'w',zipfile.ZIP_DEFLATED) as z:

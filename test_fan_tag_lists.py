@@ -16,6 +16,11 @@ def document(labels):
 
 
 class FanTagTests(unittest.TestCase):
+    def test_shared_printed_tag_quantity_is_not_multiplied_across_a_tag_list(self):
+        with document(['Tag: EF-7','Quantity 2']) as doc:
+            self.assertEqual(parse_fan_submittal(doc,'synthetic.pdf')[0]['values']['quantity'],2)
+        with document(['Tags: EF-7 EF-8','Quantity 2']) as doc:
+            self.assertTrue(all('quantity' not in c['values'] for c in parse_fan_submittal(doc,'synthetic.pdf')))
     def test_explicit_shared_tags_keep_selected_and_requested_flows_separate(self):
         with document(['Tags: EF-7 EF-8','Mark: INTERNAL07']) as doc:
             found=parse_fan_submittal(doc,'synthetic.pdf')

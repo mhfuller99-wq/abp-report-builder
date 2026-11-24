@@ -8,10 +8,30 @@ import copy, gc, hashlib, json, os, re, secrets, shutil, tempfile, threading, ti
 from contextlib import ExitStack
 from pathlib import Path
 from abp_limits import mark_staging
+from abp_reader_version import READER_VERSION
 
 TTL=2*60*60
 MAX_RETAINED_BYTES=350_000_000
 MAX_JOBS=24
+
+class JobUnavailable(KeyError):
+    """The requested temporary job is absent from this server."""
+
+def validate_recovery_sources(expected, actual):
+    """Only reconnect the identical source set; filenames alone are not identity."""
+    if not isinstance(expected,list) or not 1<=len(expected)<=100:
+        raise ValueError('Recovery needs the original source names and SHA256 hashes')
+    identities={}
+    for source in expected:
+        if not isinstance(source,dict):raise ValueError('Invalid recovery source identity')
+        name=source.get('name');digest=source.get('sha256')
+        if (not isinstance(name,str) or not 1<=len(name)<=160 or '/' in name or '\\' in name
+                or not isinstance(digest,str) or not re.fullmatch(r'[a-f0-9]{64}',digest)
+                or name in identities):
+            raise ValueError('Recovery needs distinct original source names and SHA256 hashes')
+        identities[name]=digest
+    if len(actual)!=len(identities) or {s['name']:s['sha256'] for s in actual}!=identities:
+        raise ValueError('Source files differ from the saved review. Reattach every original file with the same name and contents. Your reviewed values were not replaced.')
 
 def write_json(path,value):
     data=json.dumps(value,allow_nan=False).encode('utf-8')
@@ -24,7 +44,40 @@ def page_of(item):
     return int(found[1]) if found else None
 
 def merge_pages(old,new,pages,kind):
-    if not old or pages is None:return new
+    if not old:return new
+    image_coverage=new.get('coverage',[]) if kind=='images' else []
+    unread={row['page'] for row in image_coverage if row['status'] in ('failed','budget_skipped','native_word_budget_skipped')}
+    if kind=='images' and (new.get('interrupted') or unread or not image_coverage):
+        # A retry can die before reaching its selected pages. Preserve earlier
+        # evidence for unfinished pages and merge any new unverified readings.
+        reached={row['page'] for row in image_coverage}
+        previous={page_of(row) for row in old.get('review_candidates',[])}
+        current=new.get('in_progress_page')
+        preserve=previous & (unread|{current})
+        replace=reached-preserve
+        prior_coverage={row['page']:row for row in old.get('coverage',[])}
+        prior_coverage.update({row['page']:row for row in new.get('coverage',[]) if row['page'] in replace})
+        pending=(set(pages if pages is not None else prior_coverage)-replace)|unread
+        if current is not None:pending.add(current)
+        for page in pending:
+            prior_coverage[page]={**prior_coverage.get(page,{}),'page':page,'status':'partial_review_required',
+                'unexamined_content':'Retry did not finish this page. Review the original or retry again.'}
+        candidates=[copy.deepcopy(r) for r in old.get('review_candidates',[]) if page_of(r) not in replace]
+        from abp_ocr_candidates import merge_diffuser_candidate, repeated_equipment
+        warnings=list(dict.fromkeys(old.get('warnings',[])+new.get('warnings',[])))
+        for item in new.get('review_candidates',[]):
+            if page_of(item) in preserve:
+                if item in candidates or repeated_equipment(candidates,item) or merge_diffuser_candidate(candidates,item):
+                    continue
+            if len(candidates)>=500:
+                warnings.append('Image retry reached the 500-candidate limit. Review the remaining source evidence manually.')
+                break
+            candidates.append(item)
+        return {**new,'interrupted':True,'complete_takeoff':False,
+            'review_candidates':candidates,
+            'coverage':[prior_coverage[p] for p in sorted(prior_coverage)],
+            'warnings':warnings}
+    if pages is None:return new
     result=dict(old)
     if kind=='native':
         for field in ('candidates','outlets'):
@@ -47,6 +100,8 @@ def merge_pages(old,new,pages,kind):
         result['coverage']=[coverage[p] for p in sorted(coverage)]
         result['warnings']=list(dict.fromkeys([w for w in old.get('warnings',[]) if not any(f'Page {p}:' in w for p in pages)]+new.get('warnings',[])))
         result['interrupted']=bool(new.get('interrupted'))
+        result.pop('failure_kind',None)
+        result.pop('in_progress_page',None)
     return result
 
 class SourceRunner:
@@ -55,7 +110,14 @@ class SourceRunner:
     def cache(self,index,kind):return self.job['root']/f'{index}-{kind}.json'
     def load(self,index,kind):
         path=self.cache(index,kind)
-        return json.loads(path.read_text(encoding='utf-8')) if path.exists() else None
+        if not path.exists():return None
+        cached=json.loads(path.read_text(encoding='utf-8'))
+        if cached.get('_reader_version')!=READER_VERSION or cached.get('_source_sha256')!=self.job['sources'][index]['sha256']:
+            return None
+        return cached
+    def save(self,index,kind,result):
+        write_json(self.cache(index,kind),{**result,'_reader_version':READER_VERSION,
+                                        '_source_sha256':self.job['sources'][index]['sha256']})
     def selection(self,index,kind):
         selection=self.job.get('retry')
         if selection is None:return True,None
@@ -75,7 +137,7 @@ class SourceRunner:
         kwargs.update(timeout=min(90,remaining),ocr_timeout=0,page_numbers=pages,
                       progress=lambda p:self.update(source=name,source_index=index,**p))
         result=scan(name,stream,**kwargs)
-        result=merge_pages(old,result,pages,'native');write_json(self.cache(index,'native'),result)
+        result=merge_pages(old,result,pages,'native');self.save(index,'native',result)
         return result
     def image(self,name,stream,identity,timeout):
         from abp_resilient import deferred_ocr
@@ -98,7 +160,7 @@ class SourceRunner:
         for p in range(1,(native.get('pages') or 0)+1):
             coverage.setdefault(p,{'page':p,'status':'budget_skipped','unexamined_content':'Page not completed; retry this page or review manually.'})
         result['coverage']=[coverage[p] for p in sorted(coverage)]
-        write_json(self.cache(index,'images'),result);return result
+        self.save(index,'images',result);return result
 
 class Jobs:
     def __init__(self,work_lock,read_sources,build,reference_build=None,*,janitor=False):
@@ -122,7 +184,7 @@ class Jobs:
             if job['status'] in ('done','failed') and time.time()-job['updated']>TTL:
                 shutil.rmtree(job['root']);del self.jobs[token]
     def size(self):return sum(p.stat().st_size for p in self.root().rglob('*') if p.is_file())
-    def create(self,kind,*,parts=None,payload=None,parent=None,retry=None):
+    def create(self,kind,*,parts=None,payload=None,parent=None,retry=None,expected_sources=None):
         with self.lock:
             self.prune()
             if len(self.jobs)>=MAX_JOBS or sum(j['status'] in ('queued','running','uploading') for j in self.jobs.values())>=3:
@@ -157,6 +219,9 @@ class Jobs:
                                 dest.write(block);h.update(block)
                         job['sources'].append({'name':name,'file':path.name,'bytes':size,'sha256':h.hexdigest()})
                     if not job['sources']:raise ValueError('Choose source documents first')
+                if expected_sources is not None:
+                    if kind!='scan' or parent or parts is None:raise ValueError('Recovery requires uploaded scan sources')
+                    validate_recovery_sources(expected_sources,job['sources'])
                 if payload is not None:write_json(root/'payload.json',payload)
                 if self.size()>MAX_RETAINED_BYTES:raise ValueError('Temporary document capacity reached; save your review and try a smaller source set')
                 job.update(status='queued',progress={'message':'Queued for document processing'})
@@ -167,9 +232,10 @@ class Jobs:
             except Exception:
                 shutil.rmtree(root);del self.jobs[token];raise
     def get(self,token):
-        if not re.fullmatch(r'[a-f0-9]{48}',token):raise KeyError('Unknown job')
+        if not re.fullmatch(r'[a-f0-9]{48}',token):raise JobUnavailable('Unknown job')
         with self.lock:
             self.prune()
+            if token not in self.jobs:raise JobUnavailable('Unknown job')
             job=self.jobs[token];job['updated']=time.time();return job
     def public(self,job):
         return {k:job[k] for k in ('id','kind','status','created','updated','progress','sources')}|{'retention_seconds':TTL,'storage':'Temporary on this server; browser review is saved separately. Reattach sources after a server restart.'}

@@ -1,12 +1,29 @@
 import http.client
+import re
 import threading
 import unittest
+from unittest.mock import patch
+from urllib.parse import urlencode
 
 import abp_server
 from abp_server import LOGIN_HTML, PAGE, ReportHTTPServer, Handler
 
 
 class SiteChromeTests(unittest.TestCase):
+    def test_refreshed_signin_form_can_be_used_in_the_same_tab(self):
+        with patch.object(abp_server,'LAN_MODE',True),patch.object(abp_server,'ACCESS_PASSWORD','local-fixture-only'):
+            _,_,_,form=self.request('GET','/login')
+            self.assertIn(b'value="abp" readonly',form)
+            token=re.search(rb'name="csrf" value="([^"]+)"',form)[1].decode()
+            with patch.object(Handler,'valid_login_csrf',return_value=False):
+                _,_,_,renewed=self.request('POST','/login',urlencode({'csrf':token}))
+            self.assertIn(b'This form is ready',renewed)
+            fresh=re.search(rb'name="csrf" value="([^"]+)"',renewed)[1].decode()
+            self.assertNotEqual(token,fresh)
+            status,_,location,_=self.request('POST','/login',urlencode({
+                'username':'abp','password':'local-fixture-only','csrf':fresh}))
+            self.assertEqual((status,location),(303,'/'))
+
     def setUp(self):
         self.server = ReportHTTPServer(('127.0.0.1', 0), Handler)
         self.worker = threading.Thread(target=self.server.serve_forever, daemon=True)

@@ -92,6 +92,40 @@ class FurnaceTests(unittest.TestCase):
 
 
 class OutlineTableTests(unittest.TestCase):
+    def test_fill_and_stroke_symbols_are_excluded_from_streamed_glyphs(self):
+        with pymupdf.open() as doc:
+            page=doc.new_page()
+            native=[word(5,5,250,15,'EXHAUST FAN SCHEDULE ID E.S.P. CFM')]
+            for i in range(30):
+                x=10+7*i
+                shape=page.new_shape()
+                shape.draw_line((x,40),(x+5,45))
+                shape.draw_line((x+5,45),(x,49))
+                shape.finish(color=(0,0,0),fill=(0,0,0))
+                shape.commit()
+            self.assertIsNone(read(page,[0,0,300,100],native,100000,3,None))
+
+    def test_glyph_paths_keep_identical_pixels_with_one_content_stream(self):
+        with pymupdf.open() as doc:
+            page=doc.new_page(width=600,height=800)
+            native=[word(110,210,450,220,'EXHAUST FAN SCHEDULE ID E.S.P. CFM')]
+            for i in range(35):
+                x=110+i*7;shape=page.new_shape()
+                shape.draw_line((x,250),(x+3,257))
+                shape.draw_bezier((x,257),(x+1,259),(x+4,252),(x+5,256))
+                shape.finish(color=(0,0,0),width=(i%3+1)*.3,closePath=False);shape.commit()
+            before=doc.tobytes(no_new_id=True)
+            expected=page.get_pixmap(matrix=pymupdf.Matrix(2,2),clip=pymupdf.Rect(90,190,510,310),alpha=False)
+            calls=[]
+            def engine(target,*args,**kwargs):
+                actual=target.get_pixmap(matrix=pymupdf.Matrix(2,2),alpha=False)
+                self.assertEqual((actual.width,actual.height),(expected.width,expected.height))
+                self.assertEqual(actual.samples,expected.samples)
+                self.assertEqual(len(target.get_contents()),1);calls.append(True)
+                return []
+            read(page,[100,200,500,300],native,100000,3,engine)
+            self.assertEqual(calls,[True]);self.assertEqual(doc.tobytes(no_new_id=True),before)
+
     def test_unknown_and_measurement_tables_do_not_use_isolation(self):
         with pymupdf.open() as doc:
             page=doc.new_page()

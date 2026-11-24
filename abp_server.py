@@ -17,7 +17,11 @@ from abp_job import NUMERIC_FIELDS, TEXT_FIELDS, COIL_FORMS, canonical_tag, post
 from abp_schedule import parse_pdf, annotate
 from abp_scan import scan as bounded_pdf_scan, ScanIncomplete
 from abp_review_gate import partial_review_allowed, partial_review_lines
-from abp_ocr_candidates import reconcile_diffuser_sources
+from abp_ocr_candidates import reconcile_diffuser_sources,retain_image_quantity_guards
+from abp_inventory import validate_inventory, expand_instances
+from abp_components import is_component,component_errors
+from abp_exhaust import EXHAUST_FIELDS,EXHAUST_TEMPLATE,exhaust_errors,populate_exhaust
+from abp_source_review import source_review_approved,air_path_errors
 
 ROOT=Path(__file__).resolve().parent
 TEMPLATES=ROOT/'03_Workbooks_and_Master_Templates'
@@ -69,6 +73,7 @@ def excel_safe(value):
 def read_sources(blobs, *, runner=None):
     """Collect every occurrence and provenance. Do not invent values from surrounding text."""
     warnings=[];records={};sources=[];total_chars=0;preview=[];signals=set();diffusers=[];image_review=[];image_coverage=[];image_coverage_truncated=False
+    exhaust_outlets=[]
     import time
     from abp_resilient import deferred_ocr
     blobs=list(blobs)
@@ -93,6 +98,7 @@ def read_sources(blobs, *, runner=None):
             data=source.read(MAX_UPLOAD+1) if hasattr(source,'read') else source
             total_size+=len(data)
             if total_size>MAX_UPLOAD:raise ValueError('Total source size exceeds 200 MB')
+            source_digest=hashlib.sha256(data).hexdigest();checkpoint['sha256']=source_digest
         try:
             if ext=='.pdf':
                 stream=source if hasattr(source,'read') else io.BytesIO(source)
@@ -118,11 +124,20 @@ def read_sources(blobs, *, runner=None):
                 source_digest=identity['sha256']
                 ocr_queue.append((name,stream,identity,native.get('pages'),checkpoint))
                 warnings.extend(native['warnings'])
-                if len(diffusers)+len(native['outlets'])>500:
+                if len(diffusers)+len(exhaust_outlets)+len(native['outlets'])>500:
                     checkpoint.update(native_status='incomplete',reason='outlet review capacity exceeded')
                     warnings.append(name+': outlet review capacity exceeded; this source outlet candidates were not added. Review manually or rescan separately.')
-                else:diffusers.extend(native['outlets'])
-                if native['outlets']:signals.add('supply_outlets')
+                else:
+                    for outlet in native['outlets']:
+                        if outlet.get('native_exhaust_callout') is True:
+                            row={k:outlet[k] for k in EXHAUST_FIELDS if k in outlet}
+                            exhaust_outlets.append({**row,'source_sha256':source_digest})
+                            signals.add('exhaust_callouts')
+                            continue
+                        if outlet.get('service_hint') == 'possible_exhaust':
+                            outlet['source_sha256'] = source_digest
+                        diffusers.append(outlet)
+                        signals.add('supply_outlets')
                 chunks=native['chunks']
                 for place,txt in chunks:
                     for candidate in performance_candidates(txt,TAGS):
@@ -267,7 +282,8 @@ def read_sources(blobs, *, runner=None):
     names=[Path(name).name[:160] for name,_ in blobs]
     ambiguous_names={name for name in names if names.count(name)>1}
     reconcile_diffuser_sources([o for o in diffusers if o.get('source') not in ambiguous_names], image_review)
-    return {'scan_status':'incomplete' if incomplete_sources else 'review_required','complete_takeoff':False,'source_checkpoints':checkpoints,'tags':list(records)[:MAX_RECORDS],'records':list(records.values())[:MAX_RECORDS],'diffusers':diffusers[:500],'image_review':image_review,'image_coverage':image_coverage,'image_coverage_truncated':image_coverage_truncated,'warnings':warnings,'characters':total_chars,'sources':sources,'preview':'\n'.join(preview)[:1800],'signals':sorted(signals),'sparse':sparse}
+    retain_image_quantity_guards([o for o in diffusers if o.get('source') not in ambiguous_names], image_review)
+    return {'scan_status':'incomplete' if incomplete_sources else 'review_required','complete_takeoff':False,'source_checkpoints':checkpoints,'tags':list(records)[:MAX_RECORDS],'records':list(records.values())[:MAX_RECORDS],'diffusers':diffusers[:500],'exhaust_outlets':exhaust_outlets,'image_review':image_review,'image_coverage':image_coverage,'image_coverage_truncated':image_coverage_truncated,'warnings':warnings,'characters':total_chars,'sources':sources,'preview':'\n'.join(preview)[:1800],'signals':sorted(signals),'sparse':sparse}
 
 # These labels only suggest which original ABP workbook to include.
 # They do not verify equipment quantities, schedules, or field measurements.
@@ -362,8 +378,9 @@ def suggested_templates(tags,signals=None,*,sparse=False):
         reason='Supply outlets read from plan symbols' if 'supply_outlets' in signals else 'Supply diffuser schedule heading'
         for name in lookup_templates(r'diffuser'):
             add(name,reason)
-    if 'exhaust_grilles' in signals:
-        add('Exhaust Grilles.xlsx.xlsx','Exhaust grille schedule detected; review device types',True)
+    if 'exhaust_grilles' in signals or 'exhaust_callouts' in signals:
+        reason='Exhaust grille callouts on the plan' if 'exhaust_callouts' in signals else 'Exhaust grille schedule detected'
+        add(EXHAUST_TEMPLATE,reason+'; review physical inlets and their serving fans',True)
     if tagged('EUH') or 'unit_heater_electric' in signals:add('Unit Heater ELE.xlsx','Electric unit heater tag or source heating type; review design')
     if tagged('GUH') or 'unit_heater_gas' in signals:add('Unit Heater GAS.xlsx','Gas unit heater tag or source heating type; review design')
     if 'unit_heater_hot_water' in signals:add('Unit Heater WTR.xlsx','Source explicitly identifies hot-water unit heater; review design')
@@ -404,6 +421,7 @@ def suggested_templates(tags,signals=None,*,sparse=False):
 def banned_initial_template(name):
     """Documentation and audit masters that never belong in the initial workbook."""
     low=name.lower()
+    if low=='exhaust grilles.xlsx.xlsx':return True # Misnamed fan form; original retained, correct grille form used instead.
     if 'instrument' in low:return True
     if low.startswith('cover'):return True
     if 'abbreviation' in low:return True
@@ -580,7 +598,7 @@ def add_template(wb,path):
                     if dxf.border is not None:dxf.border=bake_painted(dxf.border,source_palette)
     source.close()
 
-def validate_scan_state(state, acknowledgement=None):
+def validate_scan_state(state, acknowledgement=None, reviewed_design=False):
     if not isinstance(state,dict) or state.get('status') not in ('not_scanned','review_required','incomplete','stale','unknown'):
         raise ValueError('Invalid source scan state')
     if state.get('complete_takeoff') is not False:raise ValueError('Invalid takeoff completeness')
@@ -596,7 +614,7 @@ def validate_scan_state(state, acknowledgement=None):
     warnings=state.get('warnings')
     if not isinstance(warnings,list) or len(warnings)>1000 or any(not isinstance(w,str) or len(w)>2000 for w in warnings):raise ValueError('Invalid scan warnings')
     if state['status'] in ('incomplete','stale','unknown') or any(c['native_status']!='completed_native_stage' or c['image_status'] in ('incomplete','not_started') for c in checkpoints):
-        if not partial_review_allowed(state, acknowledgement):
+        if not reviewed_design and not partial_review_allowed(state, acknowledgement):
             raise ValueError('Source review is incomplete or source files changed. Rescan, or explicitly acknowledge the displayed incomplete coverage with a manual review note; no partial report was built.')
 
 
@@ -605,8 +623,8 @@ def validate_api_scan_state(payload):
     if not isinstance(payload,dict) or 'scan_state' not in payload:
         raise ValueError('Source scan history is required. Refresh the app and rescan the complete source set before building. Older API clients must send scan_state; no report was built.')
     state=payload['scan_state']
-    validate_scan_state(state, payload.get('scan_acknowledgement'))
-    has_evidence=any(payload.get(key) for key in ('records','tags','diffusers','image_review','image_coverage'))
+    validate_scan_state(state, payload.get('scan_acknowledgement'), source_review_approved(payload))
+    has_evidence=any(payload.get(key) for key in ('records','tags','diffusers','exhaust_outlets','image_review','image_coverage'))
     if state['status']=='not_scanned' and (has_evidence or state['source_checkpoints']):
         raise ValueError('Unscanned state is only valid for a blank worksheet pack. Rescan source documents before building extracted equipment.')
     if state['status']=='review_required' and has_evidence and not state['source_checkpoints']:
@@ -619,7 +637,7 @@ def validate_api_scan_state(payload):
 
 def validate_payload(payload):
     if not isinstance(payload,dict):raise ValueError('Invalid request')
-    if 'scan_state' in payload:validate_scan_state(payload['scan_state'], payload.get('scan_acknowledgement'))
+    if 'scan_state' in payload:validate_scan_state(payload['scan_state'], payload.get('scan_acknowledgement'), source_review_approved(payload))
     if not str(payload.get('project','')).strip():raise ValueError('Project name is required')
     if len(str(payload.get('project','')))>180:raise ValueError('Project name too long')
     if len(str(payload.get('location','')))>180:raise ValueError('Location too long')
@@ -627,13 +645,16 @@ def validate_payload(payload):
     if payload.get('layout','individual') not in ('individual','grouped'):raise ValueError('Unknown report layout')
     selected=payload.get('templates',[])
     if not isinstance(selected,list) or not selected or any(not isinstance(t,str) for t in selected) or len(selected)!=len(set(selected)) or any(t not in LOOKUP for t in selected):raise ValueError('Choose valid, unique templates')
+    if 'Exhaust Grilles.xlsx.xlsx' in selected:raise ValueError('Use the original Exhaust Grills worksheet. The older grille-named pack file contains a fan form.')
     records=payload.get('records',[])
     if not isinstance(records,list) or len(records)>MAX_RECORDS:raise ValueError('Invalid review records')
+    linked_errors=component_errors(payload)
+    if linked_errors:raise ValueError('; '.join(linked_errors))
     seen=set()
     for r in records:
         if not isinstance(r,dict):raise ValueError('Invalid equipment record')
-        tag=canonical_tag(str(r.get('tag','')))
-        if not REVIEW_TAGS.fullmatch(tag) or tag in seen:raise ValueError('Invalid or duplicate equipment tag: '+tag)
+        tag=r['tag'] if is_component(r) else canonical_tag(str(r.get('tag','')))
+        if (not is_component(r) and not REVIEW_TAGS.fullmatch(tag)) or tag in seen:raise ValueError('Invalid or duplicate equipment tag: '+tag)
         seen.add(tag)
         if str(r.get('status','UNVERIFIED')) not in ('UNVERIFIED','VERIFIED','EXCLUDED'):raise ValueError('Invalid review status')
         if 'template' in r and (not isinstance(r['template'],str) or r['template'] and r['template'] not in UNIT_FORMS):raise ValueError(f'{tag}: unknown unit report form')
@@ -661,17 +682,28 @@ def validate_payload(payload):
             raise ValueError(f'{tag}: heating type must be ELECTRIC, GAS, or HOT WATER')
         if r.get('heater_phase') not in (None,'') and float(r['heater_phase']) not in (1,3):
             raise ValueError(f'{tag}: heater phase must be 1 or 3')
+        if r.get('motor_phase') not in (None,'') and (isinstance(r['motor_phase'],bool) or float(r['motor_phase']) not in (1,3)):
+            raise ValueError(f'{tag}: motor phase must be 1 or 3')
         if r.get('heater_stages') not in (None,'') and (float(r['heater_stages'])<1 or not float(r['heater_stages']).is_integer()):
             raise ValueError(f'{tag}: heater stages must be a positive integer')
         if r.get('osa_min_cfm') not in (None,''):
             if unit_form(r)!='Air Moving Equipment.xlsx':raise ValueError(f'{tag}: minimum outside air requires an air-moving form')
             if r.get('osa_cfm') in (None,'') or float(r['osa_min_cfm'])>float(r['osa_cfm']):raise ValueError(f'{tag}: minimum outside air must not exceed maximum outside air')
         if r.get('design_cfm') not in (None,'') and r.get('osa_cfm') not in (None,'') and float(r['osa_cfm'])>float(r['design_cfm']):raise ValueError(f'{tag}: outside-air CFM exceeds total design CFM')
+    validate_inventory(records)
+    path_errors=air_path_errors(payload)
+    if path_errors:raise ValueError('; '.join(path_errors))
     outlets=payload.get('diffusers',[])
     if not isinstance(outlets,list) or len(outlets)>500:raise ValueError('Invalid supply outlets')
+    from abp_outlet_instances import outlet_instance_errors
+    instance_errors=outlet_instance_errors(outlets)
+    if instance_errors:raise ValueError('; '.join(instance_errors))
+    if any(isinstance(item,dict) and item.get('include') is not False for item in outlets) and 'Supply Diffusers.xlsx' not in selected:
+        raise ValueError('Include the Supply Diffusers worksheet for the included outlets')
     for item in outlets:
         if not isinstance(item,dict):raise ValueError('Invalid supply outlet')
         if 'include' in item and not isinstance(item['include'],bool):raise ValueError('Invalid outlet inclusion choice')
+        if 'exclusion_note' in item and (not isinstance(item['exclusion_note'],str) or len(item['exclusion_note'])>500):raise ValueError('Invalid outlet exclusion reason')
         cfm=item.get('design_cfm')
         if cfm not in (None,''):
             try:n=float(cfm)
@@ -680,6 +712,8 @@ def validate_payload(payload):
         for key in ('type','size','system','location','source','reference','evidence'):
             if item.get(key) not in (None,'') and (not isinstance(item.get(key),str) or len(item.get(key))>240):
                 raise ValueError('Invalid supply outlet text')
+    grille_errors=exhaust_errors(payload)
+    if grille_errors:raise ValueError('; '.join(grille_errors))
 
 def populate_equipment(wb,records,selected):
     """Only verified records get populated. Original worksheet cells are mapped by their actual labels."""
@@ -770,8 +804,9 @@ def build(payload):
     if not isinstance(selected,list) or not selected:raise ValueError('Choose at least one template')
     if any(t not in LOOKUP for t in selected):raise ValueError('Unknown template selection')
     wb=Workbook();wb.remove(wb.active)
-    records=sorted([{**r,'tag':canonical_tag(r['tag'])} for r in payload.get('records',[])],key=lambda r:[int(t) if t.isdigit() else t for t in re.split(r'(\d+)',r['tag'])])
+    records=sorted([{**r,'tag':r['tag'] if is_component(r) else canonical_tag(r['tag'])} for r in payload.get('records',[])],key=lambda r:[int(t) if t.isdigit() else t for t in re.split(r'(\d+)',r['tag'])])
     if not isinstance(records,list):raise ValueError('Invalid review records')
+    records=expand_instances(records)
     requested=[name for name in selected if not banned_initial_template(name)]
     equipment=[]
     for name in requested:
@@ -789,7 +824,7 @@ def build(payload):
         for title in set(wb.sheetnames)-before:reset_measurements(wb[title])
     for name in OFFICE_FRONT:
         if name in LOOKUP:add_fresh(name)
-    verified_air=any(isinstance(r,dict) and r.get('status')=='VERIFIED' and unit_form(r)=='Air Moving Equipment.xlsx' for r in records)
+    verified_air=any(isinstance(r,dict) and r.get('status')=='VERIFIED' and not is_component(r) and unit_form(r)=='Air Moving Equipment.xlsx' for r in records)
     for name in equipment:
         if name in UNIT_FORMS and any(isinstance(r,dict) and r.get('status')=='VERIFIED' and unit_form(r)==name for r in records):continue
         if name in ('Coil DX GAS HT.xlsx','COIL DX HP ELE.xlsx','Coil WTR CLG WTR HT.xlsx') and verified_air:continue
@@ -799,8 +834,9 @@ def build(payload):
     populate_support(wb,records,support,LOOKUP,add_template,reset_measurements,sheet_name)
     populate_equipment(wb,records,equipment)
     populate_diffusers(wb,payload.get('diffusers') or [])
+    populate_exhaust(wb,payload.get('exhaust_outlets') or [],LOOKUP,add_template,reset_measurements,excel_safe)
     prepare_documentation(wb,excel_safe(project),excel_safe(str(payload.get('location',''))),support)
-    disclosure=partial_review_lines(payload.get('scan_state') or {},payload.get('scan_acknowledgement'))
+    disclosure=[] if source_review_approved(payload) else partial_review_lines(payload.get('scan_state') or {},payload.get('scan_acknowledgement'))
     if disclosure:
         note_sheets=[ws for ws in wb if getattr(ws,'_template_file',None)=='Notes.xlsx']
         if not note_sheets:raise ValueError('The original Notes form is required for partial-review disclosure')
@@ -895,7 +931,7 @@ window.addEventListener('DOMContentLoaded',()=>{
  $('inspect-reference').onclick=async()=>{resetReference();$('inspect-reference').disabled=true;$('reference-summary').textContent='Checking workbook layouts and equipment…';try{const file=$('reference-file').files[0],form=referenceForm();const r=await fetch('/api/reference/inspect',{method:'POST',body:form});const info=await readApiJson(r);if(file!==$('reference-file').files[0])return;inspectedReference=file;referenceEntryCount=info.units.length;$('reference-summary').textContent=info.sheets.length+' report sheets: '+info.sheets.join(', ')+'. '+info.units.length+' equipment entries: '+info.units.map(x=>x.tag).join(', ')+'. '+info.note}catch(e){$('reference-summary').textContent=e.message}finally{$('inspect-reference').disabled=false;updateWorkspace()}};
 });
 
-let sourceFiles=[],tags=[],records=[],diffusers=[];const $=id=>document.getElementById(id);
+let sourceFiles=[],tags=[],records=[],diffusers=[],airPaths=[],exhaustOutlets=[];const $=id=>document.getElementById(id);
 function renderOutlets(){
  const box=$('outlets');if(!box)return;box.replaceChildren();if(!diffusers.length)return;
  const title=document.createElement('h3');title.textContent='Review outlet candidates';box.append(title);
@@ -912,7 +948,7 @@ $('files').onchange=()=>{addSources(Array.from($('files').files));$('files').val
 for(const event of ['dragenter','dragover'])$('source-drop-zone').addEventListener(event,e=>{e.preventDefault();e.dataTransfer.dropEffect='copy'});
 $('source-drop-zone').addEventListener('drop',e=>{e.preventDefault();addSources(Array.from(e.dataTransfer.files))});
 renderSourceFiles();
-$('scan').onclick=async()=>{if(!templatesReady){$('scanstatus').textContent=templateError||'Wait for report worksheets to load.';return}let files=sourceFiles;if(!files.length){$('scanstatus').textContent='Choose files first';return}let form=new FormData();for(let f of files)form.append('files',f);$('scan').disabled=true;$('files').disabled=true;$('buildmethod').disabled=true;$('generate').disabled=true;$('loadproject').disabled=true;$('scanstatus').textContent='Reading files...';try{let r=await fetch('/api/scan',{method:'POST',body:form});let data=await readApiJson(r);if((records.length||diffusers.length||imageReview.length)&&!confirm((data.scan_status==='incomplete'?'This scan is incomplete. ':'')+'Replace your current review with these new scan results? Cancel keeps your current review.')){$('scanstatus').textContent=scanStateNotice()+'New scan '+(data.scan_status||'unknown')+'. Your current review was kept. '+(data.warnings||[]).join(' | ');return}scanState=validateScanState({status:data.scan_status||'unknown',complete_takeoff:false,source_checkpoints:data.source_checkpoints||[],warnings:data.warnings||[]});renderScanReview();tags=data.tags||[];records=(data.records||[]).map(row=>{const copy={...row};applyProposed(copy);return copy});diffusers=Array.isArray(data.diffusers)?data.diffusers:[];imageReview=Array.isArray(data.image_review)?data.image_review:[];imageCoverage=Array.isArray(data.image_coverage)?data.image_coverage:[];imageCoverageTruncated=data.image_coverage_truncated===true;renderImageCoverage();renderImageReview();$('scanstatus').textContent=(data.scan_status==='incomplete'?'SCAN INCOMPLETE. Successful source results preserved. ':'')+scanCandidateSummary(records,diffusers,imageReview)+'Review the suggested design values and verify each unit before you build the report.'+(data.warnings.length?' Warnings: '+data.warnings.join(' | '):'');$('tags').innerHTML='';renderReview();renderOutlets();let recommendation=await readApiJson(await fetch('/api/suggest',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({tags,signals:data.signals||[],sparse:data.sparse===true})}));if(!Array.isArray(recommendation.recommended))throw Error('Template recommendations unavailable');let chosen=new Set(recommendation.recommended.map(x=>x.name));const assigned=new Set(records.map(r=>r.template).filter(Boolean));if(assigned.size){for(const name of Object.keys(unitForms))if(!assigned.has(name))chosen.delete(name)}for(const name of assigned)chosen.add(name);applyCompanionChoices(chosen,records);document.querySelectorAll('.template input').forEach(x=>x.checked=chosen.has(x.value));let safe=x=>String(x||'').replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('>','&gt;');$('template-recommendations').innerHTML='<strong>Recommended '+recommendation.recommended.length+' ABP templates</strong><p>Selected automatically based on the uploaded documents. Review and change any checked boxes before building your report.</p>'+recommendation.recommended.map(x=>'<div class="recommend-item"><span>'+safe(worksheetLabel(x.name))+(x.review?' <em>Review type</em>':'')+'</span><small>'+safe(x.reason)+'</small></div>').join('')+'<p class="muted">'+safe(recommendation.review_note)+'</p>'}catch(e){$('scanstatus').textContent=scanStateNotice()+e.message}finally{$('scan').disabled=false;$('files').disabled=false;$('buildmethod').disabled=false;$('generate').disabled=false;$('loadproject').disabled=false;updateWorkspace()}};
+$('scan').onclick=async()=>{if(!templatesReady){$('scanstatus').textContent=templateError||'Wait for report worksheets to load.';return}let files=sourceFiles;if(!files.length){$('scanstatus').textContent='Choose files first';return}let form=new FormData();for(let f of files)form.append('files',f);$('scan').disabled=true;$('files').disabled=true;$('buildmethod').disabled=true;$('generate').disabled=true;$('loadproject').disabled=true;$('scanstatus').textContent='Reading files...';try{let r=await fetch('/api/scan',{method:'POST',body:form});let data=await readApiJson(r);if((records.length||diffusers.length||exhaustOutlets.length||imageReview.length)&&!confirm((data.scan_status==='incomplete'?'This scan is incomplete. ':'')+'Replace your current review with these new scan results? Cancel keeps your current review.')){$('scanstatus').textContent=scanStateNotice()+'New scan '+(data.scan_status||'unknown')+'. Your current review was kept. '+(data.warnings||[]).join(' | ');return}scanState=validateScanState({status:data.scan_status||'unknown',complete_takeoff:false,source_checkpoints:data.source_checkpoints||[],warnings:data.warnings||[]});renderScanReview();tags=data.tags||[];records=(data.records||[]).map(row=>{const copy={...row};applyProposed(copy);return copy});diffusers=Array.isArray(data.diffusers)?data.diffusers:[];airPaths=data.air_paths||[];exhaustOutlets=data.exhaust_outlets||[];imageReview=Array.isArray(data.image_review)?data.image_review:[];imageCoverage=Array.isArray(data.image_coverage)?data.image_coverage:[];imageCoverageTruncated=data.image_coverage_truncated===true;renderImageCoverage();renderImageReview();$('scanstatus').textContent=(data.scan_status==='incomplete'?'SCAN INCOMPLETE. Successful source results preserved. ':'')+scanCandidateSummary(records,diffusers,imageReview)+'Review the suggested design values and verify each unit before you build the report.'+(data.warnings.length?' Warnings: '+data.warnings.join(' | '):'');$('tags').innerHTML='';renderReview();renderOutlets();let recommendation=await readApiJson(await fetch('/api/suggest',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({tags,signals:data.signals||[],sparse:data.sparse===true})}));if(!Array.isArray(recommendation.recommended))throw Error('Template recommendations unavailable');let chosen=new Set(recommendation.recommended.map(x=>x.name));const assigned=new Set(records.map(r=>r.template).filter(Boolean));if(assigned.size){for(const name of Object.keys(unitForms))if(!assigned.has(name))chosen.delete(name)}for(const name of assigned)chosen.add(name);applyCompanionChoices(chosen,records);document.querySelectorAll('.template input').forEach(x=>x.checked=chosen.has(x.value));let safe=x=>String(x||'').replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('>','&gt;');$('template-recommendations').innerHTML='<strong>Recommended '+recommendation.recommended.length+' ABP templates</strong><p>Selected automatically based on the uploaded documents. Review and change any checked boxes before building your report.</p>'+recommendation.recommended.map(x=>'<div class="recommend-item"><span>'+safe(worksheetLabel(x.name))+(x.review?' <em>Review type</em>':'')+'</span><small>'+safe(x.reason)+'</small></div>').join('')+'<p class="muted">'+safe(recommendation.review_note)+'</p>'}catch(e){$('scanstatus').textContent=scanStateNotice()+e.message}finally{$('scan').disabled=false;$('files').disabled=false;$('buildmethod').disabled=false;$('generate').disabled=false;$('loadproject').disabled=false;updateWorkspace()}};
 
 const unitForms=__UNIT_FORMS_JSON__;
 function defaultUnitForm(tag, record){if(/^EUH[- ]?[0-9]/.test(tag))return 'Unit Heater ELE.xlsx';if(/^GUH[- ]?[0-9]/.test(tag))return 'Unit Heater GAS.xlsx';if(/^(UH|CUH)[- ]?[0-9]/.test(tag)){const kind=String(record?.heating_type||record?.text_proposed?.heating_type||'').trim().toUpperCase();return ({ELECTRIC:'Unit Heater ELE.xlsx',GAS:'Unit Heater GAS.xlsx','HOT WATER':'Unit Heater WTR.xlsx'})[kind]||''}const heat=record&&(record.heating_input_btu??record.proposed?.heating_input_btu);if(/^(DOAS)[- ]?[0-9]/.test(tag))return (heat!==undefined&&heat!==null&&heat!=='')?'Fan Coil Units DX GAS.xlsx':'Fan Coil Units DX.xlsx';if(/^(PAHU|PU|AHU|RTU|OAU|MAU|AC)[- ]?[0-9]/.test(tag))return 'Air Moving Equipment.xlsx';if(/^(EF|KEF|TEF|CEF|SEF)[- ]?[0-9]/.test(tag))return 'Exhaust Fans _Std._.xlsx';if(/^(VRF|SSAU|MSAH)[- ]?[0-9]/.test(tag))return 'Fan Coil Units DX.xlsx';if(/^(?:KH|HD)[- ]?[0-9]/.test(tag))return 'Kitchen Hood.xlsx';return ''}
@@ -920,8 +956,8 @@ function applyProposed(record){record.status='UNVERIFIED';for(const [field,value
 function renderReview(){
  if(!records.length){$('review').innerHTML='<p class="empty-review">No equipment to review yet. Scan your project documents to get started.</p>';return}
  const safe=x=>String(x??'').replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('"','&quot;');
- $('review').innerHTML='<p>Review design candidates against this job’s sources, choose a unit form, then mark the record Verified. Past field measurements are never new design values. Equipment shares its applicable worksheet tab. Existing multi-unit spaces are filled first; additional forms continue below. Template designs and calculation logic are preserved; copied formulas follow their page. The standard single-OSA form uses minimum OSA when supplied; maximum OSA stays in the review log and traverse targets. Calculated template cells are never overwritten. Supporting coil, diffuser and traverse worksheets are selected below.</p><div class="review-scroll"><table class="review-table"><thead><tr><th>Tag</th><th>Unit form</th><th>Design CFM</th><th>OSA max / single CFM</th><th>OSA min CFM</th><th>ESP</th><th>Motor HP</th><th>Design GPM</th><th>Review</th><th>Design candidates</th><th>Source</th></tr></thead><tbody>'+records.map((r,i)=>`<tr><td>${safe(r.tag)}</td><td><select aria-label="${safe(r.tag)} report form" data-form="${i}"><option value="">Choose a unit form</option>${Object.keys(unitForms).map(name=>`<option value="${safe(name)}">${safe(worksheetLabel(name))}</option>`).join('')}</select></td>${['design_cfm','osa_cfm','osa_min_cfm','esp','motor_hp','design_gpm'].map(k=>`<td><input aria-label="${safe(r.tag+' '+k)}" type="number" min="0" step="any" data-row="${i}" data-field="${k}" value="${safe(r[k])}"></td>`).join('')}<td><select aria-label="${safe(r.tag)} verification" data-status="${i}"><option value="UNVERIFIED">Unverified</option><option value="VERIFIED">Verified</option><option value="EXCLUDED">Excluded</option></select></td><td>${(r.candidates||[]).length?`<button type="button" data-candidates="${i}">Use undisputed candidates</button><details><summary>${r.candidates.length} source entries</summary>${r.candidates.map(c=>`<p>${safe(Object.entries(c.values).map(([k,v])=>k+': '+v).join(', '))}<br><small>${safe(c.source)} · ${safe(c.reference)}</small></p>`).join('')}</details>`:'No labeled design values found'}${(r.flags||[]).length?`<p class="warn">${r.flags.map(safe).join('<br>')}</p>`:''}</td><td>${safe(r.source)} · ${safe(r.reference)}</td></tr>`).join('')+'</tbody></table></div><p id="candidate-notice" role="status"></p>';
- $('review').insertAdjacentHTML('beforeend','<details><summary>Reviewed submittal details and coil design</summary>'+records.map((r,i)=>`<fieldset><legend>${safe(r.tag)}</legend>${r.template==='Air Moving Equipment.xlsx'?`<label>Companion coil form<select data-coil="${i}"><option value="__selected__">Use the single selected coil worksheet</option><option value="">No companion coil form</option><option value="Coil DX GAS HT.xlsx">DX / Gas</option><option value="COIL DX HP ELE.xlsx">DX / Heat pump / Electric</option><option value="Coil WTR CLG WTR HT.xlsx">Water cooling / heating</option></select></label>`:''}<div class="grid">${reviewTextFields.map(k=>`<label>${safe(fieldLabel(k))}<input type="text" maxlength="120" aria-label="${safe(r.tag+' '+k)}" data-text-row="${i}" data-text-field="${k}" value="${safe(r[k])}"></label>`).join('')}${reviewNumericFields.filter(k=>!['design_cfm','osa_cfm','osa_min_cfm','esp','motor_hp','design_gpm'].includes(k)).map(k=>`<label>${safe(fieldLabel(k))}<input type="number" min="0" step="any" aria-label="${safe(r.tag+' '+k)}" data-row="${i}" data-field="${k}" value="${safe(r[k])}"></label>`).join('')}</div></fieldset>`).join('')+'</details>');
+ $('review').innerHTML='<p>Review design candidates against this job’s sources, choose a unit form, then mark the record Verified. Past field measurements are never new design values. Equipment shares its applicable worksheet tab. Existing multi-unit spaces are filled first; additional forms continue below. Template designs and calculation logic are preserved; copied formulas follow their page. The standard single-OSA form uses minimum OSA when supplied; maximum OSA stays in the review log and traverse targets. Calculated template cells are never overwritten. Supporting coil, diffuser and traverse worksheets are selected below.</p><div class="review-scroll"><table class="review-table"><thead><tr><th>Tag</th><th>Unit form</th><th>Design CFM</th><th>OSA max / single CFM</th><th>OSA min CFM</th><th>ESP</th><th>Motor HP</th><th>Design GPM</th><th>Review</th><th>Design candidates</th><th>Source</th></tr></thead><tbody>'+records.map((r,i)=>`<tr><td>${safe(r.tag)}</td><td><select aria-label="${safe(r.tag)} report form" data-form="${i}"><option value="">Choose a unit form</option>${Object.keys(unitForms).map(name=>`<option value="${safe(name)}">${safe(worksheetLabel(name))}</option>`).join('')}</select></td>${['design_cfm','osa_cfm','osa_min_cfm','esp','motor_hp','design_gpm'].map(k=>`<td><input aria-label="${safe(r.tag+' '+k)}" type="number" min="0" step="any" data-row="${i}" data-field="${k}" ${r.component_kind==='integral_supply'&&!motorFields.includes(k)?'disabled':''} value="${safe(r[k])}"></td>`).join('')}<td><select aria-label="${safe(r.tag)} verification" data-status="${i}"><option value="UNVERIFIED">Unverified</option><option value="VERIFIED">Verified</option><option value="EXCLUDED">Excluded</option></select></td><td>${(r.candidates||[]).length?`<button type="button" data-candidates="${i}">Use undisputed candidates</button><details><summary>${r.candidates.length} source entries</summary>${r.candidates.map(c=>`<p>${safe(Object.entries(c.values).map(([k,v])=>k+': '+v).join(', '))}<br><small>${safe(c.source)} · ${safe(c.reference)}</small></p>`).join('')}</details>`:'No labeled design values found'}${(r.flags||[]).length?`<p class="warn">${r.flags.map(safe).join('<br>')}</p>`:''}</td><td>${safe(r.source)} · ${safe(r.reference)}</td></tr>`).join('')+'</tbody></table></div><p id="candidate-notice" role="status"></p>';
+ $('review').insertAdjacentHTML('beforeend','<details><summary>Reviewed submittal details and coil design</summary>'+records.map((r,i)=>`<fieldset><legend>${safe(r.tag)}</legend>${r.template==='Air Moving Equipment.xlsx'&&!isEquipmentComponent(r)?`<label>Companion coil form<select data-coil="${i}"><option value="__selected__">Use the single selected coil worksheet</option><option value="">No companion coil form</option><option value="Coil DX GAS HT.xlsx">DX / Gas</option><option value="COIL DX HP ELE.xlsx">DX / Heat pump / Electric</option><option value="Coil WTR CLG WTR HT.xlsx">Water cooling / heating</option></select></label>`:''}<div class="grid">${reviewTextFields.map(k=>`<label>${safe(fieldLabel(k))}<input type="text" maxlength="120" aria-label="${safe(r.tag+' '+k)}" data-text-row="${i}" data-text-field="${k}" value="${safe(r[k])}"></label>`).join('')}${reviewNumericFields.filter(k=>!['design_cfm','osa_cfm','osa_min_cfm','esp','motor_hp','design_gpm'].includes(k)&&(r.component_kind!=='integral_supply'||motorFields.includes(k))).map(k=>`<label>${safe(fieldLabel(k))}<input type="number" min="0" step="any" aria-label="${safe(r.tag+' '+k)}" data-row="${i}" data-field="${k}" ${r.component_kind==='integral_supply'&&!motorFields.includes(k)?'disabled':''} value="${safe(r[k])}"></label>`).join('')}</div></fieldset>`).join('')+'</details>');
  document.querySelectorAll('[data-coil]').forEach(el=>{const r=records[+el.dataset.coil];el.value=r.coil_template??'__selected__';el.onchange=()=>{if(el.value==='__selected__')delete r.coil_template;else r.coil_template=el.value;r.status='UNVERIFIED';document.querySelectorAll('.template input').forEach(box=>{if(box.value===el.value)box.checked=true});renderReview();updateWorkspace()}});
  document.querySelectorAll('[data-text-row]').forEach(el=>el.oninput=()=>{records[+el.dataset.textRow][el.dataset.textField]=el.value;records[+el.dataset.textRow].status='UNVERIFIED';document.querySelector('[data-status="'+el.dataset.textRow+'"]').value='UNVERIFIED'});
  document.querySelectorAll('[data-row]').forEach(el=>el.oninput=()=>{records[+el.dataset.row][el.dataset.field]=el.value;records[+el.dataset.row].status='UNVERIFIED';document.querySelector('[data-status="'+el.dataset.row+'"]').value='UNVERIFIED'});
@@ -954,7 +990,7 @@ function renderImageReview(){
   const values=document.createElement('p');values.textContent=Object.entries(candidate.review_values||{}).map(([k,v])=>fieldLabel(k)+': '+v).join(' · ')||'No reliable design value. Enter it manually after checking the source.';panel.append(values);
   const label=document.createElement('label'),confirmation=document.createElement('input');confirmation.type='checkbox';label.append(confirmation,document.createTextNode(' I checked this candidate against the original source and reviewed duplicates.'));panel.append(label);
   const add=document.createElement('button');add.type='button';add.textContent=candidate.accepted?'Added to review':'Add checked candidate to review';add.disabled=!!candidate.accepted;panel.append(add);
-  const existingOutlet=candidate.kind==='diffuser'&&(candidate.native_outlet_match===true||candidate.native_outlet_ambiguous===true);
+  const existingOutlet=candidate.kind==='diffuser'&&(candidate.native_outlet_match===true||candidate.native_outlet_ambiguous===true||diffusers.some(o=>samePhysicalOutlet(o,outletFromImage(candidate))));
   if(existingOutlet){add.disabled=true;add.textContent='Review existing outlet row';}
   if(candidate.kind==='kitchen_hood'&&!savedTagPattern.test(candidate.tag)){add.disabled=true;add.textContent='Manual preparation needed for this tag format';}
   const status=document.createElement('p');status.setAttribute('role','status');panel.append(status);
@@ -967,7 +1003,8 @@ function renderImageReview(){
     if(!row){if(records.length>=500)throw Error('Equipment review limit reached.');row={tag:candidate.tag,template:(typeof unitForms!=='undefined'&&Object.hasOwn(unitForms,candidate.template)?candidate.template:defaultUnitForm(candidate.tag)),source:candidate.source,reference:'page '+candidate.page,status:'UNVERIFIED',candidates:[]};records.push(row);}
     const values={};for(const [key,value] of Object.entries(candidate.review_values||{}))if(reviewNumericFields.includes(key))values[key]=value;
     row.candidates??=[];if(row.candidates.length>=30)throw Error('Source candidate limit reached; compare this page manually.');
-    row.candidates.push({source:candidate.source,reference:'page '+candidate.page,evidence:'Source-confirmed image schedule; still requires equipment verification.',basis:'MANUAL_IMAGE_REVIEW',values});
+    row.candidates.push({source:candidate.source,reference:'page '+candidate.page,evidence:'Source-confirmed image schedule; still requires equipment verification.',basis:'MANUAL_IMAGE_REVIEW',values,text:candidate.review_text||{},field_evidence:candidate.field_evidence||{}});
+    for(const key of reviewTextFields)if(candidate.review_text?.[key]&&(!row[key]||row[key]===''))row[key]=candidate.review_text[key];
     for(const [key,value] of Object.entries(values))if(row[key]===undefined||row[key]===null||row[key]==='')row[key]=value;
     row.status='UNVERIFIED';row.flags??=[];row.flags.push('Checked image candidate added. Existing nonblank inputs were retained; resolve any conflicts before verification.');
     tags=records.map(r=>r.tag);document.querySelectorAll('.template input').forEach(el=>{if(el.value===row.template)el.checked=true});
@@ -979,17 +1016,17 @@ function renderImageReview(){
     document.querySelectorAll('.template input').forEach(el=>{if(el.value==='Kitchen Hood.xlsx')el.checked=true});
    }else{
     if(diffusers.length>=500)throw Error('Outlet review limit reached.');
-    diffusers.push({include:false,type:candidate.type||'',size:candidate.size||'',design_cfm:candidate.review_values?.design_cfm??null,system:'',location:'',source:candidate.source,reference:'page '+candidate.page,evidence:candidate.evidence_text||''});
+    diffusers.push(outletFromImage(candidate));
    }
    candidate.accepted=true;renderReview();renderOutlets();renderImageReview();updateWorkspace();
   }catch(error){status.textContent=error.message}};
   box.append(panel);
  });
 }
-function projectPayload(){return {scan_state:scanState,scan_acknowledgement:currentScanAcknowledgement(),project:$('project').value,location:$('location').value,standard:$('standard').value,layout:'individual',tags,records,diffusers,image_review:imageReview,image_coverage:imageCoverage,image_coverage_truncated:imageCoverageTruncated,templates:[...document.querySelectorAll('.template input:checked')].map(x=>x.value)}}
+function projectPayload(){return {source_review:humanSourceReview,human_page_reviews:humanPageReviews,human_review_note:humanReviewNote,scan_state:scanState,scan_acknowledgement:currentScanAcknowledgement(),project:$('project').value,location:$('location').value,standard:$('standard').value,layout:'individual',tags,records,diffusers,air_paths:airPaths,exhaust_outlets:exhaustOutlets,image_review:imageReview,image_coverage:imageCoverage,image_coverage_truncated:imageCoverageTruncated,templates:[...document.querySelectorAll('.template input:checked')].map(x=>x.value)}}
 $('saveproject').onclick=()=>{try{const data=serializeSavedReview({format:'ABP-PREFIELD-REVIEW',version:1,...projectPayload()});const url=URL.createObjectURL(new Blob([data],{type:'application/json'}));const a=document.createElement('a');a.href=url;a.download='ABP_Project_Review.json';a.click();setTimeout(()=>URL.revokeObjectURL(url),10000)}catch(error){$('status').textContent=error.message}};
-$('loadproject').onchange=async ev=>{try{const f=ev.target.files[0];if(!f)return;assertSavedReviewSize(f.size);if(!templatesReady)throw Error('Wait for report worksheets to load before restoring a review.');const data=validateSavedReview(await parseSavedReviewFile(f),[...document.querySelectorAll('.template input')].map(x=>x.value),unitForms,savedTagPattern);scanState=validateScanState(data.scan_state);renderScanReview();$('scanstatus').textContent=scanStateNotice();$('project').value=String(data.project||'');$('location').value=String(data.location||'');$('standard').value=data.standard==='USACE'?'USACE':'Commercial';records=data.records;tags=records.map(r=>r.tag);diffusers=Array.isArray(data.diffusers)?data.diffusers:[];imageReview=Array.isArray(data.image_review)?data.image_review:[];imageCoverage=Array.isArray(data.image_coverage)?data.image_coverage:[];imageCoverageTruncated=data.image_coverage_truncated===true;renderImageCoverage();renderImageReview();document.querySelectorAll('.template input').forEach(x=>x.checked=data.templates.includes(x.value));renderReview();renderOutlets();$('status').textContent='Saved review restored. Recheck verification and source revisions before building your report.'}catch(e){$('status').textContent=e.message}};
-$('generate').onclick=async()=>{if($('buildmethod').value==='reference'){await generateReference();return}if(!templatesReady){$('status').textContent=templateError||'Wait for report worksheets to load.';return}let payload=projectPayload();if(scanBuildBlocked(scanState,payload.scan_acknowledgement)){$('status').textContent=scanStateNotice()+'Save your review and rescan changed sources, or review incomplete coverage and enter a note and acknowledgment below the scan results.';return}if(!payload.project.trim()){$('status').textContent='Add a project name before building your report.';$('project').focus();return}if(!payload.templates.length){$('status').textContent='Select at least one report worksheet.';$('template-panel').scrollIntoView();return}$('generate').disabled=true;$('generate').textContent='Building report…';$('generate').setAttribute('aria-busy','true');$('status').textContent='Building your report...';try{let r=await fetch('/api/build',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});if(!r.ok)await readApiJson(r);let blob=await r.blob(),url=URL.createObjectURL(blob),a=document.createElement('a');a.href=url;a.download=(payload.project.replace(/[^a-z0-9_-]+/gi,'_')||'ABP')+'_PreField_TAB.xlsx';a.click();setTimeout(()=>URL.revokeObjectURL(url),10000);$('status').textContent=(payload.scan_acknowledgement?'Reviewed partial report built. SOURCE SCAN REMAINS INCOMPLETE. See Notes for omissions. ':'Report built. ')+reviewCoverage(payload.records,payload.diffusers)}catch(e){$('status').textContent=e.message}finally{$('generate').disabled=false;$('generate').textContent='Build report';$('generate').removeAttribute('aria-busy')}};
+$('loadproject').onchange=async ev=>{try{const f=ev.target.files[0];if(!f)return;assertSavedReviewSize(f.size);if(!templatesReady)throw Error('Wait for report worksheets to load before restoring a review.');const data=validateSavedReview(await parseSavedReviewFile(f),[...document.querySelectorAll('.template input')].map(x=>x.value),unitForms,savedTagPattern);humanSourceReview=null;humanReviewNote=data.human_review_note||'';humanPageReviews=Array.isArray(data.human_page_reviews)?data.human_page_reviews:[];scanState=validateScanState(data.scan_state);renderScanReview();$('scanstatus').textContent=scanStateNotice();$('project').value=String(data.project||'');$('location').value=String(data.location||'');$('standard').value=data.standard==='USACE'?'USACE':'Commercial';records=data.records;tags=records.map(r=>r.tag);diffusers=Array.isArray(data.diffusers)?data.diffusers:[];airPaths=data.air_paths||[];exhaustOutlets=data.exhaust_outlets||[];imageReview=Array.isArray(data.image_review)?data.image_review:[];imageCoverage=Array.isArray(data.image_coverage)?data.image_coverage:[];imageCoverageTruncated=data.image_coverage_truncated===true;renderImageCoverage();renderImageReview();document.querySelectorAll('.template input').forEach(x=>x.checked=data.templates.includes(x.value));renderReview();renderOutlets();$('status').textContent='Saved review restored. Recheck verification and source revisions before building your report. '+(data.template_migration_notice||'')}catch(e){$('status').textContent=e.message}};
+$('generate').onclick=async()=>{if($('buildmethod').value==='reference'){await generateReference();return}if(!templatesReady){$('status').textContent=templateError||'Wait for report worksheets to load.';return}let payload=projectPayload();if(!sourceReviewApproved(payload)&&scanBuildBlocked(scanState,payload.scan_acknowledgement)){$('status').textContent=scanStateNotice()+'Save your review and rescan changed sources, or review incomplete coverage and enter a note and acknowledgment below the scan results.';return}if(!payload.project.trim()){$('status').textContent='Add a project name before building your report.';$('project').focus();return}if(!payload.templates.length){$('status').textContent='Select at least one report worksheet.';$('template-panel').scrollIntoView();return}$('generate').disabled=true;$('generate').textContent='Building report…';$('generate').setAttribute('aria-busy','true');$('status').textContent='Building your report...';try{let r=await fetch('/api/build',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});if(!r.ok)await readApiJson(r);let blob=await r.blob(),url=URL.createObjectURL(blob),a=document.createElement('a');a.href=url;a.download=(payload.project.replace(/[^a-z0-9_-]+/gi,'_')||'ABP')+'_PreField_TAB.xlsx';a.click();setTimeout(()=>URL.revokeObjectURL(url),10000);$('status').textContent=(payload.scan_acknowledgement?'Reviewed partial report built. SOURCE SCAN REMAINS INCOMPLETE. See Notes for omissions. ':'Report built. ')+reviewCoverage(payload.records,payload.diffusers)}catch(e){$('status').textContent=e.message}finally{$('generate').disabled=false;$('generate').textContent='Build report';$('generate').removeAttribute('aria-busy')}};
 
 function updateWorkspace(){
  const reference=$('buildmethod').value==='reference';
@@ -1025,7 +1062,7 @@ DEFAULT_PACK=[item['name'] for item in suggested_templates([],sparse=True)['reco
 PAGE=PAGE.replace('__UNIT_FORMS_JSON__',json.dumps(UNIT_FORMS)).replace('__UI_HELPERS__',(ROOT/'abp_ui.js').read_text(encoding='utf-8')).replace('__TAG_PATTERN__',json.dumps('^(?:'+REVIEW_TAGS.pattern+')$')).replace('__DEFAULT_PACK_JSON__',json.dumps(DEFAULT_PACK))
 PAGE=PAGE.replace('</script></body>','</script><script>'+ (ROOT/'abp_compare.js').read_text(encoding='utf-8') +'\n'+ (ROOT/'abp_workflow.js').read_text(encoding='utf-8') +'</script></body>')
 PAGE_BYTES=PAGE.encode('utf-8')
-TEMPLATE_LIST_BYTES=json.dumps(list(LOOKUP)).encode('utf-8')
+TEMPLATE_LIST_BYTES=json.dumps([name for name in LOOKUP if name!='Exhaust Grilles.xlsx.xlsx']).encode('utf-8')
 # LAN mode is explicitly opt-in. Authenticated session cookies protect the app and API routes.
 LAN_MODE = '--lan' in sys.argv
 ACCESS_PASSWORD = os.environ.get('ABP_ACCESS_PASSWORD', '').strip()
@@ -1034,14 +1071,50 @@ print('ABP auth configuration: '+('password loaded' if ACCESS_PASSWORD else 'PAS
 
 # Stateless HMAC-signed session cookies; changing ABP_ACCESS_PASSWORD revokes existing sessions.
 SESSION_LIFETIME=8*60*60
+LOGIN_FORM_LIFETIME=60*60
 FAILED_LOGINS={}
 LOGIN_LOCK=threading.Lock()
 LOGIN_HTML='''<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Sign in · ABP Report Builder</title><link rel="icon" type="image/png" sizes="32x32" href="/favicon.png"><link rel="icon" href="/favicon.ico" sizes="any"><style>:root{color-scheme:dark;font-family:system-ui,-apple-system,"Segoe UI",sans-serif;color:#f2f6ff;background:#071326}*{box-sizing:border-box}body{margin:0;min-height:100vh;display:grid;place-items:center;padding:22px 15px;background:radial-gradient(ellipse at 10% 20%,#133e78,transparent 45%),radial-gradient(ellipse at 95% 85%,#174c94,transparent 38%),#080f22}.panel{max-width:460px;width:100%;background:linear-gradient(145deg,#1b2a46,#101a30);padding:36px;border:1px solid #506b8c;border-radius:20px;box-shadow:0 25px 80px #0008}.logo{display:block;width:250px;max-width:100%;height:92px;object-fit:contain;padding:10px 16px;background:#fff;border-radius:12px;margin:0 auto 27px}.tag{font-size:11px;font-weight:800;letter-spacing:1.8px;text-transform:uppercase;color:#68c7ff;margin:0 0 10px}h1{margin:0 0 9px;font-size:32px;letter-spacing:-.8px;color:#f5f8ff}p{color:#c1d0e4;font-size:14px;line-height:1.6;margin:0 0 23px}label{display:block;font-weight:700;font-size:13px;color:#edf4ff;margin:16px 0 8px}input{width:100%;min-height:51px;border:1px solid #5d7394;border-radius:10px;font:inherit;padding:12px 14px;background:#182640;color:#fff}input::placeholder{color:#a5b5cf}input:focus{outline:3px solid #248aff50;border-color:#56bdff}button[type=submit]{width:100%;border:1px solid #53aaff;background:linear-gradient(#258cff,#095fca);color:white;border-radius:10px;font-size:15px;font-weight:800;min-height:52px;cursor:pointer;margin-top:25px;box-shadow:0 7px 19px #0757be55}button[type=submit]:hover{background:#258cff}.error{padding:13px;background:#61313d;border:1px solid #bd6a77;color:#ffe3e7;border-radius:9px;font-size:13px;margin:0 0 20px}.note{color:#afc1db;font-size:12px;border-top:1px solid #50617e;margin-top:27px;padding-top:21px;line-height:1.6;text-align:center}@media(max-width:480px){.panel{padding:26px 22px}.logo{width:215px}}</style></head><body><main class="panel"><img class="logo" src="/logo.png" alt="Air Balance Professionals logo"><div class="tag">Secure reporting workspace</div>
 <h1>Welcome back</h1><p>Sign in to build your TAB reports with Air Balance Professionals.</p>
-{{ERROR}}<form action="/login" method="post"><input type="hidden" name="csrf" value="{{CSRF}}"><label for="user">Username</label><input id="user" name="username" autocomplete="username" required autofocus placeholder="Enter your username">
-<label for="pass">Password</label><input id="pass" name="password" type="password" autocomplete="current-password" required placeholder="Enter your password">
-<button type="submit">Sign in to build reports</button></form><div class="note">Access is limited to authorized ABP team members. Contact your administrator for your credentials.</div></main></body></html>'''
+{{ERROR}}<form action="/login" method="post"><input type="hidden" name="csrf" value="{{CSRF}}"><label for="user">Username</label><input id="user" name="username" autocomplete="username" value="abp" readonly>
+<label for="pass">Password</label><input id="pass" name="password" type="password" autocomplete="current-password" required autofocus placeholder="Enter your password">
+<button type="submit">Sign in to build reports</button><div role="status" id="login-status"></div></form><div class="note">Access is limited to authorized ABP team members. Contact your administrator for your credentials.</div></main>
+<script>
+const loginForm=document.querySelector('form');
+const loginToken=loginForm.elements.namedItem('csrf');
+const loginButton=loginForm.querySelector('button');
+const loginStatus=document.getElementById('login-status');
+let renewing=false;
+window.addEventListener('pageshow',()=>{renewing=false;loginButton.disabled=false;});
+loginForm.addEventListener('submit',async event=>{
+ if(renewing){event.preventDefault();return;}
+ const age=Date.now()-Number(loginToken.value.split('.')[0])*1000;
+ if(Number.isFinite(age)&&age>=0&&age<{{RENEW_AFTER_MS}})return;
+ event.preventDefault();
+ renewing=true;loginButton.disabled=true;
+ loginStatus.textContent='Refreshing your sign-in form…';
+ const controller=new AbortController();
+ const timer=setTimeout(()=>controller.abort(),20000);
+ let navigating=false;
+ try{
+  const response=await fetch('/login',{cache:'no-store',mode:'same-origin',credentials:'same-origin',signal:controller.signal});
+  if(!response.ok)throw Error();
+  if(response.redirected&&new URL(response.url).pathname==='/'){location.assign('/');navigating=true;return;}
+  const page=new DOMParser().parseFromString(await response.text(),'text/html');
+  const fresh=page.querySelector('form[action="/login"] input[name="csrf"]');
+  if(!fresh||!fresh.value)throw Error();
+  loginToken.value=fresh.value;
+  loginStatus.textContent='';
+  if(loginForm.reportValidity()){loginForm.submit();navigating=true;}
+ }catch{
+  loginStatus.textContent='The sign-in form could not refresh. Check your connection and select Sign in again.';
+ }finally{
+  clearTimeout(timer);
+  if(!navigating){renewing=false;loginButton.disabled=false;}
+ }
+});
+</script></body></html>'''
 FAVICON_PNG=(ROOT/'04_Company_Branding/favicon.png').read_bytes()
 FAVICON_ICO=(ROOT/'04_Company_Branding/favicon.ico').read_bytes()
 # Static page chrome for unknown browser routes. Report APIs keep their own responses.
@@ -1091,7 +1164,7 @@ p{margin:0 0 28px;color:var(--muted);max-width:460px}
 </body>
 </html>'''
 NOT_FOUND_BYTES=NOT_FOUND_HTML.encode('utf-8')
-from abp_jobs import Jobs
+from abp_jobs import Jobs, JobUnavailable
 JOBS=Jobs(WORK_LOCK,read_sources,build,build_reference,janitor=True)
 class Handler(BaseHTTPRequestHandler):
     def secure_request(self):
@@ -1121,7 +1194,10 @@ class Handler(BaseHTTPRequestHandler):
             for k,v in extra_headers:self.send_header(k,v)
         self.end_headers()
     def login_page(self,error=False):
-        notice=('<div class="error" role="alert">Login form expired or blocked by your browser. Open a fresh sign-in tab and try again.</div>' if error=='session' else '<div class="error" role="alert">Too many attempts. Wait five minutes before trying again.</div>' if error=='limited' else '<div class="error" role="alert">Username or password not accepted. Username is abp; check the current password in Render.</div>') if error else ''
+        messages={'session':'Your sign-in form expired or could not be validated. This form is ready. Enter your password again.',
+                  'limited':'Too many attempts. Wait five minutes before trying again.',
+                  'credentials':'Sign-in details did not match this workspace. Check its ABP password with your administrator.'}
+        notice=f'<div class="error" role="alert">{messages[error]}</div>' if error else ''
         # Signed, short-lived form token avoids cookies being overwritten by another tab.
         stamp=str(int(time.time()))
         nonce=secrets.token_hex(16)
@@ -1129,7 +1205,8 @@ class Handler(BaseHTTPRequestHandler):
         key=hashlib.sha256(('abp-login-csrf-v2:'+ACCESS_PASSWORD).encode()).digest()
         signature=hmac.new(key,payload.encode(),hashlib.sha256).hexdigest()
         csrf=payload+'.'+signature
-        html_page=LOGIN_HTML.replace('{{ERROR}}',notice).replace('{{CSRF}}',csrf)
+        html_page=(LOGIN_HTML.replace('{{ERROR}}',notice).replace('{{CSRF}}',csrf)
+                   .replace('{{RENEW_AFTER_MS}}',str((LOGIN_FORM_LIFETIME-60)*1000)))
         self.respond(html_page.encode(),'text/html; charset=utf-8')
     def valid_login_csrf(self,value):
         if not isinstance(value,str):return False
@@ -1137,7 +1214,7 @@ class Handler(BaseHTTPRequestHandler):
         if not match:return False
         stamp,nonce,signature=match.groups()
         age=time.time()-int(stamp)
-        if not 0<=age<3600:return False
+        if not 0<=age<LOGIN_FORM_LIFETIME:return False
         key=hashlib.sha256(('abp-login-csrf-v2:'+ACCESS_PASSWORD).encode()).digest()
         expected=hmac.new(key,(stamp+'.'+nonce).encode(),hashlib.sha256).hexdigest()
         return secrets.compare_digest(signature,expected)
@@ -1211,14 +1288,15 @@ class Handler(BaseHTTPRequestHandler):
                 elif action=='preview':
                     query=parse_qs(urlsplit(self.path).query);index=int(query.get('source',['-1'])[0]);page=int(query.get('page',['1'])[0])
                     if not 0<=index<len(job['sources']) or Path(job['sources'][index]['file']).suffix!='.pdf':raise ValueError('Select a PDF source')
-                    if not WORK_LOCK.acquire(timeout=1):raise ValueError('Document processing is running. Preview this page when it finishes.')
+                    if not WORK_LOCK.acquire(timeout=1):
+                        self.respond(b'{"error":"Document processing is running. Retry the preview when it finishes.","reason":"processing_busy"}',code=503,extra_headers=[('Retry-After','5')]);return
                     try:
                         from abp_preview import render
                         image=render(job['root']/job['sources'][index]['file'],page)
                     finally:WORK_LOCK.release()
                     self.respond(image,'image/png')
                 else:self.respond(b'{"error":"Job result is not ready"}',code=409)
-            except KeyError:self.respond(b'{"error":"Job expired or server restarted. Your saved browser review is retained; reattach sources to scan again."}',code=404)
+            except JobUnavailable:self.respond(b'{"reason":"job_expired","error":"The temporary job expired or the server restarted."}',code=404)
             except (ValueError,IndexError) as exc:self.respond(json.dumps({'error':str(exc)}).encode(),code=400)
             return
         if path=='/':self.respond(PAGE_BYTES,'text/html; charset=utf-8')
@@ -1279,7 +1357,11 @@ class Handler(BaseHTTPRequestHandler):
                         job=JOBS.create('reference',parts=sources,payload={'project':project,'location':location})
                 elif path=='/api/jobs/scan':
                     with multipart(self.rfile,n,self.headers.get('Content-Type',''),MAX_UPLOAD) as parts:
-                        job=JOBS.create('scan',parts=parts)
+                        identities=[file.read(50_001) for name,filename,file in parts if not filename and name=='recovery_sources']
+                        if len(identities)>1 or any(len(value)>50_000 for value in identities):raise ValueError('Invalid recovery source list')
+                        expected=json.loads(identities[0]) if identities else None
+                        if identities and expected is None:raise ValueError('Recovery source identities are required')
+                        job=JOBS.create('scan',parts=parts,expected_sources=expected)
                 else:
                     if n>8_000_000:raise ValueError('Job request exceeds 8 MB')
                     payload=json.loads(self.rfile.read(n))
@@ -1293,7 +1375,20 @@ class Handler(BaseHTTPRequestHandler):
                         if pages is not None and (not isinstance(pages,list) or not pages or len(pages)>300 or any(type(p)!=int or not 1<=p<=300 for p in pages)):raise ValueError('Select valid page numbers')
                         job=JOBS.create('scan',parent=token,retry={'source_index':index,'page_numbers':pages,'stage':stage})
                 self.respond(json.dumps(job).encode(),code=202)
-            except KeyError:self.respond(b'{"error":"Previous job expired. Reattach sources; your current review is preserved."}',code=404)
+            except JobUnavailable:self.respond(b'{"reason":"job_expired","error":"The previous scan expired. Reattach the original source files to recover your review."}',code=404)
+            except Exception as exc:
+                self.close_connection=True;self.respond(json.dumps({'error':str(exc)}).encode(),code=400)
+            return
+        # Worksheet names are a bounded metadata lookup, not document work.
+        # A following queued scan must not prevent the previous job finishing its UI.
+        if path=='/api/suggest':
+            try:
+                self.connection.settimeout(30)
+                n=int(self.headers.get('Content-Length','0'))
+                if not 0<n<=2_000_000:raise ValueError('Template suggestion request too large or empty')
+                request=json.loads(self.rfile.read(n))
+                if not isinstance(request,dict):raise ValueError('Template suggestion request must be an object')
+                self.respond(json.dumps(suggested_templates(request.get('tags',[]),request.get('signals',[]),sparse=request.get('sparse') is True)).encode())
             except Exception as exc:
                 self.close_connection=True;self.respond(json.dumps({'error':str(exc)}).encode(),code=400)
             return
@@ -1308,10 +1403,6 @@ class Handler(BaseHTTPRequestHandler):
         try:
             n=int(self.headers.get('Content-Length','0'))
             if n<0 or n>MAX_UPLOAD:raise ValueError('Upload limit is 200 MB')
-            if path=='/api/suggest':
-                if n>2_000_000:raise ValueError('Template suggestion request too large')
-                request=json.loads(self.rfile.read(n))
-                self.respond(json.dumps(suggested_templates(request.get('tags',[]),request.get('signals',[]),sparse=request.get('sparse') is True)).encode());return
             if path=='/api/build':
                 if n>8_000_000:raise ValueError('Build request exceeds 8 MB')
                 payload=json.loads(self.rfile.read(n));validate_api_scan_state(payload);out=build(payload);self.respond(out,'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',filename='ABP_PreField_TAB.xlsx');return

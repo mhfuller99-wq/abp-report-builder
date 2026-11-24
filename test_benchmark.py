@@ -20,12 +20,96 @@ def example():
 
 
 class BenchmarkTests(unittest.TestCase):
+    def linked_image(self,review):
+        native=review['diffusers'][0]
+        image={'kind':'diffuser','status':'UNVERIFIED','include':False,'values':{},
+               'source':native['source'],'page':native['page'],'position':[101,100],
+               'position_coordinate_space':'displayed_pdf_points','type':native['type'],
+               'review_values':{'design_cfm':native['design_cfm']},
+               'native_reconciled':True,'native_outlet_match':True,'native_readings':[
+                   {'source':native['source'],'page':native['page'],'position':native['position']}]}
+        review['image_review'].append(image)
+        return image
+
+    def test_corroboration_counts_once_and_keeps_observation_indexes(self):
+        p,r=example();image=self.linked_image(r)
+        for values in ({'design_cfm':100},{}):
+            image['review_values']=values
+            result=evaluate(p,r)
+            self.assertTrue(result['candidate_checks_pass'],result['errors'])
+            self.assertEqual(result['outlet_counts'],{'expected':2,'actual':2,'matched':2})
+            self.assertEqual(result['outlet_observations'],{'total':3,'linked_to_native':[
+                {'image_candidate':2,'native_candidate':0}]})
+
+    def test_conflicting_or_accepted_image_stays_visible_after_linking(self):
+        p,r=example();image=self.linked_image(r)
+        for fields,code in [
+            ({'review_values':{'design_cfm':90}},'conflicting_outlet_observations'),
+            ({'review_values':{},'native_conflict_fields':['design_cfm']},'conflicting_outlet_observations'),
+            ({'include':True},'raw_outlet_auto_included'),
+            ({'accepted':True},'manually_accepted_raw_candidate'),
+            ({'values':{'design_cfm':100}},'image_outlet_auto_verified'),
+        ]:
+            changed=copy.deepcopy(r);changed['image_review'][0].update(fields)
+            result=evaluate(p,changed)
+            self.assertEqual(result['outlet_counts']['actual'],2)
+            self.assertIn(code,[e['code'] for e in result['errors']])
+        image.update(quantity_unresolved=True)
+        self.assertFalse(evaluate(p,r)['automatic_report_ready'])
+
+    def test_no_collapse_from_proximity_or_an_unsubstantiated_link(self):
+        p,r=example();self.linked_image(r)
+        for patch in ({'native_outlet_match':False},{'native_readings':[]},{'position':[108,100]},
+                      {'reference':'page 2'},{'page':2},{'source':'another.pdf'},
+                      {'native_outlet_ambiguous':True},{'coordinate_space':'unrotated_pdf_points'},
+                      {'native_readings':[{'source':'plan.pdf','page':1,'position':[99,100]}]}):
+            changed=copy.deepcopy(r);changed['image_review'][0].update(patch)
+            self.assertEqual(evaluate(p,changed)['outlet_counts']['actual'],3,patch)
+        r['image_review'].append(copy.deepcopy(r['image_review'][0]))
+        self.assertEqual(evaluate(p,r)['outlet_counts']['actual'],4)
+
+    def test_close_distinct_expected_or_ambiguous_native_outlets_are_preserved(self):
+        p,r=example();image=self.linked_image(r)
+        # One image is within 6 pt of the native anchor but also near a different
+        # independently located grille. The stored match cannot remove that row.
+        p['expected']['outlets'][1]['position']=[110,100]
+        r['diffusers'].pop();image['position']=[105,100]
+        self.assertEqual(evaluate(p,r)['outlet_counts']['actual'],2)
+        p,r=example();image=self.linked_image(r)
+        r['diffusers'][1]['position']=[104,100]
+        self.assertEqual(evaluate(p,r)['outlet_counts']['actual'],3)
+
+    def test_unknown_design_values_still_require_source_bound_equipment(self):
+        p,r=example();p['expected']['equipment'][0]['values']={}
+        r['records'][0]['candidates'][0]['values']={}
+        self.assertTrue(evaluate(p,r)['candidate_checks_pass'])
+        for mutate in (lambda r:r['records'].clear(),
+                       lambda r:r['records'][0]['candidates'].clear(),
+                       lambda r:r['records'][0]['candidates'][0].update(reference='page 99')):
+            changed=copy.deepcopy(r);mutate(changed)
+            self.assertIn('missing_equipment',[e['code'] for e in evaluate(p,changed)['errors']])
+
     def test_raw_candidate_pass_is_not_workbook_pass(self):
         p,r=example();result=evaluate(p,r)
         self.assertTrue(result['candidate_checks_pass']);self.assertFalse(result['workbook_verified'])
+    def test_manual_source_rows_cannot_be_counted_as_raw_extraction(self):
+        for key in ('records','diffusers'):
+            p,r=example();r[key][0]['review_history']=[{'kind':'manual_source_entry','note':'Source checked by reviewer'}]
+            self.assertIn('manual_source_entry_in_raw',[e['code'] for e in evaluate(p,r)['errors']])
     def test_same_total_wrong_physical_values_fails(self):
         p,r=example();r['diffusers'][0]['design_cfm'],r['diffusers'][1]['design_cfm']=200,100
         self.assertEqual(len(evaluate(p,r)['errors']),2)
+    def test_type_corner_and_airflow_center_share_only_a_bounded_annotation(self):
+        p,r=example();r['diffusers'][0].update(position=[95,80],evidence_box=[95,80,108,105])
+        self.assertTrue(evaluate(p,r)['candidate_checks_pass'])
+        for box in ([0,0,1200,1200],[95,80,108,98],[95,float('nan'),108,105]):
+            changed=copy.deepcopy(r);changed['diffusers'][0]['evidence_box']=box
+            self.assertFalse(evaluate(p,changed)['candidate_checks_pass'])
+        r['diffusers'][0]['type']='WRONG';self.assertFalse(evaluate(p,r)['candidate_checks_pass'])
+    def test_annotation_box_never_turns_one_candidate_into_two_physical_outlets(self):
+        p,r=example();p['expected']['outlets'][1]['position']=[102,100]
+        r['diffusers']=r['diffusers'][:1];r['diffusers'][0].update(position=[95,80],evidence_box=[95,80,108,105])
+        self.assertIn('shared_physical_candidate',[e['code'] for e in evaluate(p,r)['errors']])
     def test_missing_extra_duplicate_and_wrong_page_fail(self):
         for mutation in ('missing','extra','duplicate','page','coordinates'):
             p,r=example()

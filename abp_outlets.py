@@ -3,7 +3,8 @@ import math
 import re
 from collections import defaultdict
 
-MARK = re.compile(r'(?:[A-Z]|S[A-Z]|SD\d?)$')
+MARK = re.compile(r'(?:[A-Z]|S[A-Z]|SD\d?|S(?:AG|AD|AR|D)-\d{1,3}[A-Z]?)$')
+EXHAUST_MARK = re.compile(r'EAG-\d{1,3}[A-Z]?$')
 FLOW = re.compile(r'(?:\d{1,4}|\d{1,2},\d{3})$')
 # These ambiguous equipment families cannot be used as unclassified outlets.
 EQUIPMENT_MARKS = {'SF', 'EF', 'RF', 'PF', 'FS', 'UH', 'CU', 'AHU', 'RTU', 'FCU', 'MAU', 'MUA', 'DOAS'}
@@ -78,13 +79,15 @@ def numbered_supply_outlets(words, page_number, source):
             'evidence':f'{w[4]} / {n[4]} CFM; confirm supply service, neck, room, system and revision'})
     return result
 
-def centered_outlets(words, page_number, source, legend=None, *, plan_confirmed=False):
+def centered_outlets(words, page_number, source, legend=None, *, plan_confirmed=False, word_confidence=None, exhaust=False):
     """Read centered type-over-flow bubbles, including comma-formatted CFM.
 
     A single near number is insufficient. Require an isolated two-word native
     text block or a repeated, isolated callout grammar. Mutual uniqueness prevents
     assigning one flow to adjacent type marks. Coordinates remain PDF points.
     """
+    if len(words)>30000:return []
+    if exhaust and not any(EXHAUST_MARK.fullmatch(w[4]) for w in words):return []
     if not plan_confirmed and not plan_context(words):return []
     legend = legend or {}
     blocks = defaultdict(list); grid = defaultdict(list)
@@ -95,8 +98,9 @@ def centered_outlets(words, page_number, source, legend=None, *, plan_confirmed=
         x,y=int(w[0]//48),int(w[1]//48)
         return [i for dx in (-1,0,1) for dy in (-1,0,1) for i in grid.get((x+dx,y+dy),[])]
     pairs=[]; use=defaultdict(list)
+    pattern = EXHAUST_MARK if exhaust else MARK
     for i,w in enumerate(words):
-        if not MARK.fullmatch(w[4]) or w[4] in EQUIPMENT_MARKS:continue
+        if not pattern.fullmatch(w[4]) or w[4] in EQUIPMENT_MARKS:continue
         h=w[3]-w[1]
         if not 3<=h<=30:continue
         options=[]
@@ -115,17 +119,70 @@ def centered_outlets(words, page_number, source, legend=None, *, plan_confirmed=
                   and abs(words[k][1]-w[1])<h and abs(words[k][0]-w[0])<2*h for k in nearby(w))
         if prose:continue
         isolated=len(w)>5 and len(n)>5 and w[5]==n[5] and set(blocks[w[5]])=={i,j}
+        if exhaust:
+            if len(w)<6 or len(n)<6 or w[5]!=n[5]:continue
+            # CAD can group several adjacent callouts in one PDF text block.
+            # Require complete type/number pairs. A schedule or note is insufficient.
+            block=blocks[w[5]]
+            if len(block)>32 or len(block)%2 or not all(
+                    EXHAUST_MARK.fullmatch(words[block[k]][4]) and FLOW.fullmatch(words[block[k+1]][4])
+                    for k in range(0,len(block),2)):continue
+            if not any(block[k:k+2]==[i,j] for k in range(0,len(block),2)):continue
+            if any(re.fullmatch(r'(?:EACH|TYP(?:ICAL)?\.?|QTY|\d+[xX]|[xX]\d+|EXISTING|DEMO(?:LITION)?|LEGEND|EXAMPLE|SYMBOLS?|SCHEDULE|MAX(?:IMUM)?|ACTUAL|MEASURED)',words[k][4],re.I)
+                   and abs(words[k][1]-w[1])<4*h and abs(words[k][0]-w[0])<6*h for k in nearby(w)):continue
+            isolated=True
         pairs.append((i,j,isolated));use[j].append(i)
+    # A separate "2 EACH" line can apply to one type-over-CFM annotation.
+    # Keep one source candidate until a reviewer locates its physical outlets.
+    repeat_markers=defaultdict(list)
+    marker_uses=defaultdict(int)
+    if any(word[4].upper()=='EACH' for word in words):
+        for i,j,_ in pairs:
+            w=words[i]; h=w[3]-w[1]
+            near=nearby(w)
+            if len(near)>128:continue
+            for k in near:
+                each=words[k]
+                if each[4].upper()!='EACH' or not 0<=w[1]-each[3]<=1.5*h:continue
+                for m in near:
+                    number=words[m]
+                    if not re.fullmatch(r'(?:[2-9]|[1-9]\d|100)',number[4]):continue
+                    if not (0<=each[0]-number[2]<=.8*h and abs(number[1]-each[1])<=.25*h
+                            and abs((number[0]+each[2]-w[0]-w[2])/2)<=.7*h):continue
+                    extension=any(a not in (k,m) and abs(words[a][1]-each[1])<=.25*h
+                                  and (0<=words[a][0]-each[2]<=h or 0<=number[0]-words[a][2]<=h)
+                                  for a in near)
+                    if not extension:
+                        repeat_markers[i].append((m,k))
+                        marker_uses[m,k]+=1
     result=[]
     for i,j,isolated in pairs:
         if len(use[j])!=1 or not (isolated or len(pairs)>=3):continue
         w,n=words[i],words[j];size=legend.get(w[4],'')
+        if exhaust:
+            result.append({'native_exhaust_callout':True,'include':False,'type':w[4],'design_cfm':int(n[4].replace(',','')),
+                           'system':'','location':'','size':'','manual_locator':'','source':source,'reference':f'page {page_number}',
+                           'position':[round((w[0]+w[2])/2,2),round((w[1]+w[3])/2,2)],
+                           'evidence':f'{w[4]} above {n[4]} on the mechanical plan.',
+                           'quantity':1,'quantity_unresolved':False})
+            continue
         result.append({'include':False,'type':w[4],'size':size,'system':'','location':'',
                        'design_cfm':int(n[4].replace(',','')),'source':source,'reference':f'page {page_number}',
                        'position':[round(w[0],2),round(w[1],2)],
                        'evidence_box':[min(w[0],n[0]),w[1],max(w[2],n[2]),n[3]],
                        'evidence':f'{w[4]} / {n[4]}; centered type-over-airflow plan callout; confirm supply service, neck size, room, system and revision',
                        'shape':('rectangular' if 'x' in size.lower() else 'round') if size else 'unknown'})
+        markers=repeat_markers[i]
+        if markers:
+            item=result[-1]
+            item['quantity_unresolved']=True
+            m,k=markers[0]
+            if len(markers)==1 and marker_uses[m,k]==1 and (word_confidence is None or
+                    all((word_confidence[a] or 0)>=80 for a in (m,k,i,j))):
+                item['quantity']=int(words[m][4])
+                item['evidence']+=f"; {words[m][4]} EACH above callout; confirm each physical location"
+            else:
+                item['evidence']+='; verify repeated outlet count and locations on the drawing'
     return result
 
 def necked_outlets(words, page_number, source, *, plan_confirmed=False):
@@ -146,7 +203,7 @@ def necked_outlets(words, page_number, source, *, plan_confirmed=False):
                 and abs((a[0]+a[2]-b[0]-b[2])/2)<.45*h)
     pairs=[];used=defaultdict(int)
     for i,w in enumerate(words):
-        if not re.fullmatch(r'(?:CSD\d+|SD\d*|S[A-Z]|[A-Z])',w[4]) or w[4] in EQUIPMENT_MARKS:continue
+        if not (MARK.fullmatch(w[4]) or re.fullmatch(r'(?:CSD\d+|SD\d*)',w[4])) or w[4] in EQUIPMENT_MARKS:continue
         if not 3<=w[3]-w[1]<=30:continue
         neighbors=near(w)
         if any(re.search(r'\b(?:INDICATES|TYPICAL|SYMBOL|LEGEND)\b',words[k][4],re.I)
@@ -311,5 +368,24 @@ def distinct_outlets(items):
                        all(item.get(k)==old.get(k) for k in ('source','reference','type','design_cfm')) and
                        math.dist(p,old['position'])<4),None)
         if duplicate is None:result.append(item)
-        elif not duplicate.get('size') and item.get('size'):duplicate['size']=item['size'];duplicate['shape']=item['shape']
+        else:
+            if not duplicate.get('size') and item.get('size'):duplicate['size']=item['size'];duplicate['shape']=item['shape']
+            merge_outlet_quantity(duplicate,item)
     return result
+
+
+def merge_outlet_quantity(existing,incoming):
+    """A parser which misses a repeat marker cannot erase its quantity witness."""
+    if not any(row.get('quantity_unresolved') or row.get('quantity_candidates')
+               or type(row.get('quantity'))==int and row['quantity']>1
+               for row in (existing,incoming)):return
+    existing['quantity_unresolved']=True
+    counts=set()
+    for row in (existing,incoming):
+        for value in [row.get('quantity'),*(row.get('quantity_candidates') or [])]:
+            if type(value)==int and value>1:counts.add(value)
+    if len(counts)==1 and not existing.get('quantity_candidates') and not incoming.get('quantity_candidates'):
+        existing['quantity']=counts.pop()
+    elif counts:
+        existing.pop('quantity',None)
+        existing['quantity_candidates']=sorted(counts)
